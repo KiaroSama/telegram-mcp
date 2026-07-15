@@ -235,9 +235,8 @@ async def list_topics(
     """
     Retrieve forum topics from a supergroup with the forum feature enabled.
 
-    Note for LLM: Send into a topic by passing Topic ID as topic_id to send_file /
-    send_album / send_voice / send_sticker / send_gif, or as message_id to
-    reply_to_message for text.
+    Note for LLM: You can send a message to a selected topic via reply_to_message tool
+    by using Topic ID as the message_id parameter.
 
     Args:
         chat_id: The ID of the forum-enabled chat (supergroup).
@@ -637,52 +636,30 @@ async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
             record["bot"] = bool(entity.bot)
             record["verified"] = bool(entity.verified)
 
-        # Photo presence — the entity carries ChatPhoto/ChatPhotoEmpty (chats/channels)
-        # or UserProfilePhoto/UserProfilePhotoEmpty (users). Surfaced so callers can
-        # detect chats that have no avatar set.
-        photo = getattr(entity, "photo", None)
-        record["has_photo"] = photo is not None and not isinstance(
-            photo, (types.ChatPhotoEmpty, types.UserProfilePhotoEmpty)
-        )
-
-        # Get unread count + last activity for THIS specific peer.
-        #
-        # NOTE: do NOT use get_dialogs(limit=1, offset_peer=entity) here. In
-        # Telethon `offset_peer` is a pagination cursor, not a per-chat filter —
-        # with offset_id=0 it is effectively ignored, so limit=1 returns the
-        # account's top dialog and its unread/archived/last-message get wrongly
-        # attributed to the requested chat. GetPeerDialogsRequest resolves the
-        # dialog for exactly the requested peer instead.
+        # Get last activity if it's a dialog
         try:
-            input_peer = await cl.get_input_entity(entity)
-            peer_dialogs = await cl(
-                functions.messages.GetPeerDialogsRequest(
-                    peers=[types.InputDialogPeer(peer=input_peer)]
-                )
-            )
-            if getattr(peer_dialogs, "dialogs", None):
-                dialog = peer_dialogs.dialogs[0]
-                record["unread"] = getattr(dialog, "unread_count", 0)
-                # folder_id == 1 is the Archive folder (None/0 == main list)
-                record["archived"] = getattr(dialog, "folder_id", 0) == 1
-
-            last_messages = await cl.get_messages(entity, limit=1)
-            if last_messages:
-                last_msg = last_messages[0]
-                sender_name = "Unknown"
-                sender = getattr(last_msg, "sender", None)
-                if sender:
-                    sender_name = getattr(sender, "first_name", "") or getattr(
-                        sender, "title", "Unknown"
-                    )
-                    if getattr(sender, "last_name", None):
-                        sender_name += f" {sender.last_name}"
-                sender_name = sanitize_name(sender_name.strip() or "Unknown")
-                record["last_message"] = {
-                    "sender": sender_name,
-                    "date": last_msg.date,
-                    "text": sanitize_user_content(last_msg.message),
-                }
+            # Using get_dialogs might be slow if there are many dialogs
+            # Alternative: Get entity again via get_dialogs if needed for unread count
+            dialog = await cl.get_dialogs(limit=1, offset_id=0, offset_peer=entity)
+            if dialog:
+                dialog = dialog[0]
+                record["unread"] = dialog.unread_count
+                record["archived"] = bool(getattr(dialog, "archived", False))
+                if dialog.message:
+                    last_msg = dialog.message
+                    sender_name = "Unknown"
+                    if last_msg.sender:
+                        sender_name = getattr(last_msg.sender, "first_name", "") or getattr(
+                            last_msg.sender, "title", "Unknown"
+                        )
+                        if hasattr(last_msg.sender, "last_name") and last_msg.sender.last_name:
+                            sender_name += f" {last_msg.sender.last_name}"
+                    sender_name = sanitize_name(sender_name.strip() or "Unknown")
+                    record["last_message"] = {
+                        "sender": sender_name,
+                        "date": last_msg.date,
+                        "text": sanitize_user_content(last_msg.message),
+                    }
         except Exception as diag_ex:
             logger.warning(f"Could not get dialog info for {chat_id}: {diag_ex}")
 
@@ -744,35 +721,17 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
-
-        # Basic ("legacy") groups are not channels: GetFullChannelRequest cannot
-        # cast an InputPeerChat and raises TypeError. They are served by
-        # messages.GetFullChatRequest instead.
-        if isinstance(entity, (Chat, InputPeerChat)):
-            basic_id = getattr(entity, "chat_id", None) or getattr(entity, "id", None)
-            full = await cl(functions.messages.GetFullChatRequest(chat_id=basic_id))
-        else:
-            full = await cl(functions.channels.GetFullChannelRequest(channel=entity))
+        full = await cl(functions.channels.GetFullChannelRequest(channel=entity))
 
         chat = full.chats[0] if full.chats else None
         full_chat = full.full_chat
-
-        # Channels carry participants_count on the full object; basic groups only
-        # carry the member list, so count that instead.
-        participants_count = getattr(full_chat, "participants_count", None)
-        if participants_count is None:
-            members = getattr(getattr(full_chat, "participants", None), "participants", None)
-            if members is not None:
-                participants_count = len(members)
 
         result = {
             "id": get_marked_id(chat) if chat else None,
             "title": sanitize_name(getattr(chat, "title", None)) if chat else None,
             "username": getattr(chat, "username", None) if chat else None,
-            "about": sanitize_user_content(
-                getattr(full_chat, "about", None) or "", max_length=1024
-            ),
-            "participants_count": participants_count,
+            "about": sanitize_user_content(full_chat.about or "", max_length=1024),
+            "participants_count": getattr(full_chat, "participants_count", None),
             "linked_chat_id": getattr(full_chat, "linked_chat_id", None),
         }
 

@@ -10,7 +10,6 @@ async def send_file(
     chat_id: Union[int, str],
     file_path: Union[str, List[str]],
     caption: str = None,
-    topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -21,8 +20,6 @@ async def send_file(
         file_path: Absolute or relative path to the file under allowed roots.
             Pass a list of 2-10 paths to send them as one Telegram media group.
         caption: Optional caption for the file or media group.
-        topic_id: Optional forum topic ID (from list_topics). Sends into that topic
-            in a forum-enabled community/supergroup. Also works as reply_to for a message.
     """
     try:
         if isinstance(file_path, list):
@@ -30,7 +27,6 @@ async def send_file(
                 chat_id=chat_id,
                 file_paths=file_path,
                 caption=caption,
-                topic_id=topic_id,
                 ctx=ctx,
                 account=account,
             )
@@ -44,16 +40,11 @@ async def send_file(
         if path_error:
             return path_error
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, str(safe_path), caption=caption, reply_to=topic_id)
+        await cl.send_file(entity, str(safe_path), caption=caption)
         return f"File sent to chat {chat_id} from {safe_path}."
     except Exception as e:
         return log_and_format_error(
-            "send_file",
-            e,
-            chat_id=chat_id,
-            file_path=file_path,
-            caption=caption,
-            topic_id=topic_id,
+            "send_file", e, chat_id=chat_id, file_path=file_path, caption=caption
         )
 
 
@@ -61,7 +52,6 @@ async def _send_album(
     chat_id: Union[int, str],
     file_paths: List[str],
     caption: str = None,
-    topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -81,7 +71,7 @@ async def _send_album(
         safe_paths.append(str(safe_path))
 
     entity = await resolve_entity(chat_id, cl)
-    await cl.send_file(entity, safe_paths, caption=caption, reply_to=topic_id)
+    await cl.send_file(entity, safe_paths, caption=caption)
     return f"Album sent to chat {chat_id} with {len(safe_paths)} files."
 
 
@@ -94,7 +84,6 @@ async def send_album(
     chat_id: Union[int, str],
     file_paths: List[str],
     caption: str = None,
-    topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -105,8 +94,6 @@ async def send_album(
         chat_id: The chat ID or username.
         file_paths: 2-10 absolute or relative file paths under allowed roots.
         caption: Optional caption for the album. Telegram displays it on the first item.
-        topic_id: Optional forum topic ID (from list_topics). Sends into that topic
-            in a forum-enabled community/supergroup. Also works as reply_to for a message.
     """
     try:
         if not isinstance(file_paths, list):
@@ -115,18 +102,12 @@ async def send_album(
             chat_id=chat_id,
             file_paths=file_paths,
             caption=caption,
-            topic_id=topic_id,
             ctx=ctx,
             account=account,
         )
     except Exception as e:
         return log_and_format_error(
-            "send_album",
-            e,
-            chat_id=chat_id,
-            file_paths=file_paths,
-            caption=caption,
-            topic_id=topic_id,
+            "send_album", e, chat_id=chat_id, file_paths=file_paths, caption=caption
         )
 
 
@@ -202,7 +183,6 @@ async def download_media(
 async def send_voice(
     chat_id: Union[int, str],
     file_path: str,
-    topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -212,8 +192,6 @@ async def send_voice(
     Args:
         chat_id: The chat ID or username.
         file_path: Absolute or relative path under allowed roots to the OGG/OPUS file.
-        topic_id: Optional forum topic ID (from list_topics). Sends into that topic
-            in a forum-enabled community/supergroup. Also works as reply_to for a message.
     """
     try:
         cl = get_client(account)
@@ -237,12 +215,10 @@ async def send_voice(
             return "Voice file must be .ogg or .opus format."
 
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, str(safe_path), voice_note=True, reply_to=topic_id)
+        await cl.send_file(entity, str(safe_path), voice_note=True)
         return f"Voice message sent to chat {chat_id} from {safe_path}."
     except Exception as e:
-        return log_and_format_error(
-            "send_voice", e, chat_id=chat_id, file_path=file_path, topic_id=topic_id
-        )
+        return log_and_format_error("send_voice", e, chat_id=chat_id, file_path=file_path)
 
 
 @mcp.tool(
@@ -332,7 +308,6 @@ async def get_sticker_sets(account: str = None) -> str:
 async def send_sticker(
     chat_id: Union[int, str],
     file_path: str,
-    topic_id: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -342,8 +317,6 @@ async def send_sticker(
     Args:
         chat_id: The chat ID or username.
         file_path: Absolute or relative path under allowed roots to the .webp sticker file.
-        topic_id: Optional forum topic ID (from list_topics). Sends into that topic
-            in a forum-enabled community/supergroup. Also works as reply_to for a message.
     """
     try:
         cl = get_client(account)
@@ -356,12 +329,10 @@ async def send_sticker(
             return path_error
 
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, str(safe_path), force_document=False, reply_to=topic_id)
+        await cl.send_file(entity, str(safe_path), force_document=False)
         return f"Sticker sent to chat {chat_id} from {safe_path}."
     except Exception as e:
-        return log_and_format_error(
-            "send_sticker", e, chat_id=chat_id, file_path=file_path, topic_id=topic_id
-        )
+        return log_and_format_error("send_sticker", e, chat_id=chat_id, file_path=file_path)
 
 
 @mcp.tool(
@@ -428,32 +399,23 @@ async def get_gif_search(query: str, limit: int = 10, account: str = None) -> st
 @mcp.tool(annotations=ToolAnnotations(title="Send Gif", openWorldHint=True, destructiveHint=True))
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def send_gif(
-    chat_id: Union[int, str],
-    gif_id: int,
-    topic_id: Optional[int] = None,
-    account: str = None,
-) -> str:
+async def send_gif(chat_id: Union[int, str], gif_id: int, account: str = None) -> str:
     """
     Send a GIF to a chat by Telegram GIF document ID (not a file path).
 
     Args:
         chat_id: The chat ID or username.
         gif_id: Telegram document ID for the GIF (from get_gif_search).
-        topic_id: Optional forum topic ID (from list_topics). Sends into that topic
-            in a forum-enabled community/supergroup. Also works as reply_to for a message.
     """
     try:
         cl = get_client(account)
         if not isinstance(gif_id, int):
             return "gif_id must be a Telegram document ID (integer), not a file path. Use get_gif_search to find IDs."
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, gif_id, reply_to=topic_id)
+        await cl.send_file(entity, gif_id)
         return f"GIF sent to chat {chat_id}."
     except Exception as e:
-        return log_and_format_error(
-            "send_gif", e, chat_id=chat_id, gif_id=gif_id, topic_id=topic_id
-        )
+        return log_and_format_error("send_gif", e, chat_id=chat_id, gif_id=gif_id)
 
 
 __all__ = [

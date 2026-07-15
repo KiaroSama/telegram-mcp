@@ -199,5 +199,20 @@ test_upload.txt
 test_voice.ogg
 sticker.webp
 two.png
-aliases.json
-incoming_feed.jsonl
+
+# Local-only project tooling and generated context
+/.ai/
+/secrets.md
+/explain-AI.md
+/reference.md
+/CLAUDE.md
+/AGENTS.md
+/.agents/
+/.claude/
+/.kiro/
+/.codex/
+/.cursor/
+/.cline/
+/graphify-out/
+.ignoreme
+**/.ignoreme

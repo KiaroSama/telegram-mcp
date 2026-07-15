@@ -100,52 +100,17 @@ async def invite_to_group(
                 return f"Error: User with ID {user_id} could not be found. {e}"
 
         try:
-            if isinstance(entity, Channel):
-                # Supergroup or broadcast channel
-                result = await cl(
-                    functions.channels.InviteToChannelRequest(channel=entity, users=users_to_add)
-                )
+            result = await cl(
+                functions.channels.InviteToChannelRequest(channel=entity, users=users_to_add)
+            )
 
-                invited_count = 0
-                if hasattr(result, "users") and result.users:
-                    invited_count = len(result.users)
-                elif hasattr(result, "count"):
-                    invited_count = result.count
+            invited_count = 0
+            if hasattr(result, "users") and result.users:
+                invited_count = len(result.users)
+            elif hasattr(result, "count"):
+                invited_count = result.count
 
-                return (
-                    f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
-                )
-            else:
-                # Basic group (telethon Chat): channels.InviteToChannel cannot be used
-                # (it casts to InputChannel and fails). Add each user individually via
-                # messages.AddChatUser instead.
-                invited_count = 0
-                already = 0
-                failures = []
-                for user in users_to_add:
-                    try:
-                        await cl(
-                            functions.messages.AddChatUserRequest(
-                                chat_id=entity.id, user_id=user, fwd_limit=100
-                            )
-                        )
-                        invited_count += 1
-                    except telethon.errors.rpcerrorlist.UserAlreadyParticipantError:
-                        already += 1
-                    except (
-                        telethon.errors.rpcerrorlist.UserNotMutualContactError,
-                        telethon.errors.rpcerrorlist.UserPrivacyRestrictedError,
-                    ) as ue:
-                        failures.append(f"{getattr(user, 'id', user)}: {type(ue).__name__}")
-
-                msg = (
-                    f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
-                )
-                if already:
-                    msg += f" ({already} already a participant)"
-                if failures:
-                    msg += f" (failed: {'; '.join(failures)})"
-                return msg
+            return f"Successfully invited {invited_count} users to {sanitize_name(entity.title)}"
         except telethon.errors.rpcerrorlist.UserNotMutualContactError:
             return "Error: Cannot invite users who are not mutual contacts. Please ensure the users are in your contacts and have added you back."
         except telethon.errors.rpcerrorlist.UserPrivacyRestrictedError:
@@ -278,13 +243,12 @@ async def get_participants(
         cl = get_client(account)
         await ensure_connected(cl)
 
-        # iter_participants takes no `offset`, and its `limit` is not honoured
-        # for basic groups. Fetch through the page, then slice it out.
+        # Use iter_participants with offset to fetch only the needed slice,
+        # avoiding O(N) fetching on later pages.
         offset = (page - 1) * page_size
         participants = []
-        async for participant in cl.iter_participants(chat_id, limit=offset + page_size):
+        async for participant in cl.iter_participants(chat_id, limit=page_size, offset=offset):
             participants.append(participant)
-        participants = participants[offset : offset + page_size]
 
         if not participants:
             return format_tool_result([])
