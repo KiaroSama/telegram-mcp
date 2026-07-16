@@ -45,7 +45,7 @@ try {
     try {
         if ($logPath) {
             $pythonWrapper = @'
-import re, runpy, sys, threading
+import re, runpy, sys, threading, traceback
 
 ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 lock = threading.RLock()
@@ -77,11 +77,23 @@ class Tee:
 stdout, stderr = sys.stdout, sys.stderr
 sys.stdout, sys.stderr = Tee(stdout), Tee(stderr)
 sys.argv = [script, *args]
+exit_code = 0
 try:
     runpy.run_path(script, run_name="__main__")
+except KeyboardInterrupt:
+    pass
+except SystemExit as exc:
+    exit_code = exc.code if isinstance(exc.code, int) else 1
+    if exc.code is not None and not isinstance(exc.code, int):
+        print(exc.code, file=sys.stderr)
+except BaseException:
+    traceback.print_exc()
+    exit_code = 1
 finally:
-    sys.stdout, sys.stderr = stdout, stderr
-    log.close()
+    sys.stdout.flush()
+    sys.stderr.flush()
+if exit_code:
+    raise SystemExit(exit_code)
 '@
             & $uv.Path run python -c $pythonWrapper $logPath (Join-Path $PSScriptRoot 'main.py') @ServerArguments
         }
