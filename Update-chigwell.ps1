@@ -154,8 +154,15 @@ function Show-Actions {
         Write-Warning 'gh was not found; open GitHub Actions in the browser to inspect CI.'
         return
     }
+    # Without --repo, gh resolves to the upstream remote and reports its CI as
+    # if it were ours, hiding a red fork build behind a green upstream one.
+    $originUrl = & git remote get-url origin
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Could not resolve the origin remote URL.'
+    }
+
     Invoke-Checked -FilePath $gh.Path -Arguments @(
-        'run', 'list', '--branch', 'main', '--limit', '3'
+        'run', 'list', '--repo', $originUrl, '--branch', 'main', '--limit', '3'
     )
 }
 

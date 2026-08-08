@@ -37,6 +37,11 @@ foreach ($expected in @(
     }
 }
 
+# A gh query without --repo resolves to upstream and reports its CI as ours.
+if ($updaterText -notmatch "'run',\s*'list',\s*'--repo'") {
+    throw 'Show-Actions must scope gh run list to the origin repository with --repo.'
+}
+
 $logsDirectory = Join-Path $projectRoot 'logs'
 $before = @(Get-ChildItem -LiteralPath $logsDirectory -Filter 'Update-chigwell_*.log' -File -ErrorAction SilentlyContinue)
 $beforePaths = @($before | Select-Object -ExpandProperty FullName)
