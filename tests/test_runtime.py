@@ -1,3 +1,4 @@
+import asyncio
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,11 @@ def _synthetic_mcp():
     return server
 
 
+def test_shared_server_uses_stateless_http_transport():
+    """A service restart must not invalidate long-lived Streamable HTTP clients."""
+    assert runtime.mcp.settings.stateless_http is True
+
+
 def test_get_exposed_tools_mode_defaults_to_all(monkeypatch):
     monkeypatch.delenv("TELEGRAM_EXPOSED_TOOLS", raising=False)
 
@@ -77,6 +83,55 @@ def test_get_exposed_tools_mode_rejects_invalid_value(monkeypatch):
     assert "TELEGRAM_EXPOSED_TOOLS" in message
     assert "all" in message
     assert "read-only" in message
+
+
+def _synthetic_mcp_with_two_writes():
+    server = _synthetic_mcp()
+
+    @server.tool(annotations=ToolAnnotations(title="Send", destructiveHint=True))
+    def send_tool():
+        return "send"
+
+    return server
+
+
+def test_get_exposed_tools_mode_normalises_allowlist(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EXPOSED_TOOLS", " Read-Only+ send_tool , write_tool ")
+
+    assert runtime._get_exposed_tools_mode() == "read-only+send_tool,write_tool"
+
+
+def test_apply_exposed_tools_allowlist_keeps_named_write_tools():
+    server = _synthetic_mcp_with_two_writes()
+
+    removed = runtime._apply_exposed_tools_mode(server, "read-only+send_tool")
+
+    assert removed == ["write_tool"]
+    assert _tool_names(server) == {"read_tool", "send_tool"}
+
+
+def test_apply_exposed_tools_allowlist_rejects_unknown_tool():
+    server = _synthetic_mcp_with_two_writes()
+
+    with pytest.raises(SystemExit) as excinfo:
+        runtime._apply_exposed_tools_mode(server, "read-only+send_mesage")
+
+    assert "send_mesage" in str(excinfo.value)
+    assert _tool_names(server) == {"read_tool", "write_tool", "send_tool"}
+
+
+def test_get_exposed_tools_mode_rejects_allowlist_with_all():
+    with pytest.raises(SystemExit) as excinfo:
+        runtime._get_exposed_tools_mode("all+send_tool")
+
+    assert "read-only" in str(excinfo.value)
+
+
+def test_get_exposed_tools_mode_rejects_empty_allowlist():
+    with pytest.raises(SystemExit) as excinfo:
+        runtime._get_exposed_tools_mode("read-only+")
+
+    assert "at least one tool" in str(excinfo.value)
 
 
 def test_discover_accounts_supports_suffixed_and_default_sessions(monkeypatch):
@@ -374,6 +429,37 @@ async def test_ensure_connected_skips_recently_verified_client(monkeypatch):
     await runtime.ensure_connected(client)
 
     assert client.calls == ["is_connected"]
+
+
+class _HangingConnectClient(_ConnectivityClient):
+    async def connect(self):
+        self.calls.append("connect")
+        await asyncio.sleep(3600)
+
+
+class _DuplicatedKeyClient(_ConnectivityClient):
+    async def connect(self):
+        from telethon.errors import AuthKeyDuplicatedError
+
+        self.calls.append("connect")
+        raise AuthKeyDuplicatedError(request=None)
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_times_out_instead_of_hanging(monkeypatch):
+    client = _HangingConnectClient(connected=False, authorized=True)
+    monkeypatch.setattr(runtime, "_RECONNECT_TIMEOUT", 0.01)
+
+    with pytest.raises(RuntimeError, match="timed out"):
+        await runtime._force_reconnect(client)
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_reports_burned_session(monkeypatch):
+    client = _DuplicatedKeyClient(connected=False, authorized=True)
+
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        await runtime._force_reconnect(client)
 
 
 class _ResolvingClient:
@@ -840,6 +926,28 @@ def test_coerce_paths_from_list_roots_validation_error_recovers_bare_paths(tmp_p
     recovered = runtime._coerce_paths_from_list_roots_validation_error(exc_info.value)
     assert root_a.resolve() in recovered
     assert root_b.resolve() in recovered
+
+
+def test_coerce_paths_from_list_roots_validation_error_recovers_windows_paths():
+    """A Windows drive letter is reported as url_scheme, not url_parsing.
+
+    ``C:\\Users\\dev\\workspace`` gets far enough through pydantic's URL parsing
+    for the drive letter to be taken as the scheme, so validation fails with
+    ``url_scheme``. The path is hardcoded rather than derived from ``tmp_path``
+    so this case is exercised on POSIX CI as well as on Windows.
+    """
+    from pydantic import ValidationError
+    from mcp.types import ListRootsResult
+
+    windows_root = r"C:\Users\dev\workspace"
+
+    with pytest.raises(ValidationError) as exc_info:
+        ListRootsResult.model_validate({"roots": [{"uri": windows_root}]})
+
+    assert any(item.get("type") == "url_scheme" for item in exc_info.value.errors())
+
+    recovered = runtime._coerce_paths_from_list_roots_validation_error(exc_info.value)
+    assert recovered == [Path(windows_root).expanduser().resolve()]
 
 
 @pytest.mark.asyncio

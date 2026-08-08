@@ -2,6 +2,12 @@
 
 from telegram_mcp.runtime import *
 
+# Domain used to build message permalinks. Overridable because the default is a
+# single point of failure: on 2026-07-13 the .me registry put t.me on serverHold
+# over an OFAC listing and every t.me link on earth broke for about a day, while
+# telegram.me kept resolving. The domain has been ACTIVE again since 2026-07-14.
+LINK_DOMAIN = os.getenv("TELEGRAM_LINK_DOMAIN", "t.me")
+
 
 def get_media_label(msg) -> str:
     """Short label of attached media for a message, or "" if none.
@@ -159,6 +165,60 @@ def message_to_dict(msg) -> dict:
         fname = getattr(fwd, "from_name", None)
         if fname:
             finfo["from_name"] = sanitize_name(fname)
+
+        # from_name is set only when the original author hides their profile.
+        # For an ordinary channel forward the origin sits in fwd.from_id, and
+        # reading just from_name loses the attribution the Telegram UI shows as
+        # "Forwarded from …". Telethon's msg.forward wrapper resolves that peer
+        # from entities already present in the response — no extra API call.
+        fo = getattr(msg, "forward", None)
+        if fo is not None:
+            chat = getattr(fo, "chat", None)
+            if chat is not None:
+                title = getattr(chat, "title", None) or " ".join(
+                    x
+                    for x in (getattr(chat, "first_name", None), getattr(chat, "last_name", None))
+                    if x
+                )
+                if title:
+                    finfo["from_chat"] = sanitize_name(title)
+                uname = getattr(chat, "username", None)
+                if uname:
+                    finfo["from_username"] = uname
+            chat_id = getattr(fo, "chat_id", None)
+            if chat_id is not None:
+                finfo["from_chat_id"] = chat_id
+            sender = getattr(fo, "sender", None)
+            if sender is not None:
+                sname = " ".join(
+                    x
+                    for x in (
+                        getattr(sender, "first_name", None),
+                        getattr(sender, "last_name", None),
+                    )
+                    if x
+                )
+                if sname:
+                    finfo["from_user"] = sanitize_name(sname)
+
+        post_id = getattr(fwd, "channel_post", None)
+        if post_id is not None:
+            finfo["channel_post"] = post_id
+        author = getattr(fwd, "post_author", None)
+        if author:
+            finfo["post_author"] = sanitize_name(author)
+
+        # Canonical permalink, when the pieces are there: a public channel gives
+        # <domain>/<username>/<post>, a private one the <domain>/c/<id>/<post>
+        # form that only resolves for members.
+        if post_id is not None:
+            if finfo.get("from_username"):
+                finfo["post_link"] = f"https://{LINK_DOMAIN}/{finfo['from_username']}/{post_id}"
+            elif finfo.get("from_chat_id") is not None:
+                finfo["post_link"] = (
+                    f"https://{LINK_DOMAIN}/c/{abs(finfo['from_chat_id']) % 10**10}/{post_id}"
+                )
+
         d["forwarded"] = finfo or True
 
     via_bot_id = getattr(msg, "via_bot_id", None)
@@ -280,6 +340,54 @@ async def get_messages(
         )
 
 
+async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[int] = None):
+    """Send text as a server-parsed rich message. Returns a JSON result string."""
+    import random
+
+    if not await account_is_premium(cl):
+        return premium_required_result("send_message")
+    try:
+        await cl(
+            functions.messages.SendMessageRequest(
+                peer=entity,
+                message=text,
+                random_id=random.randint(0, 2**62),
+                reply_to=(
+                    types.InputReplyToMessage(reply_to_msg_id=reply_to) if reply_to else None
+                ),
+                rich_message=make_rich_input(parse_mode, text),
+            )
+        )
+    except telethon.errors.RPCError as e:
+        # Premium can lapse between the check above and the send — same refusal.
+        if is_premium_rpc_error(e):
+            return premium_required_result("send_message")
+        raise
+    return json.dumps({"sent": True, "rich": True}, ensure_ascii=False)
+
+
+async def _edit_rich(cl, entity, message_id: int, text: str, parse_mode: str):
+    """Edit a message with server-parsed rich content. Returns a JSON result string."""
+    if not await account_is_premium(cl):
+        return premium_required_result("edit_message")
+    try:
+        await cl(
+            functions.messages.EditMessageRequest(
+                peer=entity,
+                id=message_id,
+                message=text,
+                rich_message=make_rich_input(parse_mode, text),
+            )
+        )
+    except telethon.errors.RPCError as e:
+        if is_premium_rpc_error(e):
+            return premium_required_result("edit_message")
+        raise
+    return json.dumps(
+        {"sent": True, "rich": True, "edited_message_id": message_id}, ensure_ascii=False
+    )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Send Message", openWorldHint=True, destructiveHint=True)
 )
@@ -298,11 +406,19 @@ async def send_message(
         message: The message content to send.
         parse_mode: Optional formatting mode. Use 'html' for HTML tags (<b>, <i>, <code>, <pre>,
             <a href="...">), 'md' or 'markdown' for Markdown (**bold**, __italic__, `code`,
-            ```pre```), or omit for plain text (no formatting).
+            ```pre```), or omit for plain text. Use 'rich'/'rich_markdown' for full
+            server-side Markdown (tables, #headings, $formulas$, footnotes, collapsible
+            sections) or 'rich_html' for full HTML — rich modes REQUIRE Telegram Premium
+            on the account: without it nothing is sent and a structured
+            {"sent": false, "reason": "telegram_premium_required"} result tells you to
+            reformat and retry with 'md'/'html'. Premium is re-checked on every call
+            (it can expire or be bought at any time).
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+        if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
+            return await _send_rich(cl, entity, message, parse_mode.lower())
         await cl.send_message(entity, message, parse_mode=parse_mode)
         return "Message sent successfully."
     except Exception as e:
@@ -1072,15 +1188,36 @@ async def forward_messages(
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def edit_message(
-    chat_id: Union[int, str], message_id: int, new_text: str, account: str = None
+    chat_id: Union[int, str],
+    message_id: int,
+    new_text: str,
+    parse_mode: Optional[str] = None,
+    account: str = None,
 ) -> str:
     """
     Edit a message you sent.
+    Args:
+        chat_id: The ID or username of the chat.
+        message_id: The ID of the message to edit.
+        new_text: The replacement text.
+        parse_mode: Optional formatting mode — same values as send_message: 'md'/'markdown',
+            'html', or 'rich'/'rich_markdown'/'rich_html' for full server-side formatting
+            (tables, headings, formulas; REQUIRES Telegram Premium — without it nothing is
+            changed and a structured telegram_premium_required result is returned).
+            Omitting it keeps the previous behavior of this tool: Telethon's client
+            default (Markdown), so **bold** in existing edits still renders.
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        await cl.edit_message(entity, message_id, new_text)
+        if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
+            return await _edit_rich(cl, entity, message_id, new_text, parse_mode.lower())
+        # Only pass parse_mode when the caller set it: Telethon treats an explicit
+        # None as "disable parsing", while omitting the argument uses its default
+        # parser. Passing None unconditionally would turn previously formatted
+        # edits into literal text.
+        extra = {"parse_mode": parse_mode} if parse_mode is not None else {}
+        await cl.edit_message(entity, message_id, new_text, **extra)
         return f"Message {message_id} edited."
     except Exception as e:
         return log_and_format_error(
@@ -1314,13 +1451,16 @@ async def reply_to_message(
         chat_id: The chat ID or username.
         message_id: The message ID to reply to.
         text: The reply text.
-        parse_mode: Optional formatting mode. Use 'html' for HTML tags (<b>, <i>, <code>, <pre>,
-            <a href="...">), 'md' or 'markdown' for Markdown (**bold**, __italic__, `code`,
-            ```pre```), or omit for plain text (no formatting).
+        parse_mode: Optional formatting mode — same values as send_message: 'md'/'markdown',
+            'html', or 'rich'/'rich_markdown'/'rich_html' for full server-side formatting
+            (tables, headings, formulas; REQUIRES Telegram Premium — without it nothing is
+            sent and a structured telegram_premium_required result is returned).
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
+        if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
+            return await _send_rich(cl, entity, text, parse_mode.lower(), reply_to=message_id)
         await cl.send_message(entity, text, reply_to=message_id, parse_mode=parse_mode)
         return f"Replied to message {message_id} in chat {chat_id}."
     except Exception as e:
@@ -1542,6 +1682,9 @@ async def create_poll(
                 PollAnswer(text=TextWithEntities(text=option, entities=[]), option=bytes([i]))
                 for i, option in enumerate(options)
             ],
+            # Telethon 1.44 made `hash` a required argument on Poll. It caches
+            # server-side results, so a poll being created sends 0.
+            hash=0,
             multiple_choice=multiple_choice,
             quiz=quiz_mode,
             public_voters=public_votes,
