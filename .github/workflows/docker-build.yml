@@ -13,13 +13,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v4
 
       - name: Set up QEMU (for multi-platform builds)
-        uses: docker/setup-qemu-action@v4.2.0
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4.2.0
+        uses: docker/setup-buildx-action@v3
 
       - name: Build Docker image
         run: docker build --file Dockerfile --tag telegram-mcp:ci .
@@ -30,7 +30,7 @@ jobs:
     needs: docker_build
     steps:
       - name: Checkout code
-        uses: actions/checkout@v7.0.0
+        uses: actions/checkout@v4
 
       - name: Create dummy .env file
         run: |
