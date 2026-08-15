@@ -239,9 +239,11 @@ that asset on demand. The asset is a **gzipped Lottie (`.tgs`)**, not a video �
 live Telegram data — so it needs the same optional renderer as animated stickers; the format is
 decided from the file's magic bytes and reported as `asset_format`. It runs under its **own** byte
 limit — the sticker's size neither vetoes a small
-effect nor admits a large one. Telethon cannot stream a `VideoSize`, so the advertised effect size
-is checked before the transfer and the delivered bytes are checked again afterwards, with
-`MAX_FRAME_SOURCE_BYTES` as the hard ceiling either way. Those frames are the effect **on its own**: Telegram composites it over the
+effect nor admits a large one. The transfer itself is bounded: a thumbnail download is an ordinary
+file location carrying a thumb type, which is exactly what `download_media` builds internally, so
+`iter_download` can stream it and stop at the cap. The advertised size stays as a free early
+refusal — it can be absent or wrong, and then only the transfer limit is real —
+with `MAX_FRAME_SOURCE_BYTES` as the hard ceiling either way. Those frames are the effect **on its own**: Telegram composites it over the
 sticker in the chat, so the finished appearance is neither these frames nor the sticker alone.
 Every record is marked `"composite_fidelity": "asset-only"` and points at `get_telegram_frames`
 for the real composite.
@@ -249,9 +251,28 @@ for the real composite.
 ## Message-level effects
 
 Telegram's message effects are separate from a premium sticker's own effect, and one message can
-carry both. `inspect_message` reports the former under `message_effect` with its `effect_id`.
-Only the ID: resolving it to an animation needs a `messages.GetAvailableEffects` call, so the
-route is named rather than guessed — `get_telegram_frames` shows it actually playing.
+carry both. `inspect_message` reports the former under `message_effect` with its `effect_id`;
+**`get_message_effect`** turns that ID into the real assets.
+
+Telegram resolves effects only in bulk, through `messages.GetAvailableEffects`, which returns the
+whole catalogue — 697 effects and 894 documents on a live account. It is fetched once, served from
+memory for 30 minutes, and after that revalidated with the hash Telegram itself returned, so an
+agent inspecting many messages pays for one call rather than one per message.
+
+The tool takes an explicit rung on a cost ladder:
+
+| `asset` | Cost | What comes back |
+|---|---|---|
+| `metadata` (default) | no download | emoticon, Premium requirement, and every asset's id/format/size |
+| `icon` | ~1.5 KB | the static icon as one image |
+| `sticker` | tens of KB | frames of the preview sticker |
+| `animation` | tens of KB | frames of the effect animation itself |
+
+Most effects have **no animation document of their own** — 574 of 697 on a live account. For those
+Telegram's fallback is the preview sticker's own premium effect, the same `type="f"` asset
+described above, and the response says which route it took under `animation_source`. Every frame is
+marked `"composite_fidelity": "asset-only"`: a message can play a message effect and a premium
+sticker effect at once, so only `get_telegram_frames`, captured while it plays, shows the composite.
 
 ## Screenshots are never attributed to a message
 

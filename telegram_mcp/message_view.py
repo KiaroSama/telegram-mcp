@@ -565,9 +565,8 @@ def describe_message_effect(msg) -> Optional[dict[str, Any]]:
 
     Telegram's message effects are a separate feature from a premium sticker's
     own effect, and a message can carry both at once. ``Message.effect`` is only
-    an ID; resolving it to its animation needs a separate
-    ``messages.GetAvailableEffects`` call, so the ID and its provenance are
-    reported and the rendering route is named rather than guessed.
+    an ID; ``get_message_effect`` resolves it through ``messages.GetAvailableEffects``
+    on demand, so nothing here pays for a catalogue fetch just to report a number.
     """
     effect_id = getattr(msg, "effect", None)
     if not effect_id:
@@ -577,9 +576,9 @@ def describe_message_effect(msg) -> Optional[dict[str, Any]]:
         "kind": "message_effect",
         "note": (
             "A message-level animated effect, distinct from a premium sticker's own effect - a "
-            "message can carry both. Resolving the ID to its animation needs "
-            "messages.GetAvailableEffects; capture it with get_telegram_frames while Telegram "
-            "Desktop plays it."
+            "message can carry both. get_message_effect resolves this ID to its emoticon, icon "
+            "and animation; get_telegram_frames, captured while Telegram Desktop plays it, is "
+            "the only accurate view of the finished composite."
         ),
     }
 
@@ -589,8 +588,9 @@ def _describe_premium_effect(document) -> Optional[dict[str, Any]]:
 
     Telegram ships it as a ``VideoSize`` of type ``"f"`` in ``video_thumbs`` — a
     separate animation from the sticker's own, which is why a plain sticker
-    preview does not show it. Reported rather than rendered: playing it needs the
-    surrounding chat context, so ``get_telegram_frames`` is the accurate route.
+    preview does not show it. The asset itself can be sampled with
+    ``get_media_frames(premium_effect=True)``; the composite Telegram actually
+    draws over the sticker needs ``get_telegram_frames``.
     """
     for video_size in getattr(document, "video_thumbs", None) or []:
         if getattr(video_size, "type", None) != "f":
@@ -598,8 +598,10 @@ def _describe_premium_effect(document) -> Optional[dict[str, Any]]:
         effect: dict[str, Any] = {
             "kind": "premium_sticker_effect",
             "note": (
-                "This sticker carries a separate premium effect animation that no preview here "
-                "renders. Capture it with get_telegram_frames while Telegram Desktop plays it."
+                "This sticker carries a separate premium effect animation. Sample the asset "
+                "itself with get_media_frames(premium_effect=True) - that renders the effect "
+                "alone, not the composite Telegram draws over the sticker. For the finished "
+                "appearance capture get_telegram_frames while Telegram Desktop plays it."
             ),
         }
         for field, key in (("w", "width"), ("h", "height"), ("size", "bytes")):

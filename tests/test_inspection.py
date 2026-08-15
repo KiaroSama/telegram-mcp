@@ -297,7 +297,16 @@ def _effect_message(with_effect=True, effect_size=4096):
     video_thumbs = [SimpleNamespace(type="v", w=100, h=100, size=10)]
     if with_effect:
         video_thumbs.append(SimpleNamespace(type="f", w=512, h=512, size=effect_size))
-    document = SimpleNamespace(id=7, attributes=[], thumbs=[], video_thumbs=video_thumbs)
+    # A real Document always carries the pair that authorises a download; without
+    # them the fake cannot exercise the streaming path at all.
+    document = SimpleNamespace(
+        id=7,
+        access_hash=11,
+        file_reference=b"ref",
+        attributes=[],
+        thumbs=[],
+        video_thumbs=video_thumbs,
+    )
     return SimpleNamespace(id=99, media=object(), document=document, sticker=document, file=None)
 
 
@@ -397,18 +406,67 @@ async def test_oversized_effect_is_refused_before_the_transfer():
 
 
 @pytest.mark.asyncio
-async def test_an_unadvertised_oversized_effect_is_caught_after_the_transfer():
-    """Telethon cannot stream a VideoSize, so the delivered bytes are re-checked."""
+async def test_an_unadvertised_oversized_effect_is_stopped_mid_transfer():
+    """No advertised size means the transfer itself is the only real limit.
+
+    A VideoSize *can* be streamed - it is an ordinary file location carrying a
+    thumb type - so the bytes are cut off at the cap instead of being buffered in
+    full and measured afterwards.
+    """
     from telegram_mcp.tools.inspection import _premium_effect_frames
 
-    message = _effect_message(effect_size=None)
-    client = _EffectClient(payload=b"x" * 5000)
+    delivered = 0
+
+    class _StreamingClient:
+        def iter_download(self, target):
+            class Chunks:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    nonlocal delivered
+                    if delivered >= 5000:
+                        raise StopAsyncIteration
+                    delivered += 500
+                    return b"x" * 500
+
+                async def close(self):
+                    pass
+
+            return Chunks()
 
     result = await _premium_effect_frames(
-        client, message, _EFFECT_DETAILS, count=2, max_dimension=64, max_bytes=1000
+        _StreamingClient(),
+        _effect_message(effect_size=None),
+        _EFFECT_DETAILS,
+        count=2,
+        max_dimension=64,
+        max_bytes=1000,
     )
 
-    assert isinstance(result, str) and "turned out to be 5000 bytes" in result
+    assert isinstance(result, str)
+    assert "larger than the 1000-byte limit" in result
+    assert "advertised size was absent" in result
+    assert delivered <= 1500, f"{delivered} bytes were pulled past a 1000-byte cap"
+
+
+@pytest.mark.asyncio
+async def test_legacy_telethon_still_re_checks_the_delivered_effect_bytes():
+    """Without iter_download there is no way to abort, so the result is measured."""
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    client = _EffectClient(payload=b"x" * 5000)  # no iter_download attribute
+
+    result = await _premium_effect_frames(
+        client,
+        _effect_message(effect_size=None),
+        _EFFECT_DETAILS,
+        count=2,
+        max_dimension=64,
+        max_bytes=1000,
+    )
+
+    assert isinstance(result, str) and "larger than the 1000-byte limit" in result
 
 
 @pytest.mark.asyncio

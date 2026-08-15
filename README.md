@@ -629,7 +629,7 @@ real Telegram Desktop rendering as an image.
 | | Tools |
 |---|---|
 | Structured | `inspect_message`, `inspect_messages`, `get_media_details` |
-| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji` |
+| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect` |
 | Visual (Windows) | `list_telegram_windows`, `get_telegram_screen`, `get_telegram_region`, `get_telegram_frames` |
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool

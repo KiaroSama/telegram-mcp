@@ -23,6 +23,7 @@ from telegram_mcp.visual.images import (
 )
 
 from mcp.server.fastmcp import Image
+from telethon.tl.types import InputDocumentFileLocation
 
 # Fallbacks for media whose Telethon-reported extension is empty; ``mimetypes``
 # does not know Telegram's own sticker types.
@@ -92,28 +93,18 @@ def _media_suffix(details: dict) -> str:
     return _MIME_SUFFIXES.get((details.get("mime_type") or "").lower(), ".bin")
 
 
-async def _download_capped(cl, msg, max_bytes: int) -> tuple:
-    """Download a message's media, aborting once ``max_bytes`` have arrived.
+async def _stream_capped(cl, target, max_bytes: int) -> tuple:
+    """Stream anything ``iter_download`` accepts, aborting past ``max_bytes``.
 
-    Returns ``(data, over_cap)``. Telegram does not always advertise a file size,
-    and without a cap on the transfer itself an unannounced 2 GB video is pulled
-    in full before anyone can object. ``iter_download`` stops at the first chunk
-    over the limit. The bytes still land in memory because the frame extractor
-    takes bytes — but never more than ``max_bytes`` plus the chunk that crossed
-    it (Telethon's chunks are at most 1 MiB), and that buffer is then dropped.
+    Returns ``(data, over_cap)``. Telegram does not always advertise a size, and
+    without a cap on the transfer itself an unannounced 2 GB file is pulled in
+    full before anyone can object. This stops at the first chunk over the limit.
+    The bytes still land in memory because the frame extractor takes bytes — but
+    never more than ``max_bytes`` plus the chunk that crossed it (Telethon's
+    chunks are at most 1 MiB), and that buffer is then dropped.
     """
-    iter_download = getattr(cl, "iter_download", None)
-    if iter_download is None:  # older Telethon: no partial fetch, keep it working
-        data = await cl.download_media(msg, file=bytes)
-        return data, bool(data) and len(data) > max_bytes
-
     buffer = bytearray()
-    # download_media() unwraps a link preview to the photo/document inside it;
-    # iter_download() does not, and get_input_location cannot cast a
-    # MessageMediaWebPage. Message.document/.photo already do that unwrapping,
-    # and for ordinary media they resolve to the identical InputFileLocation.
-    media = getattr(msg, "document", None) or getattr(msg, "photo", None) or msg.media
-    chunks = iter_download(media)
+    chunks = cl.iter_download(target)
     try:
         async for chunk in chunks:
             buffer += chunk
@@ -126,6 +117,43 @@ async def _download_capped(cl, msg, max_bytes: int) -> tuple:
         if close is not None:
             await close()
     return bytes(buffer), False
+
+
+async def _download_capped(cl, msg, max_bytes: int) -> tuple:
+    """A message's media, with the transfer itself bounded by ``max_bytes``."""
+    if getattr(cl, "iter_download", None) is None:  # older Telethon: no partial fetch
+        data = await cl.download_media(msg, file=bytes)
+        return data, bool(data) and len(data) > max_bytes
+
+    # download_media() unwraps a link preview to the photo/document inside it;
+    # iter_download() does not, and get_input_location cannot cast a
+    # MessageMediaWebPage. Message.document/.photo already do that unwrapping,
+    # and for ordinary media they resolve to the identical InputFileLocation.
+    media = getattr(msg, "document", None) or getattr(msg, "photo", None) or msg.media
+    return await _stream_capped(cl, media, max_bytes)
+
+
+async def _download_thumb_capped(cl, document, video_size, max_bytes: int) -> tuple:
+    """One of a document's thumbnails, with the transfer bounded.
+
+    ``iter_download`` takes no ``thumb`` argument, which used to be read here as
+    "a VideoSize cannot be streamed" — so the effect asset was pulled whole with
+    ``download_media`` and only measured afterwards. It can be streamed: a thumb
+    download is an ordinary file location carrying a ``thumb_size``, which is
+    exactly what ``download_media`` builds internally before handing it to the
+    same downloader. Building it here bounds the transfer instead of the result.
+    """
+    if getattr(cl, "iter_download", None) is None:  # older Telethon: no partial fetch
+        data = await cl.download_media(document, file=bytes, thumb=video_size)
+        return data, bool(data) and len(data) > max_bytes
+
+    location = InputDocumentFileLocation(
+        id=document.id,
+        access_hash=document.access_hash,
+        file_reference=document.file_reference,
+        thumb_size=getattr(video_size, "type", ""),
+    )
+    return await _stream_capped(cl, location, max_bytes)
 
 
 def _encode_one(raw: bytes, max_dimension: int) -> tuple:
@@ -474,9 +502,8 @@ async def _premium_effect_frames(
         return "The premium effect was reported but its asset is missing from this document."
 
     # The effect asset carries its own size; the sticker's size says nothing about
-    # it. Telethon's iter_download cannot target a VideoSize, so the transfer is
-    # not streamed: the advertised size is checked first and the delivered bytes
-    # are checked again afterwards.
+    # it. The advertised figure is a free early refusal, not the limit that counts:
+    # it can be absent or wrong, so the transfer itself is bounded below.
     limit = min(max_bytes, MAX_FRAME_SOURCE_BYTES)
     advertised = getattr(effect, "size", None)
     if advertised is not None and advertised > limit:
@@ -485,15 +512,16 @@ async def _premium_effect_frames(
             f"(hard ceiling {MAX_FRAME_SOURCE_BYTES}). Raise max_bytes up to that ceiling."
         )
 
-    raw = await cl.download_media(document, file=bytes, thumb=effect)
-    if not raw:
-        return "Telegram returned no data for the premium effect asset."
-    if len(raw) > limit:
+    raw, over_cap = await _download_thumb_capped(cl, document, effect, limit)
+    if over_cap:
         return (
-            f"The premium effect asset turned out to be {len(raw)} bytes, above the "
-            f"{limit}-byte limit (its size was not advertised before the transfer). "
+            f"The premium effect asset is larger than the {limit}-byte limit. The transfer was "
+            f"aborted once it crossed that, so the rest was never fetched — its advertised size "
+            f"was {'absent' if advertised is None else f'{advertised} bytes, which was wrong'}. "
             f"Raise max_bytes up to the {MAX_FRAME_SOURCE_BYTES}-byte ceiling."
         )
+    if not raw:
+        return "Telegram returned no data for the premium effect asset."
 
     # Verified against live Telegram data: the type="f" asset is a gzipped Lottie
     # (.tgs), the same format as an animated sticker — not a WebM video, which is

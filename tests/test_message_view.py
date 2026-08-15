@@ -445,7 +445,7 @@ def test_display_name_leaves_text_at_the_bound_untruncated():
 
 
 def test_premium_sticker_effect_is_reported_when_present():
-    """Telegram ships it as a VideoSize of type "f"; no preview here renders it."""
+    """A VideoSize of type "f" — get_media_frames(premium_effect=True) samples it."""
     document = SimpleNamespace(
         id=1,
         attributes=[],
@@ -1021,7 +1021,10 @@ def test_a_message_level_effect_is_reported_separately_from_the_sticker_one():
     assert effect["effect_id"] == 5104841245755180586
     assert effect["kind"] == "message_effect"
     assert "distinct from a premium sticker" in effect["note"]
-    assert "GetAvailableEffects" in effect["note"]
+    # The ID used to be a dead end pointing at a raw API call; it now names the
+    # tool that resolves it, and still defers the composite to the capture route.
+    assert "get_message_effect" in effect["note"]
+    assert "get_telegram_frames" in effect["note"]
 
 
 def test_no_message_effect_key_without_one():
