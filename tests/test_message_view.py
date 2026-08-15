@@ -960,3 +960,69 @@ def test_the_rgi_set_is_the_documented_policy():
     from telegram_mcp.message_view import _RGI_TAG_SPECS
 
     assert _RGI_TAG_SPECS == {"gbeng", "gbsct", "gbwls"}
+
+
+# --- UAX #29 segmentation ----------------------------------------------------
+
+SKIN_TONE = "\U0001f44d\U0001f3fd"  # Sk modifier, missed by the old scan
+PROFESSION = "\U0001f469\U0001f3fb\u200d\U0001f4bb"  # base + tone + ZWJ + object
+HANGUL = "\u1100\u1161\u11a8"
+DEVANAGARI = "\u0915\u094d\u0937"
+
+
+@pytest.mark.parametrize(
+    "label, sequence",
+    [
+        ("emoji modifier", SKIN_TONE),
+        ("modifier inside a ZWJ sequence", PROFESSION),
+        ("hangul jamo", HANGUL),
+        ("indic conjunct", DEVANAGARI),
+        ("zwj family", FAMILY),
+        ("regional flag", REGIONAL_PAIR),
+        ("subdivision flag", SCOTLAND),
+        ("persian zwnj pair", ZWNJ_PAIR),
+    ],
+)
+def test_every_grapheme_cluster_is_kept_whole_or_dropped(label, sequence):
+    """The hand-rolled scan missed emoji modifiers, Hangul and Indic conjuncts."""
+    prefix = "y" * 30
+    text = prefix + sequence
+
+    for bound in range(len(prefix), len(text) + 2):
+        result = display_name(text, max_length=bound)
+        body = result[:-1] if result.endswith("…") else result
+        tail = body[len(prefix) :] if body.startswith(prefix) else body.lstrip("y")
+
+        assert len(result) <= bound
+        assert tail in ("", sequence), f"{label} @ {bound}: fragment {tail!r}"
+
+
+def test_segmentation_uses_the_unicode_algorithm():
+    """A heuristic keeps missing categories; the standard does not."""
+    from telegram_mcp.message_view import _sequence_starts
+
+    assert _sequence_starts(SKIN_TONE) == [0], "the skin-tone modifier was split off"
+    assert _sequence_starts(PROFESSION) == [0]
+    assert _sequence_starts(HANGUL) == [0]
+    assert _sequence_starts(DEVANAGARI) == [0]
+    # The one documented addition on top of UAX #29.
+    assert _sequence_starts(ZWNJ_PAIR) == [0], "the ZWNJ bond was split"
+
+
+# --- Message-level effects ---------------------------------------------------
+
+
+def test_a_message_level_effect_is_reported_separately_from_the_sticker_one():
+    """Telegram can play both at once; the structured view must show both."""
+    msg = _plain_message(effect=5104841245755180586)
+
+    effect = _deep(msg)["message_effect"]
+
+    assert effect["effect_id"] == 5104841245755180586
+    assert effect["kind"] == "message_effect"
+    assert "distinct from a premium sticker" in effect["note"]
+    assert "GetAvailableEffects" in effect["note"]
+
+
+def test_no_message_effect_key_without_one():
+    assert "message_effect" not in _deep(_plain_message())

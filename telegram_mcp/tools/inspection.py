@@ -495,11 +495,16 @@ async def _premium_effect_frames(
             f"Raise max_bytes up to the {MAX_FRAME_SOURCE_BYTES}-byte ceiling."
         )
 
-    # The effect asset is a WebM animation; ffmpeg reads it the same as any video.
-    records, images = await asyncio.to_thread(_encode_frames, raw, ".webm", count, max_dimension)
+    # Verified against live Telegram data: the type="f" asset is a gzipped Lottie
+    # (.tgs), the same format as an animated sticker — not a WebM video, which is
+    # what this used to assume. Decide from the magic bytes so a future format
+    # change is not silently handed to the wrong decoder.
+    suffix = ".tgs" if raw[:2] == b"\x1f\x8b" else ".webm"
+    records, images = await asyncio.to_thread(_encode_frames, raw, suffix, count, max_dimension)
     for record in records:
         record["source_asset"] = "premium_effect"
         record["composite_fidelity"] = "asset-only"
+        record["asset_format"] = "lottie_tgs" if suffix == ".tgs" else "video"
     return [
         format_tool_result(
             records,
@@ -580,13 +585,16 @@ async def get_media_frames(
                 "Use get_media_details to see what this message holds."
             )
 
+        # Clamp first so the effect path sees the same bounded value as ordinary
+        # media: 0, a negative number and an absurd number must all behave alike.
+        max_bytes = max(1, min(int(max_bytes), MAX_FRAME_SOURCE_BYTES))
+
         if premium_effect:
             # Before the sticker's size gate: the effect is a separate asset, so a
             # large sticker must not veto a small effect (or vice versa).
             return await _premium_effect_frames(cl, msg, details, count, max_dimension, max_bytes)
 
         size_bytes = details.get("size_bytes") or 0
-        max_bytes = max(1, min(int(max_bytes), MAX_FRAME_SOURCE_BYTES))
         if size_bytes > max_bytes:
             return (
                 f"This media is {size_bytes} bytes, above the {max_bytes}-byte limit for "

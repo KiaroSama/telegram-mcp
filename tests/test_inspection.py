@@ -313,10 +313,12 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
     class _Client:
         async def download_media(self, document, file=None, thumb=None):
             assert thumb is not None and thumb.type == "f", "the effect asset was not requested"
-            return b"webm-bytes"
+            return bytes([0x1F, 0x8B]) + b"lottie-payload"
 
     async def _fake_frames(fn, raw, suffix, count, max_dimension):
-        assert suffix == ".webm"
+        # Verified against live Telegram data: the type="f" asset is a gzipped
+        # Lottie, so asserting .webm here is what locked the bug in.
+        assert suffix == ".tgs", f"the effect was decoded as {suffix}, not Lottie"
         return [{"frame_index": 0}], ["image"]
 
     import telegram_mcp.tools.inspection as inspection
@@ -465,3 +467,82 @@ def test_the_sticker_size_gate_runs_after_the_effect_branch():
     effect_branch = source.index("if premium_effect:")
     sticker_gate = source.index('size_bytes = details.get("size_bytes")')
     assert effect_branch < sticker_gate, "the sticker's own size still gates the effect"
+
+
+# --- The premium effect is a Lottie, not a video -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_gzipped_effect_asset_is_decoded_as_lottie():
+    """Live Telegram data: VideoSize type="f" carries a .tgs, not a WebM."""
+    import json
+
+    import telegram_mcp.tools.inspection as inspection
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    seen = {}
+
+    async def _fake(fn, raw, suffix, count, max_dimension):
+        seen["suffix"] = suffix
+        return [{"frame_index": 0}], ["image"]
+
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
+    try:
+        result = await _premium_effect_frames(
+            _EffectClient(payload=b"\x1f\x8b\x08gzipped-lottie"),
+            _effect_message(effect_size=64),
+            _EFFECT_DETAILS,
+            count=2,
+            max_dimension=64,
+            max_bytes=1024,
+        )
+    finally:
+        inspection.asyncio.to_thread = original
+
+    assert seen["suffix"] == ".tgs"
+    assert json.loads(result[0])["results"][0]["asset_format"] == "lottie_tgs"
+
+
+@pytest.mark.asyncio
+async def test_a_non_gzip_effect_asset_still_falls_back_to_video():
+    """Trust the bytes: a future format change must not be decoded as Lottie."""
+    import json
+
+    import telegram_mcp.tools.inspection as inspection
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    seen = {}
+
+    async def _fake(fn, raw, suffix, count, max_dimension):
+        seen["suffix"] = suffix
+        return [{"frame_index": 0}], ["image"]
+
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
+    try:
+        result = await _premium_effect_frames(
+            _EffectClient(payload=b"\x1aE\xdf\xa3webm"),
+            _effect_message(effect_size=64),
+            _EFFECT_DETAILS,
+            count=2,
+            max_dimension=64,
+            max_bytes=1024,
+        )
+    finally:
+        inspection.asyncio.to_thread = original
+
+    assert seen["suffix"] == ".webm"
+    assert json.loads(result[0])["results"][0]["asset_format"] == "video"
+
+
+def test_max_bytes_is_clamped_before_the_effect_branch():
+    """0 and negatives must behave the same on both media paths."""
+    import inspect as _inspect
+
+    from telegram_mcp.tools import inspection
+
+    source = _inspect.getsource(inspection.get_media_frames)
+    clamp = source.index("max_bytes = max(1, min(")
+    branch = source.index("if premium_effect:")
+    assert clamp < branch, "the effect path still receives the raw max_bytes"

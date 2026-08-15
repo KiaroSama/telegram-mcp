@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import re
 import unicodedata
+
+import regex
 from typing import Any, Optional
 
 from sanitize import sanitize_name, sanitize_user_content
@@ -70,11 +72,11 @@ def _is_unsafe_char(char: str) -> bool:
 
 # Emoji tag sequences, per UTS #51 ED-14a:
 #     emoji_tag_sequence := tag_base tag_spec tag_end
-# tag_base is the black flag, tag_spec is 1-6 tag characters drawn from the digits
-# and lowercase letters, tag_end is TAG CANCEL. That spells a subdivision flag such
-# as the Scottish 🏴󠁧󠁢󠁳󠁣󠁴󠁿. Anywhere else a tag character is invisible, so it is a place to
-# hide text. Validating only "some supplementary character came first" let a tag run
-# hide behind any CJK ideograph or unrelated emoji.
+# tag_base is the black flag and tag_end is TAG CANCEL. UTS #51 defines tag_spec
+# broadly and leaves which sequences are actually valid to Annex C / CLDR, so
+# syntax alone proves nothing: "us01" is well formed and is not a subdivision.
+# The bounds are enforced below, then membership of the RGI set. Anywhere else a
+# tag character is invisible, which makes it a place to hide text.
 _TAG_BASE = "\U0001f3f4"
 _TAG_END = "\U000e007f"
 # UTS #51 well-formedness: tag_spec is one or more characters from U+E0020..U+E007E
@@ -174,41 +176,27 @@ _ZWNJ = "‌"
 _JOINERS = (_ZWJ, _ZWNJ)
 
 
-def _is_regional_indicator(char: str) -> bool:
-    return 0x1F1E6 <= ord(char) <= 0x1F1FF
-
-
 def _sequence_starts(text: str) -> list[int]:
     """Indices where a new user-perceived sequence begins.
 
-    Checking only the character before the cut is not enough: a cut landing
-    immediately *before* a ZWJ leaves a complete-looking 👨 that is really the
-    first third of 👨‍👩‍👧, and a cut before a ZWNJ splits a Persian word. Both
-    sides of every boundary have to agree, which is what this scan produces.
-    """
-    starts: list[int] = []
-    regional_run = 0
-    for index, char in enumerate(text):
-        if index == 0:
-            starts.append(0)
-            regional_run = 1 if _is_regional_indicator(char) else 0
-            continue
+    UAX #29 extended grapheme clusters via ``regex``'s ``\X``, which is the only
+    way to get this right: a hand-rolled scan kept missing whole categories — emoji
+    modifiers (``👍🏽`` is one character, and the skin tone is ``Sk``), Hangul jamo,
+    Indic conjuncts.
 
-        previous = text[index - 1]
-        continues = (
-            unicodedata.category(char) in ("Mn", "Mc", "Me")
-            or ord(char) in _VARIATION_SELECTORS
-            or _is_tag_char(char)
-            or char in _JOINERS
-            or previous in _JOINERS  # whatever a joiner joins binds to it
-            or (_is_regional_indicator(char) and regional_run == 1)
-        )
-        if _is_regional_indicator(char):
-            regional_run = 0 if regional_run == 1 else 1
-        else:
-            regional_run = 0
-        if not continues:
-            starts.append(index)
+    One documented addition on top of the standard: UAX #29 attaches a ZWNJ to the
+    cluster before it but starts a new cluster after it, so ``می‌کند`` would still be
+    splittable at the joiner. Telegram displays that as one word, so a cluster
+    ending in ZWNJ is merged with the next.
+    """
+    clusters = regex.findall(r"\X", text)
+    starts: list[int] = []
+    position = 0
+    for cluster in clusters:
+        # Merge across a ZWNJ: the joiner binds both sides for display purposes.
+        if not (position and text[position - 1] == _ZWNJ):
+            starts.append(position)
+        position += len(cluster)
     return starts
 
 
@@ -572,6 +560,30 @@ def describe_media_label(msg) -> Optional[str]:
     return label
 
 
+def describe_message_effect(msg) -> Optional[dict[str, Any]]:
+    """The message-level animated effect, when the sender attached one.
+
+    Telegram's message effects are a separate feature from a premium sticker's
+    own effect, and a message can carry both at once. ``Message.effect`` is only
+    an ID; resolving it to its animation needs a separate
+    ``messages.GetAvailableEffects`` call, so the ID and its provenance are
+    reported and the rendering route is named rather than guessed.
+    """
+    effect_id = getattr(msg, "effect", None)
+    if not effect_id:
+        return None
+    return {
+        "effect_id": effect_id,
+        "kind": "message_effect",
+        "note": (
+            "A message-level animated effect, distinct from a premium sticker's own effect - a "
+            "message can carry both. Resolving the ID to its animation needs "
+            "messages.GetAvailableEffects; capture it with get_telegram_frames while Telegram "
+            "Desktop plays it."
+        ),
+    }
+
+
 def _describe_premium_effect(document) -> Optional[dict[str, Any]]:
     """The extra animation a premium sticker plays on top of itself, if any.
 
@@ -824,6 +836,10 @@ def deep_message_dict(
     topic = describe_topic(msg)
     if topic:
         data["topic"] = topic
+
+    message_effect = describe_message_effect(msg)
+    if message_effect:
+        data["message_effect"] = message_effect
 
     permalink = message_permalink(msg, chat=chat, link_domain=link_domain)
     if permalink:

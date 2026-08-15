@@ -25,6 +25,7 @@ like. Use both together.
 | Need | For |
 |---|---|
 | Pillow | All image tools (declared dependency, installed with the server) |
+| regex | UAX #29 grapheme clusters for safe truncation (declared dependency) |
 | ffmpeg on `PATH` | `get_media_frames` for video/webm media only — optional |
 | `telegram-mcp[lottie]` | Rendering `.tgs` Lottie stickers and custom emoji — optional |
 | Windows + running Telegram Desktop | The four `*_telegram_*` capture tools, and `inspect_message(include_screen=True)` |
@@ -212,12 +213,13 @@ narrower than the syntax allows:** a sequence like `us01` is perfectly well form
 subdivision, so it renders as nothing and is therefore only useful for hiding text. Extend
 `_RGI_TAG_SPECS` in `message_view.py` when Unicode adds a sequence.
 
-Truncation is sequence-aware on **both** sides of the cut, so the result contains whole sequences
-only. A ZWJ family emoji, a variation-selector sequence, a base plus its combining marks, a
-ZWNJ-joined Persian pair, a regional-indicator flag and a subdivision flag are each either kept
-entire or dropped entire — never a prefix fragment. Checking only the last character kept was not
-enough: a cut landing immediately *before* a ZWJ leaves a complete-looking 👨 that is really the
-first third of 👨‍👩‍👧.
+Truncation segments text with **UAX #29 extended grapheme clusters** (`regex`'s `\X`), so the
+result contains whole clusters only: ZWJ sequences, emoji modifiers (`👍🏽` is one character),
+variation-selector sequences, combining marks, regional-indicator flags, subdivision flags, Hangul
+jamo and Indic conjuncts are each kept entire or dropped entire. Hand-rolled scans kept missing
+categories, which is why the standard is used instead. One documented addition on top of it: UAX
+#29 starts a new cluster after a ZWNJ, so a cluster ending in one is merged with the next — that
+is how Telegram displays `می‌کند`.
 
 Inline button labels are always replaced by the cleaned list, or dropped entirely when every
 label cleans to nothing — leaving the key untouched would have handed back the raw values.
@@ -233,13 +235,23 @@ exact on-screen appearance. The `free` flag (usable without Premium) is reported
 Premium stickers can carry a *second* animation — an effect Telegram plays over the sticker,
 shipped as a `VideoSize` of type `"f"`. `get_media_details` now reports it under
 `premium_effect` with its dimensions, and `get_media_frames(..., premium_effect=True)` samples
-that asset on demand under its **own** byte limit — the sticker's size neither vetoes a small
+that asset on demand. The asset is a **gzipped Lottie (`.tgs`)**, not a video — verified against
+live Telegram data — so it needs the same optional renderer as animated stickers; the format is
+decided from the file's magic bytes and reported as `asset_format`. It runs under its **own** byte
+limit — the sticker's size neither vetoes a small
 effect nor admits a large one. Telethon cannot stream a `VideoSize`, so the advertised effect size
 is checked before the transfer and the delivered bytes are checked again afterwards, with
 `MAX_FRAME_SOURCE_BYTES` as the hard ceiling either way. Those frames are the effect **on its own**: Telegram composites it over the
 sticker in the chat, so the finished appearance is neither these frames nor the sticker alone.
 Every record is marked `"composite_fidelity": "asset-only"` and points at `get_telegram_frames`
 for the real composite.
+
+## Message-level effects
+
+Telegram's message effects are separate from a premium sticker's own effect, and one message can
+carry both. `inspect_message` reports the former under `message_effect` with its `effect_id`.
+Only the ID: resolving it to an animation needs a `messages.GetAvailableEffects` call, so the
+route is named rather than guessed — `get_telegram_frames` shows it actually playing.
 
 ## Screenshots are never attributed to a message
 

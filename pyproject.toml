@@ -29,6 +29,9 @@ dependencies = [
     # Image encoding/scaling for the visual capture and media preview tools.
     "pillow>=11.0",
     "python-dotenv>=1.1.0",
+    # UAX #29 grapheme clusters (\X) so truncation never splits a compound
+    # character; a hand-rolled scan kept missing categories.
+    "regex>=2024.0.0",
     "python-json-logger>=3.3.0",
     "qrcode>=8.2",
     "telethon>=1.44.0",
