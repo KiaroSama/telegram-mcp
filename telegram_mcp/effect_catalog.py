@@ -18,12 +18,13 @@ from typing import Any, Optional
 
 from telethon import functions
 
-# Telegram's hash makes a refresh cheap — it replies "not modified" and sends no
-# payload — but it is still a round trip, and an agent inspecting a hundred
-# messages would make a hundred of them. Inside this window the cached catalogue
-# is served without contacting Telegram at all; past it, the hash decides.
-# Effects are a slow-moving published set, not per-account state.
-_REVALIDATE_AFTER_SECONDS = 30 * 60
+# Telegram's guidance is to re-check the catalogue at most hourly, with one
+# documented exception: an unknown effect ID, which callers must refresh for
+# immediately (see the forced path in ``tools/effects.py``). Its hash makes a
+# refresh cheap — it replies "not modified" and sends no payload — but it is
+# still a round trip, and an agent inspecting a hundred messages would make a
+# hundred of them. Inside this window nothing contacts Telegram at all.
+_REVALIDATE_AFTER_SECONDS = 60 * 60
 
 # Telegram hands back one flat document list covering every effect. Verified
 # against a live account: of 697 effects, not one referenced a document id that
@@ -155,6 +156,10 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
         "effect_id": effect.id,
         "emoticon": getattr(effect, "emoticon", None),
         "premium_required": bool(getattr(effect, "premium_required", False)),
+        # Telegram's rule when there is no static icon: the emoticon *is* the
+        # preview icon. Saying so explicitly beats silently offering the
+        # preview sticker, which is a different picture entirely.
+        "icon_source": "static_icon" if icon is not None else "emoticon",
         "static_icon": describe_document(icon, "static_icon"),
         "preview_sticker": describe_document(sticker, "preview_sticker"),
         "effect_animation": describe_document(animation, "effect_animation"),

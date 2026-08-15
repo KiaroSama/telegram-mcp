@@ -21,6 +21,21 @@ from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
 
 from mcp.server.fastmcp import Image
+from telethon.errors import (
+    FileReferenceEmptyError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+)
+
+# A file reference authorises one download and Telegram expires it on its own
+# schedule. The cure is always the same — fetch the object again from its source,
+# which for effects means the catalogue — and it must be told apart from ordinary
+# RPC or network trouble, where refetching a catalogue would fix nothing.
+_STALE_REFERENCE = (
+    FileReferenceEmptyError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+)
 
 # Every rung above "metadata" costs a download, so the ladder is explicit rather
 # than inferred from a frame count.
@@ -33,6 +48,11 @@ _COMPOSITE_NOTE = (
     "plays, is the only accurate view of the composite."
 )
 
+_SEPARATION_NOTE = (
+    "A message effect is separate from a premium sticker's own effect; a message can carry "
+    "both. get_telegram_frames is the source of truth for the finished animation."
+)
+
 
 def _suffix_for(raw: bytes, fmt: str) -> str:
     """The extension the frame extractor should decode this asset as."""
@@ -41,6 +61,80 @@ def _suffix_for(raw: bytes, fmt: str) -> str:
     if fmt == "video":
         return ".webm"
     return ".webp"
+
+
+def _not_found(effect_id, catalog) -> str:
+    return (
+        f"Effect {effect_id} is not in Telegram's current effect catalogue "
+        f"({len(catalog.effects)} effects), even after a forced refresh. Telegram retires "
+        "effects, and a message keeps the ID it was sent with; the effect still played then."
+    )
+
+
+async def _resolved_effect(cl, effect_id: int):
+    """``(catalog, info)`` for one effect, refreshing once if the ID is unknown.
+
+    An unknown ID is the one case Telegram singles out as worth breaking the
+    hourly cadence for: it usually means a *new* effect, not a retired one, and
+    reporting "retired" from a cache that is merely stale would be a lie. Exactly
+    one forced refresh — a genuinely unknown ID must not turn every call into a
+    catalogue fetch.
+    """
+    catalog = await load_catalog(cl)
+    info = resolve_effect(catalog, effect_id)
+    if info is not None:
+        return catalog, info
+    catalog = await load_catalog(cl, force=True)
+    return catalog, resolve_effect(catalog, effect_id)
+
+
+def _select_asset(catalog, info, asset: str, effect_id: int):
+    """``(document, video_size, described)`` for a rung, or a string explaining why not.
+
+    Re-run after a forced refresh: the ids are stable but the document objects,
+    and the file references inside them, are not.
+    """
+    if asset == "icon":
+        described = info.get("static_icon")
+        document = catalog.documents.get((described or {}).get("document_id"))
+        if document is None:
+            return (
+                f"Effect {effect_id} has no static icon document. Telegram's rule for that case "
+                f"is that the emoticon {info.get('emoticon')!r} IS the icon, which "
+                "asset='metadata' reports as icon_source='emoticon'. The preview sticker is a "
+                "different picture and is not substituted here; ask for asset='sticker' if you "
+                "want it."
+            )
+    elif asset == "sticker":
+        described = info.get("preview_sticker")
+        document = catalog.documents.get((described or {}).get("document_id"))
+        if document is None:
+            return f"Effect {effect_id} has no preview sticker in the catalogue."
+    else:
+        if info["animation_source"] == "none":
+            return (
+                f"Effect {effect_id} has neither an effect animation nor a preview sticker "
+                "carrying one. Only its metadata and get_telegram_frames can show it."
+            )
+        described = info["effect_animation"]
+        document = catalog.documents.get((described or {}).get("document_id"))
+        if document is None:
+            return f"Effect {effect_id} names an animation the catalogue did not include."
+
+    # The fallback animation is a thumbnail of the preview sticker, not a file of
+    # its own, so it needs the thumb location rather than the document.
+    video_size = (
+        premium_effect_size(document)
+        if asset == "animation" and info["animation_source"] == "premium_effect_of_preview_sticker"
+        else None
+    )
+    return document, video_size, described
+
+
+async def _fetch_asset(cl, document, video_size, max_bytes: int):
+    if video_size is not None:
+        return await _download_thumb_capped(cl, document, video_size, max_bytes)
+    return await _stream_capped(cl, document, max_bytes)
 
 
 @mcp.tool(
@@ -61,16 +155,21 @@ async def get_message_effect(
 
     inspect_message reports a message's effect under "message_effect" as a bare
     ID. Telegram resolves those only in bulk, through messages.GetAvailableEffects,
-    which returns the entire catalogue; it is fetched once and then refreshed only
-    when Telegram says it changed, so repeated calls cost nothing.
+    which returns the entire catalogue; it is cached for an hour and then
+    revalidated with Telegram's own hash, so repeated calls cost nothing. An ID
+    the cache does not know forces one immediate refresh, since that usually means
+    a new effect rather than a retired one.
 
     Args:
         effect_id: The ID from inspect_message's "message_effect".
         asset: How far up the ladder to go. "metadata" (default) downloads
-            nothing. "icon" returns the small static image. "sticker" renders the
-            preview sticker. "animation" renders the effect animation itself —
-            the most expensive, and for most effects it is the preview sticker's
-            own premium effect, because Telegram gives them no separate animation.
+            nothing. "icon" returns the small static image — when the effect has
+            no icon document, Telegram's own rule is that the emoticon is the
+            icon, and that is reported rather than substituting the sticker.
+            "sticker" renders the preview sticker. "animation" renders the effect
+            animation itself — the most expensive, and for most effects it is the
+            preview sticker's own premium effect, because Telegram gives them no
+            separate animation.
         count: Frames to aim for when rendering an animation (capped at 10).
         max_bytes: Abort the transfer once this many bytes have arrived.
         max_dimension: Longest side of each returned image, in pixels.
@@ -84,20 +183,13 @@ async def get_message_effect(
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        catalog = await load_catalog(cl)
-        info = resolve_effect(catalog, int(effect_id))
+        effect_id = int(effect_id)
+        catalog, info = await _resolved_effect(cl, effect_id)
         if info is None:
-            return (
-                f"Effect {effect_id} is not in Telegram's current effect catalogue "
-                f"({len(catalog.effects)} effects). Telegram retires effects, and a message can "
-                "keep an ID that no longer resolves; the effect still played when it was sent."
-            )
+            return _not_found(effect_id, catalog)
 
         info["catalogue_size"] = len(catalog.effects)
-        info["note"] = (
-            "A message effect is separate from a premium sticker's own effect; a message can "
-            "carry both. get_telegram_frames is the source of truth for the finished animation."
-        )
+        info["note"] = _SEPARATION_NOTE
         if asset == "metadata":
             return [format_tool_result([info], {"effect_id": info["effect_id"]})]
 
@@ -105,38 +197,28 @@ async def get_message_effect(
         count = max(1, min(int(count), MAX_FRAMES))
         max_dimension = max(1, min(int(max_dimension), MAX_IMAGE_DIMENSION))
 
-        if asset == "icon":
-            document = catalog.documents.get((info.get("static_icon") or {}).get("document_id"))
-            if document is None:
-                return f"Effect {effect_id} has no static icon. Try asset='sticker'."
-        elif asset == "sticker":
-            document = catalog.documents.get(
-                (info.get("preview_sticker") or {}).get("document_id")
-            )
-            if document is None:
-                return f"Effect {effect_id} has no preview sticker in the catalogue."
-        else:
-            if info["animation_source"] == "none":
-                return (
-                    f"Effect {effect_id} has neither an effect animation nor a preview sticker "
-                    "carrying one. Only its metadata and get_telegram_frames can show it."
-                )
-            document = catalog.documents.get((info["effect_animation"] or {}).get("document_id"))
-            if document is None:
-                return f"Effect {effect_id} names an animation the catalogue did not include."
+        selection = _select_asset(catalog, info, asset, effect_id)
+        if isinstance(selection, str):
+            return selection
+        document, video_size, described = selection
 
-        # The fallback animation is a thumbnail of the preview sticker, not a file
-        # of its own, so it needs the thumb location rather than the document.
-        video_size = (
-            premium_effect_size(document)
-            if asset == "animation"
-            and info["animation_source"] == "premium_effect_of_preview_sticker"
-            else None
-        )
-        if video_size is not None:
-            raw, over_cap = await _download_thumb_capped(cl, document, video_size, max_bytes)
-        else:
-            raw, over_cap = await _stream_capped(cl, document, max_bytes)
+        try:
+            raw, over_cap = await _fetch_asset(cl, document, video_size, max_bytes)
+        except _STALE_REFERENCE:
+            # The ids stay valid; only the references that authorise the download
+            # went stale. Refetch the catalogue they came from, take the fresh
+            # objects, and retry once — a second failure is a real one.
+            catalog = await load_catalog(cl, force=True)
+            info = resolve_effect(catalog, effect_id)
+            if info is None:
+                return _not_found(effect_id, catalog)
+            info["catalogue_size"] = len(catalog.effects)
+            info["note"] = _SEPARATION_NOTE
+            selection = _select_asset(catalog, info, asset, effect_id)
+            if isinstance(selection, str):
+                return selection
+            document, video_size, described = selection
+            raw, over_cap = await _fetch_asset(cl, document, video_size, max_bytes)
 
         if over_cap:
             return (
@@ -146,14 +228,7 @@ async def get_message_effect(
         if not raw:
             return f"Telegram returned no data for effect {effect_id}'s {asset} asset."
 
-        described = (
-            info["effect_animation"]
-            if asset == "animation"
-            else info["static_icon" if asset == "icon" else "preview_sticker"]
-        )
-        fmt = (described or {}).get("format", "unknown")
-        suffix = _suffix_for(raw, fmt)
-
+        suffix = _suffix_for(raw, (described or {}).get("format", "unknown"))
         if asset == "icon" and suffix == ".webp":
             records, images = await asyncio.to_thread(_encode_one, raw, max_dimension)
         else:

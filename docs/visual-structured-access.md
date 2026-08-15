@@ -256,8 +256,17 @@ carry both. `inspect_message` reports the former under `message_effect` with its
 
 Telegram resolves effects only in bulk, through `messages.GetAvailableEffects`, which returns the
 whole catalogue — 697 effects and 894 documents on a live account. It is fetched once, served from
-memory for 30 minutes, and after that revalidated with the hash Telegram itself returned, so an
-agent inspecting many messages pays for one call rather than one per message.
+memory for an hour (Telegram's own guidance is hourly at most), and after that revalidated with the
+hash Telegram returned, so an agent inspecting many messages pays for one call rather than one per
+message. An ID the cache does not know is the documented exception: it forces one immediate
+refresh, because a fresh cache missing an ID usually means a *new* effect, not a retired one.
+Exactly one — a genuinely unknown ID does not turn every call into a catalogue fetch.
+
+File references expire on Telegram's schedule and authorise exactly one download. When a transfer
+fails with an expired, invalid or empty reference, the catalogue is refetched, the same effect
+re-resolved, the fresh document taken and the download retried **once**, under the same byte cap.
+Unrelated RPC and network errors are never retried this way — refetching a catalogue would fix
+nothing.
 
 The tool takes an explicit rung on a cost ladder:
 
@@ -267,6 +276,11 @@ The tool takes an explicit rung on a cost ladder:
 | `icon` | ~1.5 KB | the static icon as one image |
 | `sticker` | tens of KB | frames of the preview sticker |
 | `animation` | tens of KB | frames of the effect animation itself |
+
+Not every effect has an icon document. Telegram's rule for that case is that the **emoticon is the
+icon**, which `metadata` reports as `icon_source: "emoticon"` alongside the emoticon itself. Asking
+for `asset="icon"` there says so rather than quietly returning the preview sticker, which is a
+different picture.
 
 Most effects have **no animation document of their own** — 574 of 697 on a live account. For those
 Telegram's fallback is the preview sticker's own premium effect, the same `type="f"` asset
