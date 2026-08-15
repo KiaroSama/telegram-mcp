@@ -101,11 +101,34 @@ async def _resolved_effect(cl, account, effect_id: int):
         catalog.unknown_ids.add(effect_id)
         return catalog, None
 
-    catalog = await revalidate_catalog(cl, account, catalog)
+    # Read before the first await: this is the check we are asking to improve on,
+    # and it is the value a concurrent caller's completed check is compared to.
+    seen_epoch = catalog.checked_epoch
+    catalog = await revalidate_catalog(cl, account, catalog, seen_epoch)
     info = resolve_effect(catalog, effect_id)
     if info is None:
         catalog.unknown_ids.add(effect_id)
     return catalog, info
+
+
+def _unresolved(reference) -> bool:
+    """Whether a described asset is a marker for a reference the catalogue lacked."""
+    return bool(reference) and bool(reference.get("unresolved"))
+
+
+def _dangling(effect_id: int, reference, label: str) -> str:
+    """A catalogue inconsistency, named precisely enough to be actionable.
+
+    The referenced document ID is the only fact worth reporting here, and it is
+    exactly what a generic "asset missing" message throws away.
+    """
+    document_id = (reference or {}).get("document_id")
+    return (
+        f"Effect {effect_id} names document {document_id} as its {label}, but the catalogue "
+        "Telegram returned did not include that document. This is an inconsistency in the "
+        "catalogue rather than a missing asset, so retrying will not help until Telegram's "
+        "catalogue changes; asset='metadata' reports it as unresolved_reference."
+    )
 
 
 def _select_asset(catalog, info, asset: str, effect_id: int):
@@ -116,6 +139,8 @@ def _select_asset(catalog, info, asset: str, effect_id: int):
     """
     if asset == "icon":
         described = info.get("static_icon")
+        if _unresolved(described):
+            return _dangling(effect_id, described, "static icon")
         document = catalog.documents.get((described or {}).get("document_id"))
         if document is None:
             return (
@@ -127,16 +152,31 @@ def _select_asset(catalog, info, asset: str, effect_id: int):
             )
     elif asset == "sticker":
         described = info.get("preview_sticker")
+        if _unresolved(described):
+            return _dangling(effect_id, described, "preview sticker")
         document = catalog.documents.get((described or {}).get("document_id"))
         if document is None:
             return f"Effect {effect_id} has no preview sticker in the catalogue."
     else:
+        described = info["effect_animation"]
+        if info["animation_source"] == "unresolved_reference":
+            # Two different faults reach this branch and they are not the same
+            # report: the effect named an animation the catalogue omitted, or it
+            # named no animation and the preview sticker it would have fallen back
+            # to is the one missing.
+            if _unresolved(described):
+                return _dangling(effect_id, described, "effect animation")
+            return _dangling(
+                effect_id,
+                info.get("preview_sticker"),
+                "preview sticker, which is where this effect's animation would have come from "
+                "since it has no effect_animation_id of its own",
+            )
         if info["animation_source"] == "none":
             return (
                 f"Effect {effect_id} has neither an effect animation nor a preview sticker "
                 "carrying one. Only its metadata and get_telegram_frames can show it."
             )
-        described = info["effect_animation"]
         document = catalog.documents.get((described or {}).get("document_id"))
         if document is None:
             return f"Effect {effect_id} names an animation the catalogue did not include."

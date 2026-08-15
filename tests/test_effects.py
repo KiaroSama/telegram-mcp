@@ -349,3 +349,108 @@ async def test_without_the_lottie_renderer_the_effect_names_the_extra():
     message = str(excinfo.value)
     assert "telegram-mcp[lottie]" in message
     assert "get_telegram_frames" in message
+
+
+# --- the check epoch, tested where it actually lives ------------------------
+
+
+class _SlowNotModified:
+    """Answers "not modified" after a real suspension, like a round trip."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, request):
+        self.calls.append(request.hash)
+        await asyncio.sleep(0.01)
+
+        class NotModified:
+            pass
+
+        return NotModified()
+
+
+def _warm_state():
+    """A cached snapshot, as if one fetch had already happened."""
+    import time
+
+    state = effect_catalog._state(None)
+    state.catalog = Catalog(7, {}, {}, time.monotonic(), 1)
+    state.generation, state.check_epoch = 1, 1
+    state.catalog.checked_epoch = 1
+    return state.catalog
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_revalidations_send_one_request():
+    """A completed check must satisfy the callers that waited behind it.
+
+    Telegram answers a revalidation with "not modified" and no payload, and the
+    generation deliberately does not move for that — it means "these documents
+    are current", which the stale-reference refresh depends on. So the generation
+    cannot also serve as "somebody already asked": three callers holding one
+    snapshot would each find it unchanged and ask again. That is what the epoch is
+    for, and the assertion below is 3 without it (see the companion test).
+    """
+    seen = _warm_state()
+    cl = _SlowNotModified()
+
+    await asyncio.gather(
+        *(effect_catalog.revalidate_catalog(cl, None, seen, seen.checked_epoch) for _ in range(3))
+    )
+
+    assert cl.calls == [7], f"{len(cl.calls)} identical revalidations reached Telegram"
+
+
+@pytest.mark.asyncio
+async def test_deduplicating_on_the_generation_alone_would_not_work():
+    """Pins why the epoch exists, by running the rule it replaced.
+
+    Without this the epoch looks like defensive noise: the tool cannot currently
+    reach the interleaving, because load_catalog and revalidate_catalog share one
+    lock and nothing awaits between them. That is an accident of the current call
+    sequence, not a property anyone stated, and one added await reopens it.
+    """
+    import time
+
+    async def generation_only(cl, account, seen, seen_epoch):
+        state = effect_catalog._state(account)
+        async with state.lock:
+            if state.catalog is not None and state.catalog.generation > seen.generation:
+                return state.catalog
+            return await effect_catalog._fetch(state, cl, state.catalog.hash, time.monotonic())
+
+    seen = _warm_state()
+    cl = _SlowNotModified()
+
+    await asyncio.gather(*(generation_only(cl, None, seen, seen.checked_epoch) for _ in range(3)))
+
+    assert cl.calls == [7, 7, 7], "the rule this replaced would have deduplicated after all"
+
+
+@pytest.mark.asyncio
+async def test_a_not_modified_answer_moves_the_epoch_but_not_the_generation():
+    seen = _warm_state()
+    cl = _SlowNotModified()
+
+    result = await effect_catalog.revalidate_catalog(cl, None, seen, seen.checked_epoch)
+
+    assert result is seen, "the payload was replaced by an answer that carried none"
+    assert result.generation == 1, "a not-modified answer advanced the payload generation"
+    assert result.checked_epoch == 2, "the completed check was not recorded"
+
+
+# --- account identity -------------------------------------------------------
+
+
+def test_account_key_mirrors_get_client(monkeypatch):
+    from telegram_mcp import runtime
+
+    monkeypatch.setattr(runtime, "clients", {"alpha": object(), "beta": object()})
+    assert effect_catalog.account_key("ALPHA") == "alpha"
+    assert effect_catalog.account_key("alpha") == "alpha"
+
+    monkeypatch.setattr(runtime, "clients", {"alpha": object()})
+    # One account: get_client ignores the argument, so the cache must too.
+    assert effect_catalog.account_key(None) == "alpha"
+    assert effect_catalog.account_key("ALPHA") == "alpha"

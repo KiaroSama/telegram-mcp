@@ -51,7 +51,15 @@ _MIME_FORMATS = {
 class Catalog:
     """One fetched snapshot of the effect catalog, for one account."""
 
-    __slots__ = ("hash", "effects", "documents", "fetched_at", "generation", "unknown_ids")
+    __slots__ = (
+        "hash",
+        "effects",
+        "documents",
+        "fetched_at",
+        "generation",
+        "checked_epoch",
+        "unknown_ids",
+    )
 
     def __init__(self, hash_: int, effects: dict, documents: dict, fetched_at=0.0, generation=0):
         self.hash = hash_
@@ -59,6 +67,10 @@ class Catalog:
         self.documents = documents
         self.fetched_at = fetched_at
         self.generation = generation
+        # Which check this snapshot was last confirmed by. A caller records the
+        # value it saw and hands it back, so a check that finished while it waited
+        # is reused instead of repeated.
+        self.checked_epoch = 0
         # IDs this exact snapshot does not contain. Asking Telegram again for the
         # same ID against the same catalogue gets the same answer, so the negative
         # result rides along with the snapshot and dies with it.
@@ -70,21 +82,52 @@ class Catalog:
 
 
 class _AccountState:
-    __slots__ = ("catalog", "lock", "generation")
+    __slots__ = ("catalog", "lock", "generation", "check_epoch")
 
     def __init__(self):
         self.catalog = None
         # Serialises fetches for this account: without it two concurrent
         # inspections both see an empty cache and both pull the whole catalogue.
         self.lock = asyncio.Lock()
+        # Advances only when a new payload arrives — it means "these documents and
+        # file references are current", which is what a stale-reference refresh
+        # needs to reason about.
         self.generation = 0
+        # Advances after any completed check, including "not modified". A
+        # revalidation that changes nothing still answers the question, and
+        # without a counter for that the second of two waiting callers sees an
+        # unchanged generation and asks Telegram the very same thing again.
+        self.check_epoch = 0
 
 
 _states = {}
 
 
+def account_key(account: Optional[str]) -> str:
+    """The identity ``get_client`` resolves to, so cache and client cannot drift.
+
+    ``runtime.get_client`` lowercases an explicit label and, with a single account
+    configured, ignores the argument entirely — so ``"SECOND"``, ``"second"`` and
+    (in single-account mode) ``None`` all reach one client. Keying on the raw
+    string gave that one client two caches, and therefore two sets of file
+    references for the same session.
+
+    It lives here rather than in ``runtime.py`` because that file is upstream's
+    and stays untouched; the rule is mirrored from it deliberately, and the tests
+    pin the two together.
+    """
+    from telegram_mcp import runtime
+
+    clients = getattr(runtime, "clients", None) or {}
+    if account is None:
+        # Single-account mode has exactly one identity and it is not "default":
+        # an explicit call using that label must land on the same cache.
+        return next(iter(clients)) if len(clients) == 1 else "default"
+    return account.lower()
+
+
 def _state(account: Optional[str]) -> _AccountState:
-    key = account or "default"
+    key = account_key(account)
     if key not in _states:
         _states[key] = _AccountState()
     return _states[key]
@@ -103,16 +146,20 @@ def cached_catalog(account: Optional[str] = None) -> Optional[Catalog]:
 async def _fetch(state: _AccountState, cl, known_hash: int, now: float) -> Catalog:
     """One request and the bookkeeping for what comes back. Caller holds the lock."""
     result = await cl(functions.messages.GetAvailableEffectsRequest(hash=known_hash))
+    state.check_epoch += 1
 
     # Not modified: Telegram sends no payload at all, so the cache is the only
-    # copy in existence. Its generation does not change — the content did not.
+    # copy in existence. Its generation does not change — the content did not —
+    # but the check did happen, which is what the epoch records.
     if not hasattr(result, "effects"):
         if state.catalog is not None:
             state.catalog.fetched_at = now
+            state.catalog.checked_epoch = state.check_epoch
             return state.catalog
         # "Unchanged" against a hash we do not hold. Nothing to serve, and
         # repeating the same hash would repeat the answer.
         result = await cl(functions.messages.GetAvailableEffectsRequest(hash=0))
+        state.check_epoch += 1
 
     state.generation += 1
     state.catalog = Catalog(
@@ -122,6 +169,7 @@ async def _fetch(state: _AccountState, cl, known_hash: int, now: float) -> Catal
         now,
         state.generation,
     )
+    state.catalog.checked_epoch = state.check_epoch
     return state.catalog
 
 
@@ -141,19 +189,26 @@ async def load_catalog(cl, account: Optional[str] = None):
         return await _fetch(state, cl, known_hash, now), True
 
 
-async def revalidate_catalog(cl, account: Optional[str], seen: Catalog) -> Catalog:
+async def revalidate_catalog(
+    cl, account: Optional[str], seen: Catalog, seen_epoch: int
+) -> Catalog:
     """Bypass the window but keep the hash: has anything changed since ``seen``?
 
-    Costs a round trip and, when nothing changed, no payload. If another task
-    already moved past ``seen`` while this one waited for the lock, its result is
-    reused — that is what collapses a burst of unknown-ID lookups into one
-    revalidation.
+    Costs a round trip and, when nothing changed, no payload. Deduplication turns
+    on ``seen_epoch``, not on the generation: a revalidation that answers "not
+    modified" deliberately leaves the generation alone, so a second waiting caller
+    would find it unchanged and ask Telegram exactly the same question again. The
+    epoch records that the question was asked and answered, which is what a burst
+    of unknown-ID lookups needs to collapse into one request.
     """
     state = _state(account)
     async with state.lock:
-        if state.catalog is not None and state.catalog.generation > seen.generation:
-            return state.catalog
-        known_hash = state.catalog.hash if state.catalog is not None else 0
+        current = state.catalog
+        if current is not None and (
+            current.generation > seen.generation or current.checked_epoch > seen_epoch
+        ):
+            return current
+        known_hash = current.hash if current is not None else 0
         return await _fetch(state, cl, known_hash, time.monotonic())
 
 

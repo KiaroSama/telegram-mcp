@@ -280,10 +280,18 @@ simultaneous failures on one snapshot buy one catalogue between them rather than
 Unrelated RPC and network errors are never retried this way — refetching a catalogue would fix
 nothing.
 
-Catalogue state is **per account**. A `Document` carries an `access_hash` and a `file_reference`
-that authorise a download for the session that fetched them, and nothing documents those as
-portable between accounts, so no part of the cache — not even the effect metadata — is shared
-across them.
+Two counters keep those apart. The *generation* advances only when a new payload arrives, so it
+means "these documents and file references are current" — which is exactly what a stale-reference
+refresh reasons about. A revalidation that answers "not modified" deliberately leaves it alone, so
+a separate *check epoch* records that the question was asked and answered; without it, callers
+waiting behind a completed check would each ask again.
+
+Catalogue state is **per account**, keyed the way `get_client` resolves an account rather than by
+the raw string: it lowercases an explicit label, and with a single account configured it ignores
+the argument entirely, so `"ALPHA"`, `"alpha"` and `None` all reach one client and now share one
+cache. A `Document` carries an `access_hash` and a `file_reference` that authorise a download for
+the session that fetched them, and nothing documents those as portable between accounts, so no part
+of the cache — not even the effect metadata — is shared across them.
 
 The tool takes an explicit rung on a cost ladder:
 
@@ -305,6 +313,11 @@ a decision Telegram made — and is reported as `icon_source: "unresolved_refere
 referenced document ID preserved. The same treatment covers `effect_sticker_id` and
 `effect_animation_id`: a dangling animation reference is never quietly replaced by the sticker's
 premium effect, because that would hide the fault behind a different asset.
+
+Asking for a rung whose asset is unresolved names the exact document that went missing, not a
+generic failure — and the animation rung distinguishes its two causes: an `effect_animation_id`
+the catalogue omitted, versus an effect with no animation of its own whose preview sticker (the
+source its animation would have come from) is the one missing.
 
 Most effects have **no animation document of their own** — 574 of 697 on a live account. For those
 Telegram's fallback is the preview sticker's own premium effect, the same `type="f"` asset

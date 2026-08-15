@@ -530,3 +530,166 @@ async def test_dangling_sticker_and_animation_references_keep_their_ids(monkeypa
     assert (
         info["animation_source"] == "unresolved_reference"
     ), "a dangling animation silently fell back to the sticker's premium effect"
+
+
+# --- one hash revalidation for many simultaneous unknown lookups ------------
+
+
+@pytest.mark.asyncio
+async def test_simultaneous_unknown_lookups_send_one_hash_request(monkeypatch):
+    """End to end, a burst of lookups for one unknown ID costs one request.
+
+    Three things combine to give that, and only one of them is this round's: the
+    shared per-account lock, the negative result recorded on the snapshot, and the
+    check epoch. The epoch's own contribution is pinned directly at the helper
+    level in test_effects.py, because the tool cannot currently reach the
+    interleaving it guards — see the note there.
+    """
+    import asyncio as _asyncio
+
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)  # warm the cache: one hash=0 fetch
+
+    results = await _asyncio.gather(*(_call(999999) for _ in range(5)))
+
+    hashed = [h for h in client.catalogue_calls if h != 0]
+    assert len(hashed) == 1, f"{len(hashed)} hash revalidations for one unknown ID"
+    assert all(isinstance(r, str) for r in results)
+
+
+@pytest.mark.asyncio
+async def test_a_completed_revalidation_does_not_advance_the_payload_generation(monkeypatch):
+    """The epoch and the generation mean different things and must stay apart."""
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)
+    before = effect_catalog.cached_catalog("default")
+    generation, epoch = before.generation, before.checked_epoch
+
+    await _call(999999)  # unknown -> a revalidation that changes nothing
+
+    after = effect_catalog.cached_catalog("default")
+    assert after.generation == generation, (
+        "a not-modified answer advanced the payload generation, which is what a "
+        "stale-reference refresh uses to decide the documents are current"
+    )
+    assert after.checked_epoch > epoch, "the completed check was not recorded"
+    assert client.payloads_sent == [True, False]
+
+
+# --- account identity must match the client the runtime picks ---------------
+
+
+@pytest.fixture
+def _two_accounts(monkeypatch):
+    from telegram_mcp import runtime
+
+    monkeypatch.setattr(runtime, "clients", {"alpha": object(), "beta": object()})
+    return None
+
+
+@pytest.fixture
+def _one_account(monkeypatch):
+    from telegram_mcp import runtime
+
+    monkeypatch.setattr(runtime, "clients", {"alpha": object()})
+    return None
+
+
+@pytest.mark.asyncio
+async def test_case_variants_of_a_label_share_one_cache(monkeypatch, _two_accounts):
+    """get_client lowercases the label, so two spellings are one client."""
+    client = _ToolClient()
+    _use(monkeypatch, client, alpha=client, ALPHA=client)
+
+    await _call(1, account="alpha")
+    await _call(1, account="ALPHA")
+
+    assert client.catalogue_calls == [0], "the second spelling built its own cache"
+    assert effect_catalog.cached_catalog("ALPHA") is effect_catalog.cached_catalog("alpha")
+
+
+@pytest.mark.asyncio
+async def test_implicit_single_account_shares_the_cache_with_its_label(monkeypatch, _one_account):
+    """With one account configured, get_client ignores the argument entirely."""
+    client = _ToolClient()
+    _use(monkeypatch, client, alpha=client)
+
+    await _call(1, account=None)
+    await _call(1, account="alpha")
+
+    assert client.catalogue_calls == [0], "None and the real label built two caches"
+    assert effect_catalog.cached_catalog(None) is effect_catalog.cached_catalog("alpha")
+
+
+@pytest.mark.asyncio
+async def test_genuinely_different_accounts_still_never_share_documents(
+    monkeypatch, _two_accounts
+):
+    alpha, beta = _ToolClient(), _ToolClient()
+    _use(monkeypatch, alpha, alpha=alpha, beta=beta)
+
+    await _call(1, account="alpha")
+    await _call(1, account="beta")
+
+    a = effect_catalog.cached_catalog("alpha")
+    b = effect_catalog.cached_catalog("beta")
+    assert a is not b
+    assert a.documents[21] is not b.documents[21], "one Document object served two sessions"
+
+
+# --- unresolved references, per rung ---------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_icon_rung_names_the_document_not_the_emoticon_rule(monkeypatch):
+    _use(monkeypatch, _BrokenCatalogueClient())
+    result = await _call(5, asset="icon")
+
+    assert isinstance(result, str)
+    assert "names document 10 as its static icon" in result
+    assert "emoticon" not in result, "a catalogue fault was reported as Telegram's icon rule"
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_sticker_rung_names_its_document(monkeypatch):
+    _use(monkeypatch, _BrokenCatalogueClient())
+    result = await _call(5, asset="sticker")
+
+    assert isinstance(result, str)
+    assert "names document 20 as its preview sticker" in result
+
+
+@pytest.mark.asyncio
+async def test_an_unresolved_animation_rung_names_the_animation_document(monkeypatch):
+    _use(monkeypatch, _BrokenCatalogueClient())
+    result = await _call(5, asset="animation")
+
+    assert isinstance(result, str)
+    assert "names document 21 as its effect animation" in result
+
+
+class _MissingStickerClient(_ToolClient):
+    """No effect_animation_id, and the sticker it would fall back to is absent."""
+
+    async def __call__(self, request):
+        self.catalogue_calls.append(request.hash)
+        self.payloads_sent.append(True)
+
+        class Available:
+            hash = 1
+            effects = [_Effect(6, 30, icon=10)]
+            documents = [_Doc(10, mime="image/webp")]
+
+        return Available()
+
+
+@pytest.mark.asyncio
+async def test_a_missing_fallback_sticker_is_not_called_a_missing_animation(monkeypatch):
+    """There was no effect_animation_id, so blaming one would be a fabrication."""
+    _use(monkeypatch, _MissingStickerClient())
+    result = await _call(6, asset="animation")
+
+    assert isinstance(result, str)
+    assert "names document 30 as its preview sticker" in result
+    assert "no effect_animation_id of its own" in result
+    assert "effect animation" not in result.split("preview sticker")[0]
