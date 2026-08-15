@@ -63,17 +63,31 @@ class _ToolClient:
         self.stale_refs = stale_refs  # how many downloads raise before succeeding
         self.payload_size = payload_size
         self._new_after_refresh = new_effect_after_refresh
-        self.last_max_bytes_target = None
+        self.current_hash = None
+        self.payloads_sent = []
 
     async def __call__(self, request):
         self.catalogue_calls.append(request.hash)
         refreshed = len(self.catalogue_calls) > 1
         include_new = self._new_after_refresh and refreshed
 
+        # A hash Telegram recognises means "nothing changed" and no payload at
+        # all; that is the difference between a revalidation and a full download.
+        if request.hash == self.current_hash and not include_new:
+
+            class NotModified:
+                pass
+
+            self.payloads_sent.append(False)
+            return NotModified()
+
+        self.current_hash = 2 if refreshed else 1
+        self.payloads_sent.append(True)
+
         class Available:
-            hash = 1 if not refreshed else 2
+            hash = 2 if refreshed else 1
             effects = _effects(include_new)
-            # A refresh hands back fresh references; that is the whole point.
+            # A fresh payload carries fresh references; that is the whole point.
             documents = _documents(b"r2" if refreshed else b"r1")
 
         return Available()
@@ -121,13 +135,16 @@ def _isolated(monkeypatch):
     effect_catalog._reset_catalog()
 
 
-def _use(monkeypatch, client):
-    monkeypatch.setattr(effects_tool, "get_client", lambda account=None: client)
+def _use(monkeypatch, client, **by_account):
+    clients = {"default": client, **by_account}
+    monkeypatch.setattr(
+        effects_tool, "get_client", lambda account=None: clients[account or "default"]
+    )
     return client
 
 
-async def _call(effect_id, **kwargs):
-    return await get_message_effect(effect_id, account="default", **kwargs)
+async def _call(effect_id, account="default", **kwargs):
+    return await get_message_effect(effect_id, account=account, **kwargs)
 
 
 def _payload(result):
@@ -163,7 +180,10 @@ async def test_an_unknown_id_forces_a_refresh_and_then_resolves(monkeypatch):
 
     payload = _payload(await _call(3))
 
-    assert client.catalogue_calls == [0, 0], "the unknown ID must bypass the freshness window"
+    assert client.catalogue_calls == [0, 1], (
+        "the unknown ID must bypass the freshness window, and do it with the stored hash "
+        "rather than buying the whole catalogue again"
+    )
     assert payload["results"][0]["effect_id"] == 3
     assert payload["results"][0]["emoticon"] == "🎉"
 
@@ -175,8 +195,10 @@ async def test_an_id_still_unknown_after_the_refresh_reports_not_found_once(monk
 
     assert isinstance(result, str)
     assert "not in Telegram's current effect catalogue" in result
-    assert "after a forced refresh" in result
-    assert len(client.catalogue_calls) == 2, "exactly one forced refresh, never a loop"
+    assert "checked against Telegram for this lookup" in result
+    # Cold cache: the very first request already returned the newest catalogue,
+    # so a second one could only learn the same thing.
+    assert client.catalogue_calls == [0], "the cold fetch was repeated to answer one lookup"
 
 
 # --- expired file references ------------------------------------------------
@@ -313,3 +335,198 @@ async def test_an_unknown_asset_name_is_refused_before_any_call(monkeypatch):
 
     assert isinstance(result, str) and "asset must be one of" in result
     assert client.catalogue_calls == [], "a bad argument still cost a catalogue fetch"
+
+
+# --- refresh semantics: revalidate vs. hard refresh -------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_cold_cache_unknown_id_costs_exactly_one_full_download(monkeypatch):
+    """The first fetch already returned the newest catalogue; asking again is waste."""
+    client = _use(monkeypatch, _ToolClient())
+
+    result = await _call(999999)
+
+    assert isinstance(result, str) and "not in Telegram's current effect catalogue" in result
+    assert client.catalogue_calls == [0], "the cold fetch was immediately repeated"
+    assert client.payloads_sent == [True], "more than one full payload crossed the wire"
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_id_in_a_warm_cache_revalidates_by_hash_not_by_hash_zero(monkeypatch):
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)  # warm the cache
+
+    await _call(999999)
+
+    assert client.catalogue_calls == [0, 1], "the revalidation sent hash=0, buying the catalogue"
+    assert client.payloads_sent == [True, False], "a payload was downloaded to answer a lookup"
+
+
+@pytest.mark.asyncio
+async def test_repeating_a_still_unknown_id_stops_contacting_telegram(monkeypatch):
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)
+
+    for _ in range(4):
+        result = await _call(999999)
+        assert isinstance(result, str)
+
+    assert client.catalogue_calls == [0, 1], "every repeat of the same dead ID hit Telegram"
+
+
+@pytest.mark.asyncio
+async def test_a_changed_catalogue_can_still_surface_a_new_effect(monkeypatch):
+    """The negative result must not outlive the snapshot it was learned from."""
+    client = _use(monkeypatch, _ToolClient(new_effect_after_refresh=True))
+    await _call(1)
+
+    payload = _payload(await _call(3))
+
+    assert payload["results"][0]["effect_id"] == 3
+    assert client.payloads_sent == [True, True], "the changed catalogue was not delivered"
+
+
+@pytest.mark.asyncio
+async def test_concurrent_unknown_id_calls_collapse_into_one_revalidation(monkeypatch):
+    import asyncio as _asyncio
+
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)
+
+    await _asyncio.gather(*(_call(999999) for _ in range(5)))
+
+    assert client.catalogue_calls == [0, 1], "each concurrent miss revalidated separately"
+
+
+# --- per-account isolation --------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_two_accounts_keep_separate_catalogues_and_references(monkeypatch):
+    """A file reference authorises a download for the session that fetched it."""
+    first = _ToolClient()
+    second = _ToolClient()
+    _use(monkeypatch, first, second=second)
+
+    await _call(1, account="default")
+    await _call(1, account="second")
+
+    assert first.catalogue_calls == [0], "account 'second' consumed account 'default' cache"
+    assert second.catalogue_calls == [0], "account 'second' never fetched its own catalogue"
+
+    a = effect_catalog.cached_catalog("default")
+    b = effect_catalog.cached_catalog("second")
+    assert a is not b
+    assert a.documents[21] is not b.documents[21], "both accounts share one Document object"
+
+
+@pytest.mark.asyncio
+async def test_one_accounts_hard_refresh_leaves_the_other_untouched(monkeypatch):
+    first = _ToolClient()
+    second = _ToolClient(stale_refs=1)
+    _use(monkeypatch, first, second=second)
+
+    await _call(1, account="default")
+    before = effect_catalog.cached_catalog("default")
+
+    await _call(1, asset="animation", account="second")  # forces a hard refresh
+
+    assert effect_catalog.cached_catalog("default") is before, "account A's cache was replaced"
+    assert first.catalogue_calls == [0], "account B's refresh reached account A's client"
+    assert second.catalogue_calls == [0, 0], "the stale reference did not force hash=0"
+
+
+# --- one hard refresh per stale generation ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stale_failures_buy_one_catalogue_between_them(monkeypatch):
+    """Three downloads that fail on the SAME snapshot must share one refresh.
+
+    The barrier is the whole test: without it the tasks run to completion one
+    after another, the second legitimately holds the catalogue the first just
+    fetched, and its refresh is correct rather than a stampede.
+    """
+    import asyncio as _asyncio
+
+    started = _asyncio.Event()
+    arrived = []
+
+    class _Barrier(_ToolClient):
+        def iter_download(self, target):
+            self.downloads += 1
+            client = self
+
+            class Chunks:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    if client.stale_refs > 0:
+                        # Hold every first attempt until all three are here, so
+                        # they are all still looking at generation 1.
+                        arrived.append(1)
+                        if len(arrived) >= 3:
+                            started.set()
+                        await started.wait()
+                        client.stale_refs -= 1
+                        raise FileReferenceExpiredError(request=None)
+                    raise StopAsyncIteration
+
+                async def close(self):
+                    pass
+
+            return Chunks()
+
+    client = _use(monkeypatch, _Barrier(stale_refs=3))
+    await _call(1)  # warm the cache so all three start on the same generation
+
+    await _asyncio.gather(
+        _call(1, asset="animation"), _call(1, asset="icon"), _call(1, asset="sticker")
+    )
+
+    hard = [h for h in client.catalogue_calls[1:] if h == 0]
+    assert len(hard) == 1, f"{len(hard)} full catalogue downloads for one stale generation"
+
+
+# --- unresolved references are not the emoticon fallback --------------------
+
+
+class _BrokenCatalogueClient(_ToolClient):
+    """Names documents it then fails to include — a catalogue inconsistency."""
+
+    async def __call__(self, request):
+        self.catalogue_calls.append(request.hash)
+        self.payloads_sent.append(True)
+
+        class Available:
+            hash = 1
+            effects = [_Effect(5, 20, icon=10, animation=21)]
+            documents = []  # every reference dangles
+
+        return Available()
+
+
+@pytest.mark.asyncio
+async def test_a_dangling_icon_reference_is_not_reported_as_the_emoticon_rule(monkeypatch):
+    """static_icon_id is SET here, so Telegram never chose the emoticon."""
+    _use(monkeypatch, _BrokenCatalogueClient())
+    info = _payload(await _call(5))["results"][0]
+
+    assert info["icon_source"] == "unresolved_reference"
+    assert info["static_icon"]["unresolved"] is True
+    assert info["static_icon"]["document_id"] == 10, "the referenced ID was thrown away"
+
+
+@pytest.mark.asyncio
+async def test_dangling_sticker_and_animation_references_keep_their_ids(monkeypatch):
+    _use(monkeypatch, _BrokenCatalogueClient())
+    info = _payload(await _call(5))["results"][0]
+
+    assert info["preview_sticker"]["document_id"] == 20
+    assert info["preview_sticker"]["unresolved"] is True
+    assert info["effect_animation"]["document_id"] == 21
+    assert (
+        info["animation_source"] == "unresolved_reference"
+    ), "a dangling animation silently fell back to the sticker's premium effect"

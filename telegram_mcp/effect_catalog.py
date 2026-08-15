@@ -4,12 +4,26 @@ A message-level effect reaches us as a bare integer on ``Message.effect``. Turni
 that into something an agent can look at needs ``messages.GetAvailableEffects``,
 which does not answer per effect — it returns the whole catalog. On a live account
 that is 697 effects and 894 documents, so fetching it per inspected message would
-be indefensible. Telegram provides the remedy in the response: send its ``hash``
-back and it answers ``AvailableEffectsNotModified`` when nothing has changed.
+be indefensible.
 
-Everything here is deliberately free of MCP and of the frame extractor: the
-resolution rules are worth testing without a client, and the download policy
-belongs with the other downloads.
+Three distinct refreshes, which is the whole design:
+
+* **cached** — inside the window, nothing is sent;
+* **revalidate** — send the stored hash back, and Telegram answers
+  ``AvailableEffectsNotModified`` with no payload;
+* **hard refresh** — send ``hash=0`` and pay for the entire catalog again.
+
+Only an expired file reference justifies the third, because only a fresh payload
+carries fresh references. Using it to answer "is this ID real?" would download 894
+documents to learn that one integer is absent.
+
+State is keyed by account. A ``Document`` carries an ``access_hash`` and a
+``file_reference`` that authorise a download for the session that fetched them;
+nothing documents them as portable between accounts, so nothing here is shared.
+
+Everything is free of MCP and of the frame extractor: the resolution rules are
+worth testing without a client, and the download policy belongs with the other
+downloads.
 """
 
 import asyncio
@@ -18,12 +32,9 @@ from typing import Any, Optional
 
 from telethon import functions
 
-# Telegram's guidance is to re-check the catalogue at most hourly, with one
-# documented exception: an unknown effect ID, which callers must refresh for
-# immediately (see the forced path in ``tools/effects.py``). Its hash makes a
-# refresh cheap — it replies "not modified" and sends no payload — but it is
-# still a round trip, and an agent inspecting a hundred messages would make a
-# hundred of them. Inside this window nothing contacts Telegram at all.
+# Telegram's guidance is to re-check the catalogue at most hourly. The one
+# documented exception — an unknown effect ID — is served by a hash revalidation,
+# which costs a round trip and no payload.
 _REVALIDATE_AFTER_SECONDS = 60 * 60
 
 # Telegram hands back one flat document list covering every effect. Verified
@@ -38,73 +49,127 @@ _MIME_FORMATS = {
 
 
 class Catalog:
-    """One fetched snapshot of the effect catalog."""
+    """One fetched snapshot of the effect catalog, for one account."""
 
-    __slots__ = ("hash", "effects", "documents", "fetched_at")
+    __slots__ = ("hash", "effects", "documents", "fetched_at", "generation", "unknown_ids")
 
-    def __init__(self, hash_: int, effects: dict, documents: dict, fetched_at: float = 0.0):
+    def __init__(self, hash_: int, effects: dict, documents: dict, fetched_at=0.0, generation=0):
         self.hash = hash_
         self.effects = effects
         self.documents = documents
         self.fetched_at = fetched_at
+        self.generation = generation
+        # IDs this exact snapshot does not contain. Asking Telegram again for the
+        # same ID against the same catalogue gets the same answer, so the negative
+        # result rides along with the snapshot and dies with it.
+        self.unknown_ids = set()
 
     def is_fresh(self, now: float) -> bool:
         """Whether this snapshot may be served without asking Telegram again."""
         return (now - self.fetched_at) < _REVALIDATE_AFTER_SECONDS
 
 
-_catalog: Optional[Catalog] = None
-# Without this, two concurrent inspections both see an empty cache and both pull
-# the whole catalog; the second one is pure waste.
-_lock = asyncio.Lock()
+class _AccountState:
+    __slots__ = ("catalog", "lock", "generation")
+
+    def __init__(self):
+        self.catalog = None
+        # Serialises fetches for this account: without it two concurrent
+        # inspections both see an empty cache and both pull the whole catalogue.
+        self.lock = asyncio.Lock()
+        self.generation = 0
+
+
+_states = {}
+
+
+def _state(account: Optional[str]) -> _AccountState:
+    key = account or "default"
+    if key not in _states:
+        _states[key] = _AccountState()
+    return _states[key]
 
 
 def _reset_catalog() -> None:
-    """Drop the cached catalog. For tests and for a file-reference refresh."""
-    global _catalog
-    _catalog = None
+    """Drop every account's cached catalog. For tests."""
+    _states.clear()
 
 
-def cached_catalog() -> Optional[Catalog]:
-    """The catalog currently held, without fetching one."""
-    return _catalog
+def cached_catalog(account: Optional[str] = None) -> Optional[Catalog]:
+    """The catalog currently held for an account, without fetching one."""
+    return _state(account).catalog
 
 
-async def load_catalog(cl, force: bool = False) -> Catalog:
-    """The effect catalog, from cache when Telegram says it has not changed.
+async def _fetch(state: _AccountState, cl, known_hash: int, now: float) -> Catalog:
+    """One request and the bookkeeping for what comes back. Caller holds the lock."""
+    result = await cl(functions.messages.GetAvailableEffectsRequest(hash=known_hash))
 
-    ``force`` discards the stored hash, which is what a stale file reference
-    needs: the ids stay valid but the references that authorise a download do not.
+    # Not modified: Telegram sends no payload at all, so the cache is the only
+    # copy in existence. Its generation does not change — the content did not.
+    if not hasattr(result, "effects"):
+        if state.catalog is not None:
+            state.catalog.fetched_at = now
+            return state.catalog
+        # "Unchanged" against a hash we do not hold. Nothing to serve, and
+        # repeating the same hash would repeat the answer.
+        result = await cl(functions.messages.GetAvailableEffectsRequest(hash=0))
+
+    state.generation += 1
+    state.catalog = Catalog(
+        getattr(result, "hash", 0),
+        {effect.id: effect for effect in getattr(result, "effects", [])},
+        {doc.id: doc for doc in getattr(result, "documents", [])},
+        now,
+        state.generation,
+    )
+    return state.catalog
+
+
+async def load_catalog(cl, account: Optional[str] = None):
+    """``(catalog, contacted_telegram)`` for an account, honouring the window.
+
+    The flag matters to the caller: a catalogue this very call just fetched is
+    already the freshest Telegram has, so there is nothing to gain by asking again
+    when a lookup misses.
     """
-    global _catalog
-    async with _lock:
+    state = _state(account)
+    async with state.lock:
         now = time.monotonic()
-        if _catalog is not None and not force and _catalog.is_fresh(now):
-            return _catalog
+        if state.catalog is not None and state.catalog.is_fresh(now):
+            return state.catalog, False
+        known_hash = state.catalog.hash if state.catalog is not None else 0
+        return await _fetch(state, cl, known_hash, now), True
 
-        known_hash = _catalog.hash if (_catalog is not None and not force) else 0
 
-        result = await cl(functions.messages.GetAvailableEffectsRequest(hash=known_hash))
+async def revalidate_catalog(cl, account: Optional[str], seen: Catalog) -> Catalog:
+    """Bypass the window but keep the hash: has anything changed since ``seen``?
 
-        # Not modified: Telegram sends no payload at all, so the cache is the only
-        # copy in existence. Refusing to trust it here would defeat the mechanism.
-        if not hasattr(result, "effects"):
-            if _catalog is not None:
-                # Unchanged: keep the payload, restart the window rather than
-                # revalidating on every call from here on.
-                _catalog.fetched_at = now
-                return _catalog
-            # Telegram answered "unchanged" against a hash we do not hold. Nothing
-            # to serve, and asking again with the same hash would repeat it.
-            result = await cl(functions.messages.GetAvailableEffectsRequest(hash=0))
+    Costs a round trip and, when nothing changed, no payload. If another task
+    already moved past ``seen`` while this one waited for the lock, its result is
+    reused — that is what collapses a burst of unknown-ID lookups into one
+    revalidation.
+    """
+    state = _state(account)
+    async with state.lock:
+        if state.catalog is not None and state.catalog.generation > seen.generation:
+            return state.catalog
+        known_hash = state.catalog.hash if state.catalog is not None else 0
+        return await _fetch(state, cl, known_hash, time.monotonic())
 
-        _catalog = Catalog(
-            getattr(result, "hash", 0),
-            {effect.id: effect for effect in getattr(result, "effects", [])},
-            {doc.id: doc for doc in getattr(result, "documents", [])},
-            now,
-        )
-        return _catalog
+
+async def refresh_catalog(cl, account: Optional[str], seen: Catalog) -> Catalog:
+    """Pay for the whole catalogue again — the only cure for a stale file reference.
+
+    ``hash=0`` because a reference is refreshed only by refetching the object that
+    carries it, and Telegram sends no documents when it answers "not modified".
+    Skipped entirely when another task already refreshed past ``seen``: several
+    downloads failing on the same stale snapshot must not each buy a new one.
+    """
+    state = _state(account)
+    async with state.lock:
+        if state.catalog is not None and state.catalog.generation > seen.generation:
+            return state.catalog
+        return await _fetch(state, cl, 0, time.monotonic())
 
 
 def describe_document(document, label: str) -> Optional[dict[str, Any]]:
@@ -112,7 +177,7 @@ def describe_document(document, label: str) -> Optional[dict[str, Any]]:
     if document is None:
         return None
     mime = getattr(document, "mime_type", None)
-    info: dict[str, Any] = {
+    info = {
         "asset": label,
         "document_id": getattr(document, "id", None),
         "mime_type": mime,
@@ -126,6 +191,33 @@ def describe_document(document, label: str) -> Optional[dict[str, Any]]:
             info["width"], info["height"] = width, height
             break
     return info
+
+
+def _referenced(catalog: Catalog, document_id, label: str) -> Optional[dict[str, Any]]:
+    """A referenced document, or an explicit marker that the catalogue lacked it.
+
+    Returning ``None`` for both "no id" and "an id we could not resolve" throws
+    away the one fact worth keeping about the second case: which document was
+    named.
+    """
+    if not document_id:
+        return None
+    document = catalog.documents.get(document_id)
+    if document is None:
+        return {
+            "asset": label,
+            "document_id": document_id,
+            "unresolved": True,
+            "note": (
+                "The effect names this document but the catalogue Telegram returned did not "
+                "include it. That is an inconsistency in the catalogue, not a missing asset."
+            ),
+        }
+    return describe_document(document, label)
+
+
+def _is_unresolved(reference) -> bool:
+    return bool(reference) and bool(reference.get("unresolved"))
 
 
 def premium_effect_size(document):
@@ -148,32 +240,48 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
     if effect is None:
         return None
 
-    sticker = catalog.documents.get(getattr(effect, "effect_sticker_id", None))
-    icon = catalog.documents.get(getattr(effect, "static_icon_id", None))
-    animation = catalog.documents.get(getattr(effect, "effect_animation_id", None))
+    icon_id = getattr(effect, "static_icon_id", None)
+    sticker_id = getattr(effect, "effect_sticker_id", None)
+    animation_id = getattr(effect, "effect_animation_id", None)
+    icon = _referenced(catalog, icon_id, "static_icon")
+    sticker = _referenced(catalog, sticker_id, "preview_sticker")
+    animation = _referenced(catalog, animation_id, "effect_animation")
 
-    info: dict[str, Any] = {
+    # Telegram's rule when there is no static icon: the emoticon *is* the preview
+    # icon. That applies to an absent ID only. An ID the catalogue failed to
+    # resolve is a different thing, and calling it "the emoticon fallback" would
+    # report a Telegram decision Telegram never made.
+    if not icon_id:
+        icon_source = "emoticon"
+    elif _is_unresolved(icon):
+        icon_source = "unresolved_reference"
+    else:
+        icon_source = "static_icon"
+
+    info = {
         "effect_id": effect.id,
         "emoticon": getattr(effect, "emoticon", None),
         "premium_required": bool(getattr(effect, "premium_required", False)),
-        # Telegram's rule when there is no static icon: the emoticon *is* the
-        # preview icon. Saying so explicitly beats silently offering the
-        # preview sticker, which is a different picture entirely.
-        "icon_source": "static_icon" if icon is not None else "emoticon",
-        "static_icon": describe_document(icon, "static_icon"),
-        "preview_sticker": describe_document(sticker, "preview_sticker"),
-        "effect_animation": describe_document(animation, "effect_animation"),
+        "icon_source": icon_source,
+        "static_icon": icon,
+        "preview_sticker": sticker,
+        "effect_animation": animation,
     }
 
-    if animation is not None:
+    if _is_unresolved(animation):
+        # Do not quietly fall back to the sticker: the effect *has* an animation,
+        # and substituting a different asset would hide the fault.
+        info["animation_source"] = "unresolved_reference"
+    elif animation is not None:
         info["animation_source"] = "effect_animation"
     else:
-        video_size = premium_effect_size(sticker)
+        sticker_document = catalog.documents.get(sticker_id)
+        video_size = premium_effect_size(sticker_document)
         if video_size is not None:
             info["animation_source"] = "premium_effect_of_preview_sticker"
-            fallback: dict[str, Any] = {
+            fallback = {
                 "asset": "premium_effect_of_preview_sticker",
-                "document_id": getattr(sticker, "id", None),
+                "document_id": getattr(sticker_document, "id", None),
                 "thumb_type": "f",
                 "size_bytes": getattr(video_size, "size", None),
             }
@@ -182,6 +290,8 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
                 if value is not None:
                     fallback[key] = value
             info["effect_animation"] = fallback
+        elif _is_unresolved(sticker):
+            info["animation_source"] = "unresolved_reference"
         else:
             info["animation_source"] = "none"
 

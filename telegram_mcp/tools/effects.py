@@ -8,7 +8,13 @@ show both at once — so nothing here ever claims to show the finished chat.
 import asyncio
 
 from telegram_mcp.runtime import *
-from telegram_mcp.effect_catalog import load_catalog, premium_effect_size, resolve_effect
+from telegram_mcp.effect_catalog import (
+    load_catalog,
+    premium_effect_size,
+    refresh_catalog,
+    resolve_effect,
+    revalidate_catalog,
+)
 from telegram_mcp.tools.inspection import (
     MAX_FRAME_SOURCE_BYTES,
     _download_thumb_capped,
@@ -66,26 +72,40 @@ def _suffix_for(raw: bytes, fmt: str) -> str:
 def _not_found(effect_id, catalog) -> str:
     return (
         f"Effect {effect_id} is not in Telegram's current effect catalogue "
-        f"({len(catalog.effects)} effects), even after a forced refresh. Telegram retires "
-        "effects, and a message keeps the ID it was sent with; the effect still played then."
+        f"({len(catalog.effects)} effects), which was checked against Telegram for this lookup. "
+        "Telegram retires effects and a message keeps the ID it was sent with, so the effect "
+        "still played when it was sent."
     )
 
 
-async def _resolved_effect(cl, effect_id: int):
-    """``(catalog, info)`` for one effect, refreshing once if the ID is unknown.
+async def _resolved_effect(cl, account, effect_id: int):
+    """``(catalog, info)`` for one effect, revalidating once if the ID is unknown.
 
     An unknown ID is the one case Telegram singles out as worth breaking the
     hourly cadence for: it usually means a *new* effect, not a retired one, and
-    reporting "retired" from a cache that is merely stale would be a lie. Exactly
-    one forced refresh — a genuinely unknown ID must not turn every call into a
-    catalogue fetch.
+    reporting "retired" from a merely stale cache would be a lie. Three things
+    keep that from becoming a download per call:
+
+    * a **hash** revalidation, not ``hash=0`` — the answer is almost always "not
+      modified", which carries no payload at all;
+    * nothing at all when this same call already fetched the catalogue, since what
+      it holds is by definition the newest there is;
+    * the miss is remembered on the snapshot, so asking again about the same
+      still-unknown ID is answered locally until the catalogue actually changes.
     """
-    catalog = await load_catalog(cl)
+    catalog, contacted = await load_catalog(cl, account)
     info = resolve_effect(catalog, effect_id)
     if info is not None:
         return catalog, info
-    catalog = await load_catalog(cl, force=True)
-    return catalog, resolve_effect(catalog, effect_id)
+    if contacted or effect_id in catalog.unknown_ids:
+        catalog.unknown_ids.add(effect_id)
+        return catalog, None
+
+    catalog = await revalidate_catalog(cl, account, catalog)
+    info = resolve_effect(catalog, effect_id)
+    if info is None:
+        catalog.unknown_ids.add(effect_id)
+    return catalog, info
 
 
 def _select_asset(catalog, info, asset: str, effect_id: int):
@@ -184,7 +204,7 @@ async def get_message_effect(
         cl = get_client(account)
         await ensure_connected(cl)
         effect_id = int(effect_id)
-        catalog, info = await _resolved_effect(cl, effect_id)
+        catalog, info = await _resolved_effect(cl, account, effect_id)
         if info is None:
             return _not_found(effect_id, catalog)
 
@@ -207,8 +227,11 @@ async def get_message_effect(
         except _STALE_REFERENCE:
             # The ids stay valid; only the references that authorise the download
             # went stale. Refetch the catalogue they came from, take the fresh
-            # objects, and retry once — a second failure is a real one.
-            catalog = await load_catalog(cl, force=True)
+            # objects, and retry once — a second failure is a real one. Passing the
+            # snapshot we actually used is what stops a burst of simultaneous
+            # failures from each buying a full catalogue: whoever refreshes first
+            # moves the generation on, and the rest reuse it.
+            catalog = await refresh_catalog(cl, account, catalog)
             info = resolve_effect(catalog, effect_id)
             if info is None:
                 return _not_found(effect_id, catalog)

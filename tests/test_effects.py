@@ -129,19 +129,19 @@ def _clear_catalog():
 @pytest.mark.asyncio
 async def test_catalogue_is_served_without_touching_telegram_again():
     cl = _FakeClient()
-    await load_catalog(cl)
-    await load_catalog(cl)
-    await load_catalog(cl)
+    for _ in range(3):
+        await load_catalog(cl)
     assert cl.calls == [0], "inside the window a repeat call must not reach Telegram"
 
 
 @pytest.mark.asyncio
 async def test_stale_window_revalidates_with_the_stored_hash_and_keeps_the_payload():
     cl = _FakeClient()
-    catalog = await load_catalog(cl)
+    catalog, contacted = await load_catalog(cl)
+    assert contacted is True, "the first load must reach Telegram"
     catalog.fetched_at -= effect_catalog._REVALIDATE_AFTER_SECONDS + 1
 
-    again = await load_catalog(cl)
+    again, _ = await load_catalog(cl)
     assert cl.calls == [0, 999], "revalidation must send the hash Telegram gave us"
     assert again is catalog, "not-modified means the cache is the only copy"
     assert again.effects, "the payload must survive a not-modified answer"
@@ -172,7 +172,7 @@ async def test_not_modified_against_an_unknown_hash_refetches_from_scratch():
             return await _FakeClient(999).__call__(request)
 
     cl = _Once()
-    catalog = await load_catalog(cl)
+    catalog, _ = await load_catalog(cl)
     assert cl.calls == [0, 0]
     assert catalog.effects
 

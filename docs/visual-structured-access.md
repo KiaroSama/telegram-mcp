@@ -255,18 +255,35 @@ carry both. `inspect_message` reports the former under `message_effect` with its
 **`get_message_effect`** turns that ID into the real assets.
 
 Telegram resolves effects only in bulk, through `messages.GetAvailableEffects`, which returns the
-whole catalogue — 697 effects and 894 documents on a live account. It is fetched once, served from
-memory for an hour (Telegram's own guidance is hourly at most), and after that revalidated with the
-hash Telegram returned, so an agent inspecting many messages pays for one call rather than one per
-message. An ID the cache does not know is the documented exception: it forces one immediate
-refresh, because a fresh cache missing an ID usually means a *new* effect, not a retired one.
-Exactly one — a genuinely unknown ID does not turn every call into a catalogue fetch.
+whole catalogue — 697 effects and 894 documents on a live account. There are three levels of
+refresh, and keeping them apart is the whole design:
 
-File references expire on Telegram's schedule and authorise exactly one download. When a transfer
-fails with an expired, invalid or empty reference, the catalogue is refetched, the same effect
-re-resolved, the fresh document taken and the download retried **once**, under the same byte cap.
+| | Cost | When |
+|---|---|---|
+| cached | nothing is sent | inside the hour (Telegram's guidance is hourly at most) |
+| revalidate | a round trip, no payload | an ID the cache does not know |
+| hard refresh (`hash=0`) | the entire catalogue again | an expired file reference |
+
+An unknown ID is Telegram's documented exception to the hourly cadence, because a fresh cache
+missing an ID usually means a *new* effect rather than a retired one. It is answered by sending the
+**stored hash** back, not `hash=0` — the reply is almost always "not modified" and carries nothing.
+Two further guards keep it from becoming a download per call: if the same call already fetched the
+catalogue then what it holds is by definition the newest there is, and a miss is remembered on that
+snapshot, so asking again about the same still-unknown ID is answered locally until the catalogue
+actually changes. Concurrent lookups for one unknown ID collapse into a single revalidation.
+
+`hash=0` is reserved for a stale file reference, since only a fresh payload carries fresh
+references. Expired, invalid and empty reference errors are caught around every effect download;
+the catalogue is refetched, the effect re-resolved, the fresh document taken and the transfer
+retried **once**, under the same byte cap. The snapshot that failed is passed along, so several
+simultaneous failures on one snapshot buy one catalogue between them rather than one each.
 Unrelated RPC and network errors are never retried this way — refetching a catalogue would fix
 nothing.
+
+Catalogue state is **per account**. A `Document` carries an `access_hash` and a `file_reference`
+that authorise a download for the session that fetched them, and nothing documents those as
+portable between accounts, so no part of the cache — not even the effect metadata — is shared
+across them.
 
 The tool takes an explicit rung on a cost ladder:
 
@@ -281,6 +298,13 @@ Not every effect has an icon document. Telegram's rule for that case is that the
 icon**, which `metadata` reports as `icon_source: "emoticon"` alongside the emoticon itself. Asking
 for `asset="icon"` there says so rather than quietly returning the preview sticker, which is a
 different picture.
+
+That applies to an *absent* `static_icon_id` only. An ID that is present but whose document the
+catalogue failed to include is a different thing — an inconsistency in what Telegram returned, not
+a decision Telegram made — and is reported as `icon_source: "unresolved_reference"` with the
+referenced document ID preserved. The same treatment covers `effect_sticker_id` and
+`effect_animation_id`: a dangling animation reference is never quietly replaced by the sticker's
+premium effect, because that would hide the fault behind a different asset.
 
 Most effects have **no animation document of their own** — 574 of 697 on a live account. For those
 Telegram's fallback is the preview sticker's own premium effect, the same `type="f"` asset
