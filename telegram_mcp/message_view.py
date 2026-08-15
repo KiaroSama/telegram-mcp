@@ -177,7 +177,7 @@ _JOINERS = (_ZWJ, _ZWNJ)
 
 
 def _sequence_starts(text: str) -> list[int]:
-    """Indices where a new user-perceived sequence begins.
+    r"""Indices where a new user-perceived sequence begins.
 
     UAX #29 extended grapheme clusters via ``regex``'s ``\X``, which is the only
     way to get this right: a hand-rolled scan kept missing whole categories — emoji
