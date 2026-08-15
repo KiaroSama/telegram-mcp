@@ -201,3 +201,27 @@ sticker.webp
 two.png
 aliases.json
 incoming_feed.jsonl
+
+# Hook Maker: local/private files (auto-managed)
+/.ai/
+/secrets.md
+/explain-AI.md
+/reference.md
+/CLAUDE.md
+/AGENTS.md
+/.agents/
+/.claude/
+/.kiro/
+/.codex/
+/.cursor/
+/.cline/
+/graphify-out/
+.ignoreme
+**/.ignoreme
+/.env
+/.env.*
+!/.env.example
+!/.env.sample
+!/.env.template
+!/.env.dist
+/skills-lock.json
