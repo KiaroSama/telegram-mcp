@@ -197,15 +197,22 @@ Telethon objects rather than cleaned a second time, because the generic sanitize
 deleted ZWNJ cannot be recovered afterwards. IDs, dates, usernames and permalinks stay exactly as
 the upstream view computed them.
 
-A reply quote is fidelity-safe, not character-for-character exact, and says so: when unsafe
-invisibles were removed or the text was truncated it carries `"modified": true` and
-`"truncated"`, and the note states plainly that it is not exact. Either way `offset` is the
+A reply quote is fidelity-safe, not character-for-character exact, and says so. Filtering and
+truncation are reported as separate facts — `"filtered"` and `"truncated"` — computed rather than
+guessed from the result, because a quote that genuinely ends in an ellipsis is indistinguishable
+from a truncated one by inspection. `text_fidelity` is described the same way and carries
+`text_fidelity_modified`; neither claims byte-for-byte exactness. Either way `offset` is the
 UTF-16 code-unit offset of the fragment inside the **original replied-to message**, not inside
 the replying message.
 
-Emoji tag characters are kept only inside a well-formed sequence — an emoji base followed by tag
-specifiers and terminated by TAG CANCEL, which is how a subdivision flag like 🏴󠁧󠁢󠁳󠁣󠁴󠁿 is written. A
-stray tag character outside such a sequence is invisible on its own and is removed.
+Emoji tag characters are kept only inside a sequence that is well formed by UTS #51: the black
+flag base, one to six tag specifiers drawn from the digits and lowercase letters, and TAG CANCEL —
+which is how a subdivision flag like 🏴󠁧󠁢󠁳󠁣󠁴󠁿 is written. Anything else is removed, including a tag run
+hiding behind a CJK ideograph or an unrelated emoji.
+
+Truncation cuts on a safe boundary: it never leaves a dangling ZWJ, variation selector, combining
+mark, or a flag base whose tag specifiers were cut away, so a family emoji or a Persian word is
+either kept whole or dropped whole.
 
 Inline button labels are always replaced by the cleaned list, or dropped entirely when every
 label cleans to nothing — leaving the key untouched would have handed back the raw values.
@@ -220,8 +227,11 @@ exact on-screen appearance. The `free` flag (usable without Premium) is reported
 
 Premium stickers can carry a *second* animation — an effect Telegram plays over the sticker,
 shipped as a `VideoSize` of type `"f"`. `get_media_details` now reports it under
-`premium_effect` with its dimensions. It is reported, not rendered: the effect only makes sense
-in the chat that triggers it, so `get_telegram_frames` remains the accurate route.
+`premium_effect` with its dimensions, and `get_media_frames(..., premium_effect=True)` samples
+that asset on demand. Those frames are the effect **on its own**: Telegram composites it over the
+sticker in the chat, so the finished appearance is neither these frames nor the sticker alone.
+Every record is marked `"composite_fidelity": "asset-only"` and points at `get_telegram_frames`
+for the real composite.
 
 ## Screenshots are never attributed to a message
 

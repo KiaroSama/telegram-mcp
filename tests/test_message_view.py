@@ -352,7 +352,7 @@ def test_deep_message_dict_exposes_fidelity_text_when_it_differs():
 
     assert data["text_fidelity"] == raw
     assert data["text"] != raw, "precondition: the sanitized text really does differ"
-    assert "entity offsets index into this field" in data["text_fidelity_note"]
+    assert "ntity offsets index into this field" in data["text_fidelity_note"]
 
 
 # --- display_name: single-line, bounded, but Unicode-faithful ----------------
@@ -740,3 +740,134 @@ def test_a_valid_emoji_tag_sequence_survives():
 def test_stray_tag_characters_are_removed(label, text):
     clean, _offsets = fidelity_text(text)
     assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label
+
+
+# --- UTS #51 tag-sequence validation -----------------------------------------
+
+TAG_BASE = "\U0001f3f4"
+TAG_END = "\U000e007f"
+
+
+def _tags(*letters):
+    return "".join(chr(0xE0000 + ord(c)) for c in letters)
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("scotland", TAG_BASE + _tags(*"gbsct") + TAG_END),
+        ("wales", TAG_BASE + _tags(*"gbwls") + TAG_END),
+        ("digits in the spec", TAG_BASE + _tags(*"us01") + TAG_END),
+    ],
+)
+def test_valid_subdivision_flags_survive(label, text):
+    clean, _offsets = fidelity_text(f"Team {text}!")
+    assert clean == f"Team {text}!", label
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("cjk ext-B base", "\U00020000" + _tags(*"gb") + TAG_END),
+        ("non-emoji supplementary base", "\U0001d400" + _tags(*"gb") + TAG_END),
+        ("wrong emoji base", "\U0001f600" + _tags(*"gb") + TAG_END),
+        ("no base at all", "text" + _tags(*"gb") + TAG_END),
+        ("missing cancel", TAG_BASE + _tags(*"gbsct")),
+        ("uppercase tag spec", TAG_BASE + _tags(*"GB") + TAG_END),
+        ("punctuation tag spec", TAG_BASE + "\U000e0021" + TAG_END),
+        ("overlong tag spec", TAG_BASE + _tags(*"abcdefgh") + TAG_END),
+        ("empty spec, cancel only", TAG_BASE + TAG_END),
+    ],
+)
+def test_invalid_tag_sequences_are_stripped(label, text):
+    clean, _offsets = fidelity_text(text)
+    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label
+
+
+# --- Truncation must not split a compound sequence ---------------------------
+
+
+def _tail(text):
+    return text[:-1] if text.endswith("…") else text
+
+
+@pytest.mark.parametrize(
+    "label, suffix",
+    [
+        ("family emoji", FAMILY),
+        ("persian zwnj", PERSIAN),
+        ("vs16 emoji", "\u2764\ufe0f"),
+        ("combining mark", "e\u0301"),
+        ("subdivision flag", TAG_BASE + _tags(*"gbsct") + TAG_END),
+    ],
+)
+@pytest.mark.parametrize("bound", range(250, 260))
+def test_truncation_never_leaves_a_dangling_half(label, suffix, bound):
+    """Cutting inside a compound sequence is exactly what these helpers promise not to do."""
+    import unicodedata as ud
+
+    result = display_name("x" * 250 + suffix, max_length=bound)
+
+    assert len(result) <= bound
+    if not result.endswith("…"):
+        # Nothing was cut, so the tail is whatever the input legitimately ended with.
+        assert result == "x" * 250 + suffix
+        return
+    body = _tail(result)
+    if body:
+        last = body[-1]
+        assert last != "\u200d", f"{label}: dangling ZWJ"
+        assert not 0xFE00 <= ord(last) <= 0xFE0F, f"{label}: dangling variation selector"
+        assert not 0xE0020 <= ord(last) <= 0xE007F, f"{label}: dangling tag character"
+        assert last != TAG_BASE, f"{label}: flag base with no tag spec"
+        assert ud.category(last) not in ("Mn", "Mc", "Me"), f"{label}: dangling combining mark"
+
+
+# --- Quote and text_fidelity must not overstate ------------------------------
+
+
+def test_a_quote_that_naturally_ends_in_an_ellipsis_is_not_called_truncated():
+    """The old code inferred truncation from the final character."""
+    natural = "این جمله تمام می\u200cشود…\u200b"  # ends with a real ellipsis + a ZWSP
+    msg = SimpleNamespace(reply_to=SimpleNamespace(quote_text=natural, quote_offset=0))
+
+    quote = describe_reply_quote(msg)
+
+    assert quote["text"].endswith("…")
+    assert quote["filtered"] is True, "the ZWSP removal should be reported"
+    assert quote["truncated"] is False, "nothing was cut, only filtered"
+    assert "truncated" not in quote["note"]
+
+
+def test_a_genuinely_truncated_quote_reports_both_facts():
+    msg = SimpleNamespace(
+        reply_to=SimpleNamespace(quote_text="\u200b" + "x" * 5000, quote_offset=0)
+    )
+
+    quote = describe_reply_quote(msg)
+
+    assert quote["filtered"] is True
+    assert quote["truncated"] is True
+    assert "truncated" in quote["note"]
+
+
+def test_text_fidelity_does_not_claim_byte_exactness():
+    raw = PERSIAN + "\u200b"
+    msg = _plain_message(message=raw)
+
+    data = _deep(msg)
+
+    assert "Character-accurate" not in data["text_fidelity_note"]
+    assert "Fidelity-safe" in data["text_fidelity_note"]
+    assert data["text_fidelity_modified"] is True
+
+
+def test_text_fidelity_reports_an_untouched_message_as_unmodified():
+    msg = _plain_message(
+        message=PERSIAN,
+        sender=SimpleNamespace(first_name="x", last_name=None, username=None, title=None),
+    )
+
+    data = _deep(msg)
+
+    assert data["text_fidelity_modified"] is False

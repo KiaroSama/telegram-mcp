@@ -288,3 +288,71 @@ def test_custom_emoji_docstring_matches_the_lottie_behaviour():
     assert "telegram-mcp[lottie]" in doc
     assert "text_color" in doc
     assert "nothing here rasterises" not in doc, "the old never-renders claim is still there"
+
+
+# --- Premium sticker effect sampling -----------------------------------------
+
+
+def _effect_message(with_effect=True):
+    video_thumbs = [SimpleNamespace(type="v", w=100, h=100, size=10)]
+    if with_effect:
+        video_thumbs.append(SimpleNamespace(type="f", w=512, h=512, size=4096))
+    document = SimpleNamespace(id=7, attributes=[], thumbs=[], video_thumbs=video_thumbs)
+    return SimpleNamespace(id=99, media=object(), document=document, sticker=document, file=None)
+
+
+@pytest.mark.asyncio
+async def test_premium_effect_frames_are_labelled_as_asset_only():
+    """The asset is not the composite Telegram draws; saying otherwise would mislead."""
+    import json
+
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    msg = _effect_message()
+
+    class _Client:
+        async def download_media(self, document, file=None, thumb=None):
+            assert thumb is not None and thumb.type == "f", "the effect asset was not requested"
+            return b"webm-bytes"
+
+    async def _fake_frames(fn, raw, suffix, count, max_dimension):
+        assert suffix == ".webm"
+        return [{"frame_index": 0}], ["image"]
+
+    import telegram_mcp.tools.inspection as inspection
+
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake_frames
+    try:
+        result = await _premium_effect_frames(
+            _Client(),
+            msg,
+            {"premium_effect": {"kind": "premium_sticker_effect"}, "kind": "sticker"},
+            count=2,
+            max_dimension=256,
+        )
+    finally:
+        inspection.asyncio.to_thread = original
+
+    payload = json.loads(result[0])
+    assert payload["results"][0]["source_asset"] == "premium_effect"
+    assert payload["results"][0]["composite_fidelity"] == "asset-only"
+    assert "ON ITS OWN" in payload["note"]
+    assert "get_telegram_frames" in payload["note"]
+
+
+@pytest.mark.asyncio
+async def test_premium_effect_request_without_an_effect_says_so():
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    result = await _premium_effect_frames(
+        object(),
+        _effect_message(with_effect=False),
+        {"kind": "sticker"},
+        count=2,
+        max_dimension=64,
+    )
+
+    assert isinstance(result, str)
+    assert "no premium sticker effect" in result
+    assert "get_media_details" in result
