@@ -86,6 +86,14 @@ clip because the first and last frames of a video are frequently black. Media la
 front, the check runs after the transfer instead. Use `download_media` for anything bigger.
 `get_media_frames(-1001234567890, 5533, count=6)`
 
+**`get_custom_emoji(document_ids, count=1, max_dimension=1568, account=None) -> list`**
+Resolve custom/premium emoji IDs — the ones `inspect_message` reports under `custom_emoji` — into
+metadata plus a preview image each. Static emoji return the document itself; animated WebM emoji
+return `count` extracted frames; `.tgs` Lottie emoji are not rasterised and return Telegram's
+static thumbnail instead, with `get_telegram_frames` named as the way to see them actually
+animate. Accepts one ID or a list.
+`get_custom_emoji(5350305806051571134)`
+
 ### Visual (Windows only)
 
 **`list_telegram_windows(process_name=None) -> str`**
@@ -94,20 +102,20 @@ Every visible Telegram Desktop window with `hwnd`, `title`, `rect`, `width`/`hei
 exist (main window, media viewer, separate chat window) to get the `hwnd` to target.
 `list_telegram_windows()`
 
-**`get_telegram_screen(hwnd=None, method="window", client_only=False, max_dimension=1568, image_format="png", process_name=None) -> list`**
+**`get_telegram_screen(hwnd=None, method="window", client_only=False, max_dimension=1568, native_resolution=False, image_format="png", process_name=None) -> list`**
 A text block of window metadata (including the method actually used) followed by one capture
 of the whole window as an image block. Defaults to the main window. `client_only=True` drops
 the title bar and borders.
 `get_telegram_screen()`
 
-**`get_telegram_region(left, top, right, bottom, hwnd=None, method="window", max_dimension=1568, image_format="png", process_name=None) -> list`**
+**`get_telegram_region(left, top, right, bottom, hwnd=None, method="window", max_dimension=1568, native_resolution=False, image_format="png", process_name=None) -> list`**
 Same capture cropped to a window-relative rectangle in pixels. Use it to zoom into the
 message list, a single bubble or the sidebar without spending tokens on the rest of the
 window. Read the window size from `get_telegram_screen` metadata (`full_size`) or from
 `list_telegram_windows`.
 `get_telegram_region(320, 120, 1180, 700)`
 
-**`get_telegram_frames(count=4, interval_ms=400, hwnd=None, method="window", max_dimension=900, image_format="png", process_name=None) -> list`**
+**`get_telegram_frames(count=4, interval_ms=400, hwnd=None, method="window", max_dimension=900, native_resolution=False, image_format="png", process_name=None) -> list`**
 Several captures spaced over time, returned as image blocks in capture order. This is how you
 observe motion the API cannot describe: an animated `.tgs` sticker playing, a video preview, a
 typing indicator, a live UI state change. `count` is clamped to 1-8 and `interval_ms` to
@@ -147,6 +155,32 @@ minimized window, because that rectangle shows other applications.
 Captures are taken at native resolution with per-monitor DPI awareness enabled, so text on
 a scaled display stays sharp rather than being upscaled from a lower-resolution surface.
 
+## Text fidelity and entity offsets
+
+Telegram reports entity `offset`/`length` in **UTF-16 code units** against its own raw message
+string. The server's general-purpose sanitizer strips every Unicode `Cf` character and collapses
+newline runs, which changes the string's length — and which also destroys characters that carry
+real meaning: ZWNJ (U+200C), mandatory in Persian (`می‌کند`), ZWJ (U+200D) that holds emoji
+families like `👨‍👩‍👧` together, and the LRM/RLM marks that make mixed-direction text render
+correctly.
+
+So the structured tools add a `text_fidelity` field whenever it differs from the sanitized
+`text`, and **entity offsets index into `text_fidelity`, not into `text`**. That string keeps the
+message intact except for genuinely unsafe invisibles — zero-width padding (ZWSP, word joiner,
+BOM), the bidi overrides and isolates used for spoofing, and C0 control characters — and offsets
+are rebased so they still line up after a removal. `text_fidelity` is untrusted user content like
+every other message field.
+
+## Screenshots are never attributed to a message
+
+`inspect_message(include_screen=True)` captures the Telegram Desktop window as it looks right
+now. Telegram exposes no mapping from a window to a chat ID, so the picture may show a completely
+different conversation than `chat_id`. The result says so explicitly: the `screen` block carries
+`correlation: "unverified"`, a plain-language warning, the captured window `title`, and a
+best-effort `title_matches_chat` hint (`true`/`false`/`null`) that is a hint and never a
+verification. Do not attribute anything visible in that image to the requested message unless you
+have checked the title yourself.
+
 ## Known limitations
 
 * The four capture tools are **Windows-only**. Everything structured works everywhere.
@@ -163,6 +197,15 @@ a scaled display stays sharp rather than being upscaled from a lower-resolution 
   the fan-out with a message naming the configured accounts instead. `inspect_messages` and
   `get_media_details` return text only and fan out normally. The capture tools never touch
   Telegram, so `account` does not apply to them at all.
+* **`native_resolution=True` opts out of the size cap** on the three capture tools when you
+  genuinely need pixel-accurate rendering. It is expensive — a 4K window is roughly 20k+ tokens,
+  and `get_telegram_frames` multiplies that by the frame count. Prefer `get_telegram_region` to
+  get full detail on a small area instead. The metadata always says which you got:
+  `native_resolution: true`, or `downscaled: true` with `original_width`/`original_height`.
+* **`client_only=True` captures the client area**, not the window: the title bar, borders and
+  resize grips are excluded, so the image is smaller than the window rectangle and offset from
+  it. The metadata reports `captured_area`, `client_rect` and `client_offset_in_window`, and the
+  blank-frame fallback keeps the same framing rather than silently switching to the full window.
 * **Images cost tokens.** Every image is base64-encoded into the model's context. Single-shot
   tools cap the longest side at 1568px (roughly 1–3k tokens for a full window); the two
   multi-frame tools default to 900px, because the cost is paid once per frame. Images are

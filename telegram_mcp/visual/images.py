@@ -80,11 +80,20 @@ def encode_image(
     image_format: str = "png",
     max_dimension: Optional[int] = MAX_IMAGE_DIMENSION,
     quality: int = 85,
+    native: bool = False,
 ) -> tuple[bytes, dict[str, Any]]:
     """Encode a PIL image, returning ``(bytes, metadata)``.
 
     PNG is the default because Telegram screenshots are mostly text and UI edges,
     where JPEG artifacts hurt readability the most.
+
+    ``native=True`` is the explicit opt-out of the size cap: the image is encoded
+    at whatever resolution it already has, ``max_dimension`` is ignored, and the
+    metadata carries ``native_resolution`` so the caller knows no downscale was
+    applied. It exists because the clamp inside ``fit_image`` is deliberately
+    unescapable through ``max_dimension`` alone. It says nothing about the codec:
+    a native JPEG or WEBP is still lossy at ``quality``, so PNG is the format to
+    ask for when the pixels themselves have to survive.
     """
     _require_pillow()
     key = (image_format or "png").lower().lstrip(".")
@@ -95,7 +104,9 @@ def encode_image(
     pil_format, mime_type = IMAGE_FORMATS[key]
 
     original_size = (image.width, image.height)
-    image, resized = fit_image(image, max_dimension)
+    resized = False
+    if not native:
+        image, resized = fit_image(image, max_dimension)
 
     if pil_format == "JPEG" and image.mode not in ("RGB", "L"):
         image = image.convert("RGB")
@@ -122,4 +133,6 @@ def encode_image(
     if resized:
         meta["original_width"], meta["original_height"] = original_size
         meta["downscaled"] = True
+    if native:
+        meta["native_resolution"] = True
     return data, meta

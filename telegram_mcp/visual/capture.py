@@ -42,10 +42,104 @@ _PW_RENDERFULLCONTENT = 0x00000002
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 
 _DPI_AWARENESS_CONFIGURED = False
+_WIN32: Optional[tuple[Any, Any, Any]] = None
 
 
 class CaptureError(RuntimeError):
     """Raised when a window cannot be located or captured."""
+
+
+def _win32() -> tuple[Any, Any, Any]:
+    """Return the bound ``(user32, gdi32, kernel32)`` libraries.
+
+    Declaring argtypes/restype is not optional here. Without it ctypes assumes
+    ``c_int`` for arguments and return values, and on 64-bit Windows every
+    HWND/HDC/HBITMAP is a 64-bit pointer: an unbound ``GetWindowDC`` returned
+    -1677648242 on this machine where the real handle is 18446744071813798555. It
+    round-trips only while the handle's upper 32 bits are all ones (sign extension
+    rebuilds it by luck) and silently produces an invalid handle when they are not.
+
+    The libraries are cached module-level singletons because ``ctypes.WinDLL()``
+    builds a *new* object on every call and function signatures are cached per
+    object — binding a throwaway instance would leave every other call site
+    unbound.
+    """
+    global _WIN32
+    if _WIN32 is not None:
+        return _WIN32
+
+    import ctypes.wintypes as wintypes
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    signatures = (
+        (user32, "EnumWindows", [ctypes.c_void_p, wintypes.LPARAM], wintypes.BOOL),
+        (user32, "IsWindowVisible", [wintypes.HWND], wintypes.BOOL),
+        (user32, "IsIconic", [wintypes.HWND], wintypes.BOOL),
+        (user32, "GetWindowTextLengthW", [wintypes.HWND], ctypes.c_int),
+        (user32, "GetWindowTextW", [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
+        (user32, "GetClassNameW", [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int], ctypes.c_int),
+        (
+            user32,
+            "GetWindowThreadProcessId",
+            [wintypes.HWND, wintypes.LPDWORD],
+            wintypes.DWORD,
+        ),
+        (user32, "GetWindowRect", [wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
+        (user32, "GetClientRect", [wintypes.HWND, ctypes.POINTER(wintypes.RECT)], wintypes.BOOL),
+        (user32, "ClientToScreen", [wintypes.HWND, ctypes.POINTER(wintypes.POINT)], wintypes.BOOL),
+        (user32, "GetForegroundWindow", [], wintypes.HWND),
+        (user32, "GetDpiForWindow", [wintypes.HWND], wintypes.UINT),
+        (user32, "GetWindowDC", [wintypes.HWND], wintypes.HDC),
+        (user32, "ReleaseDC", [wintypes.HWND, wintypes.HDC], ctypes.c_int),
+        (user32, "PrintWindow", [wintypes.HWND, wintypes.HDC, wintypes.UINT], wintypes.BOOL),
+        (gdi32, "CreateCompatibleDC", [wintypes.HDC], wintypes.HDC),
+        (
+            gdi32,
+            "CreateCompatibleBitmap",
+            [wintypes.HDC, ctypes.c_int, ctypes.c_int],
+            wintypes.HBITMAP,
+        ),
+        (gdi32, "SelectObject", [wintypes.HDC, wintypes.HGDIOBJ], wintypes.HGDIOBJ),
+        (gdi32, "DeleteObject", [wintypes.HGDIOBJ], wintypes.BOOL),
+        (gdi32, "DeleteDC", [wintypes.HDC], wintypes.BOOL),
+        (
+            gdi32,
+            "GetDIBits",
+            [
+                wintypes.HDC,
+                wintypes.HBITMAP,
+                wintypes.UINT,
+                wintypes.UINT,
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                wintypes.UINT,
+            ],
+            ctypes.c_int,
+        ),
+        (
+            kernel32,
+            "OpenProcess",
+            [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD],
+            wintypes.HANDLE,
+        ),
+        (
+            kernel32,
+            "QueryFullProcessImageNameW",
+            [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR, wintypes.LPDWORD],
+            wintypes.BOOL,
+        ),
+        (kernel32, "CloseHandle", [wintypes.HANDLE], wintypes.BOOL),
+    )
+    for library, name, argtypes, restype in signatures:
+        function = getattr(library, name)
+        function.argtypes = argtypes
+        function.restype = restype
+
+    _WIN32 = (user32, gdi32, kernel32)
+    return _WIN32
 
 
 @dataclass
@@ -134,7 +228,7 @@ def _ensure_dpi_awareness() -> None:
 def _process_image_path(pid: int) -> str:
     import ctypes.wintypes as wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _user32, _gdi32, kernel32 = _win32()
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
         return ""
@@ -160,8 +254,7 @@ def list_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[WindowInfo]:
 
     import ctypes.wintypes as wintypes
 
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32, _gdi32, _kernel32 = _win32()
     foreground = user32.GetForegroundWindow()
     target = process_name.lower()
     windows: list[WindowInfo] = []
@@ -236,16 +329,45 @@ def find_target_window(
     )
 
 
+def _client_geometry(hwnd: int) -> tuple[int, int, tuple[int, int, int, int]]:
+    """Client-area size plus its rectangle in screen coordinates.
+
+    The client area excludes the title bar, borders and resize grips, so it is
+    both smaller than and offset from the window rectangle. Capturing it needs
+    both numbers: the size for the bitmap, the screen rectangle for a screen grab.
+    """
+    import ctypes.wintypes as wintypes
+
+    user32, _gdi32, _kernel32 = _win32()
+
+    rect = wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        raise CaptureError(f"Could not read the client rectangle of window {hwnd}.")
+    width, height = rect.right - rect.left, rect.bottom - rect.top
+
+    origin = wintypes.POINT(rect.left, rect.top)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(origin)):
+        raise CaptureError(
+            f"Could not map the client area of window {hwnd} to screen coordinates."
+        )
+    return width, height, (origin.x, origin.y, origin.x + width, origin.y + height)
+
+
 def _capture_print_window(window: WindowInfo, client_only: bool):
     """Capture the window's own pixels via PrintWindow + GetDIBits."""
     import ctypes.wintypes as wintypes
 
     from PIL import Image
 
-    user32 = ctypes.WinDLL("user32", use_last_error=True)
-    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    user32, gdi32, _kernel32 = _win32()
 
-    width, height = window.width, window.height
+    if client_only:
+        # PW_CLIENTONLY renders only the client area, so the bitmap has to be that
+        # size too. Keeping the window size would leave the excluded chrome as a
+        # blank band and report dimensions the image does not actually have.
+        width, height, _screen_rect = _client_geometry(window.hwnd)
+    else:
+        width, height = window.width, window.height
     if width <= 0 or height <= 0:
         raise CaptureError(f"Window {window.hwnd} has a zero-sized rectangle; nothing to capture.")
 
@@ -270,13 +392,16 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
     window_dc = user32.GetWindowDC(window.hwnd)
     if not window_dc:
         raise CaptureError(f"Could not obtain a device context for window {window.hwnd}.")
-    memory_dc = bitmap = None
+    memory_dc = bitmap = previous_object = None
     try:
         memory_dc = gdi32.CreateCompatibleDC(window_dc)
         bitmap = gdi32.CreateCompatibleBitmap(window_dc, width, height)
         if not memory_dc or not bitmap:
             raise CaptureError("Could not allocate an off-screen bitmap for the capture.")
-        gdi32.SelectObject(memory_dc, bitmap)
+        # Keep what SelectObject displaces: DeleteObject refuses to free a bitmap
+        # that is still selected into a DC, so dropping this handle leaks the
+        # bitmap on every single capture.
+        previous_object = gdi32.SelectObject(memory_dc, bitmap)
 
         flags = _PW_RENDERFULLCONTENT | (_PW_CLIENTONLY if client_only else 0)
         if not user32.PrintWindow(window.hwnd, memory_dc, flags):
@@ -301,6 +426,8 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
             "RGB"
         )
     finally:
+        if memory_dc and previous_object:
+            gdi32.SelectObject(memory_dc, previous_object)
         if bitmap:
             gdi32.DeleteObject(bitmap)
         if memory_dc:
@@ -308,7 +435,7 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
         user32.ReleaseDC(window.hwnd, window_dc)
 
 
-def _capture_screen_region(window: WindowInfo):
+def _capture_screen_region(window: WindowInfo, client_only: bool = False):
     from PIL import ImageGrab
 
     if window.is_minimized:
@@ -316,7 +443,8 @@ def _capture_screen_region(window: WindowInfo):
             f"Window {window.hwnd} is minimized, so its screen area shows other windows. "
             "Use method='window' to capture Telegram's own rendering instead."
         )
-    image = ImageGrab.grab(bbox=window.rect, all_screens=True)
+    box = _client_geometry(window.hwnd)[2] if client_only else window.rect
+    image = ImageGrab.grab(bbox=box, all_screens=True)
     return image.convert("RGB")
 
 
@@ -361,18 +489,37 @@ def capture_window(
     window = find_target_window(hwnd=hwnd, process_name=process_name)
     _ensure_dpi_awareness()
 
-    meta: dict[str, Any] = {"method": method}
+    meta: dict[str, Any] = {"method": method, "client_only": client_only}
     if method == "window":
         image = _capture_print_window(window, client_only=client_only)
         if _looks_blank(image) and not window.is_minimized:
             # Hardware-accelerated windows occasionally decline to redraw off-screen.
+            # The fallback keeps client_only, so the caller still gets the area it
+            # asked for rather than a silently different framing.
             meta["fallback"] = "window capture returned a blank frame; used the screen region"
             meta["method"] = "screen"
-            image = _capture_screen_region(window)
+            image = _capture_screen_region(window, client_only=client_only)
     else:
-        image = _capture_screen_region(window)
+        image = _capture_screen_region(window, client_only=client_only)
 
+    # Report what was actually captured: with client_only the image is the client
+    # area, which is smaller than and offset from the window rectangle.
     meta["full_size"] = {"width": image.width, "height": image.height}
+    if client_only:
+        meta["captured_area"] = "client"
+        client_width, client_height, client_rect = _client_geometry(window.hwnd)
+        meta["client_rect"] = {
+            "left": client_rect[0],
+            "top": client_rect[1],
+            "right": client_rect[2],
+            "bottom": client_rect[3],
+        }
+        meta["client_offset_in_window"] = {
+            "x": client_rect[0] - window.rect[0],
+            "y": client_rect[1] - window.rect[1],
+        }
+    else:
+        meta["captured_area"] = "window"
 
     if region:
         left, top, right, bottom = region

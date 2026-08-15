@@ -167,3 +167,117 @@ def test_window_enumeration_is_empty_for_an_unknown_process():
 
     with pytest.raises(capture.CaptureError, match="No visible"):
         capture.find_target_window(process_name="no-such-telegram-build.exe")
+
+
+# --- Regressions for the Win32 correctness fixes -----------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_win32_handles_are_bound_to_pointer_types():
+    """Handle-returning APIs must not fall back to ctypes' 32-bit c_int default.
+
+    Unbound, GetWindowDC returned a truncated negative int on 64-bit Windows; it
+    only round-tripped because sign extension happened to rebuild the real handle.
+    """
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    user32, gdi32, kernel32 = capture._win32()
+
+    assert user32.GetWindowDC.restype is wintypes.HDC
+    assert user32.GetWindowDC.argtypes == [wintypes.HWND]
+    assert gdi32.CreateCompatibleBitmap.restype is wintypes.HBITMAP
+    assert gdi32.SelectObject.restype is wintypes.HGDIOBJ
+    assert kernel32.OpenProcess.restype is wintypes.HANDLE
+    assert user32.GetForegroundWindow.restype is wintypes.HWND
+    for bound in (user32.GetWindowDC, gdi32.CreateCompatibleDC, kernel32.OpenProcess):
+        assert bound.restype is not ctypes.c_int
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_win32_libraries_are_cached_singletons():
+    """A fresh ctypes.WinDLL would drop the signatures bound above."""
+    first = capture._win32()
+    second = capture._win32()
+    assert first is second
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_client_geometry_is_inside_the_window_rectangle():
+    """client_only must report the client area, not the window rectangle."""
+    windows = capture.list_windows()
+    if not windows:
+        pytest.skip("no Telegram Desktop window is open")
+    window = windows[0]
+
+    width, height, screen_rect = capture._client_geometry(window.hwnd)
+    assert 0 < width <= window.width
+    assert 0 < height <= window.height
+    # The client area starts at or inside the window's top-left corner.
+    assert screen_rect[0] >= window.rect[0]
+    assert screen_rect[1] >= window.rect[1]
+    assert screen_rect[2] - screen_rect[0] == width
+    assert screen_rect[3] - screen_rect[1] == height
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_client_only_capture_matches_the_client_rectangle():
+    if not capture.list_windows():
+        pytest.skip("no Telegram Desktop window is open")
+
+    full, window, full_meta = capture.capture_window(client_only=False)
+    client, _window, client_meta = capture.capture_window(client_only=True)
+    expected_width, expected_height, _rect = capture._client_geometry(window.hwnd)
+
+    assert client.size == (expected_width, expected_height)
+    assert client.size != full.size, "client_only returned the whole window"
+    assert client_meta["captured_area"] == "client"
+    assert full_meta["captured_area"] == "window"
+    assert client_meta["client_offset_in_window"]["y"] > 0  # title bar excluded
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_repeated_captures_do_not_leak_gdi_objects():
+    """DeleteObject silently fails on a bitmap still selected into a DC."""
+    import ctypes
+    import ctypes.wintypes as wintypes
+
+    if not capture.list_windows():
+        pytest.skip("no Telegram Desktop window is open")
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    gdi32 = ctypes.WinDLL("gdi32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    user32.GetGuiResources.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    user32.GetGuiResources.restype = wintypes.DWORD
+    user32.GetDC.argtypes = [wintypes.HWND]
+    user32.GetDC.restype = wintypes.HDC
+    gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+    gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+    gdi32.DeleteObject.argtypes = [wintypes.HGDIOBJ]
+    gdi32.DeleteObject.restype = wintypes.BOOL
+    process = kernel32.GetCurrentProcess()
+
+    def gdi_objects():
+        return user32.GetGuiResources(process, 0)  # GR_GDIOBJECTS
+
+    # Prove the probe can see a leak before trusting it to report none. The count
+    # is 0 until this process owns a GDI object, so a bare reading proves nothing.
+    screen_dc = user32.GetDC(None)
+    control_before = gdi_objects()
+    leaked = [gdi32.CreateCompatibleBitmap(screen_dc, 8, 8) for _ in range(10)]
+    control_delta = gdi_objects() - control_before
+    for handle in leaked:
+        gdi32.DeleteObject(handle)
+    if control_delta < 8:
+        pytest.skip(
+            "GetGuiResources does not track GDI objects here; a result would be meaningless"
+        )
+
+    capture.capture_window()  # warm up lazy imports and bindings
+    before = gdi_objects()
+    for _ in range(15):
+        capture.capture_window()
+    assert gdi_objects() - before <= 2

@@ -8,8 +8,10 @@ from types import SimpleNamespace
 
 import pytest
 
+from sanitize import sanitize_user_content
 from telegram_mcp.message_view import (
     deep_message_dict,
+    fidelity_text,
     describe_custom_emoji,
     describe_entities,
     describe_media,
@@ -255,3 +257,94 @@ def test_deep_message_dict_preserves_base_and_adds_detail():
     assert data["topic"] == {"is_topic_message": True, "topic_id": 99}
     assert data["permalink"] == "https://t.me/agenticai/55"
     assert data["protected"] is True
+
+
+# --- Text fidelity and entity-offset regressions -----------------------------
+
+
+def _utf16_slice(text, offset, length):
+    return text.encode("utf-16-le")[offset * 2 : (offset + length) * 2].decode("utf-16-le")
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
+        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        ("rlm bidi mark", "abc\u200f\u062f\u0065f"),
+        ("lrm bidi mark", "abc\u200e def"),
+        ("repeated newlines", "a\n\n\n\nb"),
+        ("tabs", "a\tb"),
+    ],
+)
+def test_fidelity_text_preserves_legitimate_unicode(label, text):
+    """The generic sanitizer strips these; doing so corrupts real messages."""
+    clean, _offsets = fidelity_text(text)
+    assert clean == text, label
+
+
+@pytest.mark.parametrize(
+    "label, text, expected",
+    [
+        ("zero width space", "a\u200bb", "ab"),
+        ("word joiner", "a\u2060b", "ab"),
+        ("bom", "a\ufeffb", "ab"),
+        ("rlo override", "a\u202eb", "ab"),
+        ("lri isolate", "a\u2066b", "ab"),
+        ("null control", "a\x00b", "ab"),
+    ],
+)
+def test_fidelity_text_drops_unsafe_invisibles(label, text, expected):
+    clean, _offsets = fidelity_text(text)
+    assert clean == expected, label
+
+
+def test_entity_offsets_index_the_exposed_text():
+    """The bug: offsets were computed on raw text while sanitized text was shown."""
+    raw = "\u0645\u06cc\u200c\u06a9\u0646\u062f"  # mi + ZWNJ + konad
+    message = SimpleNamespace(message=raw, entities=[_entity("Bold", offset=3, length=3)])
+
+    entity = describe_entities(message)[0]
+    clean, _offsets = fidelity_text(raw)
+
+    assert _utf16_slice(clean, entity["offset"], entity["length"]) == entity["text"]
+    assert entity["text"] == "\u06a9\u0646\u062f"
+
+
+def test_entity_offsets_handle_surrogate_pairs():
+    raw = "\U0001f389 bold here"  # the emoji is two UTF-16 units
+    message = SimpleNamespace(message=raw, entities=[_entity("Bold", offset=3, length=4)])
+
+    entity = describe_entities(message)[0]
+    clean, _offsets = fidelity_text(raw)
+
+    assert entity["text"] == "bold"
+    assert _utf16_slice(clean, entity["offset"], entity["length"]) == "bold"
+
+
+def test_entity_offsets_rebase_when_an_unsafe_char_is_removed():
+    raw = "a\u200bBOLD"  # the ZWSP before the entity shifts every later offset
+    message = SimpleNamespace(message=raw, entities=[_entity("Bold", offset=2, length=4)])
+
+    entity = describe_entities(message)[0]
+    clean, _offsets = fidelity_text(raw)
+
+    assert entity["offset"] == 1, "offset was not rebased onto the cleaned text"
+    assert _utf16_slice(clean, entity["offset"], entity["length"]) == "BOLD"
+
+
+def test_out_of_range_entity_offsets_are_passed_through_untouched():
+    message = SimpleNamespace(message="short", entities=[_entity("Bold", offset=99, length=4)])
+    entity = describe_entities(message)[0]
+    assert entity["offset"] == 99
+    assert "text" not in entity
+
+
+def test_deep_message_dict_exposes_fidelity_text_when_it_differs():
+    raw = "\u0645\u06cc\u200c\u06a9\u0646\u062f"
+    message = SimpleNamespace(message=raw, entities=[])
+    data = deep_message_dict(message, {"id": 1, "text": sanitize_user_content(raw)})
+
+    assert data["text_fidelity"] == raw
+    assert data["text"] != raw, "precondition: the sanitized text really does differ"
+    assert "entity offsets index into this field" in data["text_fidelity_note"]

@@ -613,14 +613,14 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 ## Fork addition: visual and structured access
 
-This fork adds nine read-only tools that let an agent see Telegram the way a person does — the
+This fork adds ten read-only tools that let an agent see Telegram the way a person does — the
 full Telegram API view of a message (entities, custom emoji, reactions, media metadata) and the
 real Telegram Desktop rendering as an image.
 
 | | Tools |
 |---|---|
 | Structured | `inspect_message`, `inspect_messages`, `get_media_details` |
-| Previews | `get_media_thumbnail`, `get_media_frames` |
+| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji` |
 | Visual (Windows) | `list_telegram_windows`, `get_telegram_screen`, `get_telegram_region`, `get_telegram_frames` |
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool

@@ -46,7 +46,13 @@ proxy = [
 
 [tool.setuptools]
 py-modules = ["main", "sanitize", "session_string_generator"]
-packages = ["telegram_mcp", "telegram_mcp.tools"]
+
+# Discovered rather than listed: a hand-maintained list silently drops any new
+# subpackage from the wheel, and the failure only shows up as an ImportError at
+# runtime on an installed copy, never in the source tree.
+[tool.setuptools.packages.find]
+include = ["telegram_mcp*"]
+namespaces = false
 
 [project.scripts]
 telegram-mcp = "main:main"

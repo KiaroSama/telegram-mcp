@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -36,6 +37,19 @@ class FrameExtractionError(RuntimeError):
 def ffmpeg_available() -> bool:
     """Whether ffmpeg is on PATH."""
     return shutil.which("ffmpeg") is not None
+
+
+# Any absolute path in ffmpeg's diagnostics is our own temporary file, and on
+# Windows it carries the OS account name (C:\Users\<user>\AppData\Local\Temp\...).
+# That ends up verbatim in a tool result and therefore in the model's context.
+_ABSOLUTE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s\"']+")
+
+
+def _safe_stderr(stderr: Optional[bytes], limit: int = 300) -> str:
+    """ffmpeg's message with filesystem paths redacted and length bounded."""
+    text = (stderr or b"").decode("utf-8", errors="replace").strip()
+    text = _ABSOLUTE_PATH_RE.sub("<temp-file>", text)
+    return text if len(text) <= limit else text[:limit] + "…"
 
 
 def _run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
@@ -89,7 +103,15 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
 
     from telegram_mcp.visual.images import encode_image
 
-    with Image.open(path) as source:
+    try:
+        source = Image.open(path)
+    except Exception as error:
+        # UnidentifiedImageError and friends are neither FrameExtractionError nor
+        # ImageError, so without this they escape every handler in the tool layer
+        # and surface as an opaque internal error.
+        raise FrameExtractionError(f"Pillow could not decode this media: {type(error).__name__}.")
+
+    with source:
         total = getattr(source, "n_frames", 1)
         if total <= 1:
             raise FrameExtractionError("File is not animated; a single frame is all there is.")
@@ -167,8 +189,9 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
         )
 
     if not frames:
-        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
-        raise FrameExtractionError(f"ffmpeg produced no frames for this media. {stderr}".strip())
+        raise FrameExtractionError(
+            f"ffmpeg produced no frames for this media. {_safe_stderr(result.stderr)}".strip()
+        )
     return frames
 
 
