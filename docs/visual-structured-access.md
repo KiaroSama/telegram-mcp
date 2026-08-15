@@ -157,6 +157,12 @@ a scaled display stays sharp rather than being upscaled from a lower-resolution 
   `get_media_frames` refuses them by design. Use `get_media_thumbnail` for the static
   preview, or `get_telegram_frames` to capture the sticker as Telegram Desktop plays it.
 * A **minimized window cannot be screen-captured**. Use `method="window"`.
+* In **multi-account mode**, `inspect_message`, `get_media_thumbnail` and `get_media_frames`
+  require an explicit `account`. The server's read-only fan-out concatenates each account's
+  result as text, which would stringify the image blocks and lose them, so these three refuse
+  the fan-out with a message naming the configured accounts instead. `inspect_messages` and
+  `get_media_details` return text only and fan out normally. The capture tools never touch
+  Telegram, so `account` does not apply to them at all.
 * **Images cost tokens.** Every image is base64-encoded into the model's context. Single-shot
   tools cap the longest side at 1568px (roughly 1–3k tokens for a full window); the two
   multi-frame tools default to 900px, because the cost is paid once per frame. Images are
