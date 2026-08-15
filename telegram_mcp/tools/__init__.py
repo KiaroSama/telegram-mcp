@@ -10,4 +10,9 @@ from telegram_mcp.tools.profile import *
 from telegram_mcp.tools.folders import *
 from telegram_mcp.tools.events import *
 
+# Fork additions (visual + deep structured access). Kept last and in their own
+# modules so upstream merges touch only these two lines.
+from telegram_mcp.tools.inspection import *
+from telegram_mcp.tools.visual import *
+
 __all__ = [name for name in globals() if not name.startswith("_")]

@@ -1,0 +1,211 @@
+"""Extract representative frames from animated Telegram media.
+
+A single screenshot cannot represent a GIF, a video sticker or a video note, so
+these helpers pull several frames out of the original asset:
+
+* animated GIF / animated WebP -> Pillow, no external tools needed
+* video, video note, video sticker (webm/mp4) -> ffmpeg, when it is on PATH
+* ``.tgs`` animated stickers -> not renderable here (gzipped Lottie vector JSON
+  needs rlottie); callers should fall back to the Telegram thumbnail or to
+  capturing Telegram Desktop while the sticker plays.
+
+Every subprocess call is bounded by a timeout and cleans up its temporary file.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+from typing import Any, Optional
+
+FFPROBE_TIMEOUT_SECONDS = 15
+FFMPEG_FRAME_TIMEOUT_SECONDS = 30
+MAX_FRAMES = 10
+
+PILLOW_ANIMATED_SUFFIXES = {".gif", ".webp", ".png", ".apng"}
+FFMPEG_SUFFIXES = {".webm", ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".gif"}
+
+
+class FrameExtractionError(RuntimeError):
+    """Raised when frames cannot be extracted from a media file."""
+
+
+def ffmpeg_available() -> bool:
+    """Whether ffmpeg is on PATH."""
+    return shutil.which("ffmpeg") is not None
+
+
+def _run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+    try:
+        return subprocess.run(
+            command,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise FrameExtractionError(
+            f"{os.path.basename(command[0])} timed out after {timeout}s and was terminated."
+        ) from error
+    except FileNotFoundError as error:
+        raise FrameExtractionError(
+            f"{os.path.basename(command[0])} is not installed or not on PATH."
+        ) from error
+
+
+def probe_duration(path: str) -> Optional[float]:
+    """Media duration in seconds via ffprobe, or ``None`` when unavailable."""
+    if shutil.which("ffprobe") is None:
+        return None
+    result = _run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            path,
+        ],
+        timeout=FFPROBE_TIMEOUT_SECONDS,
+    )
+    if result.returncode != 0:
+        return None
+    try:
+        duration = json.loads(result.stdout or b"{}").get("format", {}).get("duration")
+        return float(duration) if duration is not None else None
+    except (ValueError, AttributeError, json.JSONDecodeError):
+        return None
+
+
+def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+    """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
+    from PIL import Image, ImageSequence
+
+    from telegram_mcp.visual.images import encode_image
+
+    with Image.open(path) as source:
+        total = getattr(source, "n_frames", 1)
+        if total <= 1:
+            raise FrameExtractionError("File is not animated; a single frame is all there is.")
+        wanted = min(count, total)
+        indexes = (
+            sorted({round(i * (total - 1) / max(1, wanted - 1)) for i in range(wanted)})
+            if wanted > 1
+            else [0]
+        )
+
+        frames: list[tuple[bytes, dict[str, Any]]] = []
+        for index, frame in enumerate(ImageSequence.Iterator(source)):
+            if index not in indexes:
+                continue
+            data, meta = encode_image(frame.convert("RGB"), image_format="png")
+            meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
+            frames.append((data, meta))
+            if len(frames) >= wanted:
+                break
+    if not frames:
+        raise FrameExtractionError("Pillow decoded no frames from the animation.")
+    return frames
+
+
+def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+    """Evenly spaced frames from a video file using ffmpeg input seeking."""
+    if not ffmpeg_available():
+        raise FrameExtractionError(
+            "ffmpeg is required to extract frames from video media but was not found on PATH. "
+            "Install ffmpeg, or use get_media_thumbnail for a static preview."
+        )
+
+    duration = probe_duration(path)
+    if duration and duration > 0:
+        # Sample inside the clip: the very first and last frames are often black.
+        timestamps = [round(duration * (i + 0.5) / count, 3) for i in range(count)]
+    else:
+        timestamps = [round(i * 0.5, 3) for i in range(count)]
+
+    frames: list[tuple[bytes, dict[str, Any]]] = []
+    for index, timestamp in enumerate(timestamps):
+        result = _run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-loglevel",
+                "error",
+                "-ss",
+                str(timestamp),
+                "-i",
+                path,
+                "-frames:v",
+                "1",
+                "-f",
+                "image2pipe",
+                "-vcodec",
+                "png",
+                "-",
+            ],
+            timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
+        )
+        if result.returncode != 0 or not result.stdout:
+            continue
+        frames.append(
+            (
+                result.stdout,
+                {
+                    "frame_index": index,
+                    "timestamp_seconds": timestamp,
+                    "format": "png",
+                    "mime_type": "image/png",
+                    "source": "ffmpeg",
+                },
+            )
+        )
+
+    if not frames:
+        stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+        raise FrameExtractionError(f"ffmpeg produced no frames for this media. {stderr}".strip())
+    return frames
+
+
+def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes, dict[str, Any]]]:
+    """Extract up to ``count`` representative frames from in-memory media bytes.
+
+    Args:
+        data: Raw media bytes as downloaded from Telegram.
+        suffix: File extension including the dot, e.g. ``.webm``.
+        count: Number of frames to aim for (capped at ``MAX_FRAMES``).
+
+    Returns:
+        A list of ``(png_bytes, metadata)`` tuples.
+    """
+    count = max(1, min(int(count), MAX_FRAMES))
+    suffix = (suffix or "").lower()
+
+    if suffix == ".tgs":
+        raise FrameExtractionError(
+            "Animated .tgs stickers are gzipped Lottie vector animations and cannot be rasterised here. "
+            "Use get_media_thumbnail for the static preview, or get_telegram_frames to capture the "
+            "sticker as Telegram Desktop actually plays it."
+        )
+
+    with tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=False) as handle:
+        handle.write(data)
+        path = handle.name
+    try:
+        if suffix in PILLOW_ANIMATED_SUFFIXES:
+            try:
+                return _frames_with_pillow(path, count)
+            except FrameExtractionError:
+                if suffix not in FFMPEG_SUFFIXES:
+                    raise
+        return _frames_with_ffmpeg(path, count)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass

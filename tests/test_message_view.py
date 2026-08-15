@@ -1,0 +1,257 @@
+"""Unit tests for the deep structured message view.
+
+Every message here is a stub: the module reads plain attributes off the Telethon
+object and never calls the API, so no client and no network are involved.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+
+from telegram_mcp.message_view import (
+    deep_message_dict,
+    describe_custom_emoji,
+    describe_entities,
+    describe_media,
+    describe_reactions,
+    describe_topic,
+    message_permalink,
+)
+
+# "🎉" is one Python character but two UTF-16 code units, so every offset after
+# it differs from its Python index. "bold" starts at UTF-16 offset 9, index 8.
+EMOJI_TEXT = "🎉 hello bold world"
+
+
+def _typed(class_name, **fields):
+    """Stub object whose class name is what the module inspects."""
+    return type(class_name, (), fields)()
+
+
+def _entity(kind, **fields):
+    return _typed(f"MessageEntity{kind}", **fields)
+
+
+def test_entity_offsets_are_utf16_code_units():
+    msg = SimpleNamespace(
+        message=EMOJI_TEXT,
+        entities=[
+            _entity("Bold", offset=9, length=4),
+            _entity("Italic", offset=0, length=2),
+        ],
+    )
+
+    described = describe_entities(msg)
+
+    assert [item["text"] for item in described] == ["bold", "🎉"]
+    assert EMOJI_TEXT[9 : 9 + 4] != "bold"  # a naive Python slice would be wrong
+
+
+def test_entity_kind_naming_and_passthrough_fields():
+    msg = SimpleNamespace(
+        message="link code spoiler name",
+        entities=[
+            _entity("TextUrl", offset=0, length=4, url="https://example.com"),
+            _entity("Pre", offset=5, length=4, language="python"),
+            _entity("MentionName", offset=15, length=4, user_id=99),
+            _entity("Blockquote", offset=0, length=4, collapsed=True),
+            _entity("CustomEmoji", offset=10, length=4, document_id=555),
+        ],
+    )
+
+    described = describe_entities(msg)
+
+    assert [item["type"] for item in described] == [
+        "text_url",
+        "pre",
+        "mention_name",
+        "blockquote",
+        "custom_emoji",
+    ]
+    assert described[0]["url"] == "https://example.com"
+    assert described[1]["language"] == "python"
+    assert described[2]["user_id"] == 99
+    assert described[3]["collapsed"] is True
+    assert described[4]["custom_emoji_id"] == 555
+
+
+def test_custom_emoji_lists_only_custom_emoji_entities():
+    msg = SimpleNamespace(
+        message="🎉 party",
+        entities=[
+            _entity("CustomEmoji", offset=0, length=2, document_id=12345),
+            _entity("Bold", offset=3, length=5),
+        ],
+    )
+
+    assert describe_custom_emoji(msg) == [{"document_id": 12345, "placeholder": "🎉", "offset": 0}]
+
+
+def test_user_controlled_text_and_filenames_stay_sanitized():
+    """Message text and file names are attacker-controlled. Without this, the
+    offset assertions above still pass with the sanitizer calls removed."""
+    msg = SimpleNamespace(
+        message="bo\x07ld\u200b hello",
+        entities=[_entity("Bold", offset=0, length=6)],
+        media=_typed("MessageMediaDocument"),
+        file=SimpleNamespace(name="cl\x07ip\u202e.mp4"),
+    )
+
+    assert describe_entities(msg)[0]["text"] == "bold"
+    assert describe_media(msg)["file_name"] == "clip.mp4"
+
+
+def test_reactions_report_totals_chosen_flag_and_custom_emoji():
+    msg = SimpleNamespace(
+        reactions=SimpleNamespace(
+            results=[
+                SimpleNamespace(count=3, reaction=SimpleNamespace(emoticon="👍")),
+                # chosen_order 0 is falsy but still means "this account reacted".
+                SimpleNamespace(
+                    count=5, reaction=SimpleNamespace(document_id=777), chosen_order=0
+                ),
+            ],
+            can_see_list=True,
+        )
+    )
+
+    assert describe_reactions(msg) == {
+        "total": 8,
+        "items": [
+            {"count": 3, "emoji": "👍"},
+            {"count": 5, "custom_emoji_id": 777, "chosen": True},
+        ],
+        "can_see_list": True,
+    }
+
+
+@pytest.mark.parametrize("reactions", [None, SimpleNamespace(results=[])])
+def test_reactions_absent_or_empty_return_none(reactions):
+    assert describe_reactions(SimpleNamespace(reactions=reactions)) is None
+
+
+def test_media_absent_returns_none():
+    assert describe_media(SimpleNamespace(media=None)) is None
+
+
+def test_media_maps_file_metadata_thumbnails_and_downloadable():
+    document = _typed(
+        "Document",
+        id=777,
+        attributes=[_typed("DocumentAttributeVideo"), _typed("DocumentAttributeFilename")],
+        thumbs=[_typed("PhotoSize", type="m", w=320, h=180, size=1024)],
+    )
+    msg = SimpleNamespace(
+        media=_typed("MessageMediaDocument"),
+        video=document,
+        document=document,
+        file=SimpleNamespace(
+            name="clip.mp4",
+            mime_type="video/mp4",
+            size=2048,
+            width=1280,
+            height=720,
+            duration=12.5,
+        ),
+    )
+
+    info = describe_media(msg)
+
+    assert info["telegram_type"] == "MessageMediaDocument"
+    assert info["kind"] == "video"
+    assert info["file_name"] == "clip.mp4"
+    assert info["mime_type"] == "video/mp4"
+    assert info["size_bytes"] == 2048
+    assert (info["width"], info["height"]) == (1280, 720)
+    assert info["duration_seconds"] == 12.5
+    assert info["document_id"] == 777
+    assert info["attributes"] == ["DocumentAttributeVideo", "DocumentAttributeFilename"]
+    assert info["downloadable"] is True
+    assert info["has_thumbnail"] is True
+    assert info["thumbnails"] == [
+        {
+            "thumb_index": 0,
+            "type": "m",
+            "width": 320,
+            "height": 180,
+            "bytes": 1024,
+            "kind": "PhotoSize",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("mime_type", "animation_format"),
+    [("application/x-tgsticker", "lottie_tgs"), ("video/webm", "video_webm")],
+)
+def test_media_kind_prefers_sticker_and_names_the_animation_format(mime_type, animation_format):
+    document = _typed(
+        "Document",
+        id=42,
+        attributes=[
+            _typed(
+                "DocumentAttributeSticker", stickerset=SimpleNamespace(short_name="AgenticPack")
+            ),
+            _typed("DocumentAttributeAnimated"),
+        ],
+    )
+    msg = SimpleNamespace(
+        media=_typed("MessageMediaDocument"),
+        sticker=document,
+        document=document,
+        file=SimpleNamespace(mime_type=mime_type, size=64),
+    )
+
+    info = describe_media(msg)
+
+    assert info["kind"] == "sticker"
+    assert info["sticker_set"] == "AgenticPack"
+    assert info["animated"] is True
+    assert info["animation_format"] == animation_format
+
+
+def test_topic_only_for_forum_replies():
+    assert describe_topic(SimpleNamespace(reply_to=SimpleNamespace(reply_to_msg_id=7))) is None
+    assert describe_topic(
+        SimpleNamespace(reply_to=SimpleNamespace(forum_topic=True, reply_to_top_id=99))
+    ) == {"is_topic_message": True, "topic_id": 99}
+
+
+@pytest.mark.parametrize(
+    ("chat", "expected"),
+    [
+        (SimpleNamespace(username="agenticai"), "https://t.me/agenticai/55"),
+        (
+            SimpleNamespace(username=None, id=1234567890, megagroup=True),
+            "https://t.me/c/1234567890/55",
+        ),
+        (
+            SimpleNamespace(username=None, id=1234567890, broadcast=True),
+            "https://t.me/c/1234567890/55",
+        ),
+        (SimpleNamespace(username=None, id=42), None),
+        (None, None),
+    ],
+)
+def test_message_permalink_forms(chat, expected):
+    assert message_permalink(SimpleNamespace(id=55, chat=None), chat=chat) == expected
+
+
+def test_deep_message_dict_preserves_base_and_adds_detail():
+    base = {"id": 55, "text": "hello bold", "sender": "Jane", "media": "video"}
+    msg = SimpleNamespace(
+        id=55,
+        message="hello bold",
+        entities=[_entity("Bold", offset=6, length=4)],
+        reply_to=SimpleNamespace(forum_topic=True, reply_to_top_id=99),
+        noforwards=True,
+    )
+
+    data = deep_message_dict(msg, base, chat=SimpleNamespace(username="agenticai"))
+
+    assert base == {"id": 55, "text": "hello bold", "sender": "Jane", "media": "video"}
+    assert data.items() >= base.items()
+    assert data["entities"] == [{"type": "bold", "offset": 6, "length": 4, "text": "bold"}]
+    assert data["topic"] == {"is_topic_message": True, "topic_id": 99}
+    assert data["permalink"] == "https://t.me/agenticai/55"
+    assert data["protected"] is True
