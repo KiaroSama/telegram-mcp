@@ -13,6 +13,7 @@ Layering rather than reimplementing keeps upstream improvements to
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from typing import Any, Optional
 
@@ -86,6 +87,31 @@ def fidelity_text(raw: Optional[str]) -> tuple[str, list[int]]:
 
     offset_map.append(clean_units)
     return "".join(kept), offset_map
+
+
+def display_name(raw: Optional[str], max_length: int = 256) -> str:
+    """Single-line display text that keeps compound Unicode intact.
+
+    The same job as the generic ``sanitize_name`` — strip control characters,
+    force one line, bound the length — without its habit of deleting every ``Cf``
+    character. That habit breaks a family emoji into three separate people, turns
+    Persian ``می‌کند`` into two words, and reduces a regional flag to nothing,
+    because ZWJ, ZWNJ and the tag characters behind flags are all ``Cf``.
+
+    Use this for chat titles, window titles and emoji placeholders — anything the
+    caller is meant to read back as the user wrote it.
+    """
+    # Line separators become spaces *before* the fidelity pass: a bare CR is a Cc
+    # control character, so leaving it would delete the separator and glue the two
+    # halves of the name together.
+    text = (
+        (raw or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    )
+    text, _offsets = fidelity_text(text)
+    text = re.sub(r" {2,}", " ", text).strip()
+    if len(text) > max_length:
+        text = text[:max_length].rstrip() + "…"
+    return text
 
 
 def _entity_kind(entity: Any) -> str:

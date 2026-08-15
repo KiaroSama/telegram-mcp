@@ -136,6 +136,65 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
     return frames
 
 
+def lottie_available() -> bool:
+    """Whether the optional rlottie renderer is installed."""
+    try:
+        import rlottie_python  # noqa: F401
+    except Exception:
+        return False
+    return True
+
+
+# Telegram renders .tgs at 512x512; rendering larger buys nothing and the frames
+# are downscaled again at the tool layer anyway.
+LOTTIE_RENDER_SIZE = 512
+
+
+def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+    """Rasterise a .tgs (gzipped Lottie) with rlottie, when it is installed."""
+    from rlottie_python import LottieAnimation
+
+    from telegram_mcp.visual.images import encode_image
+
+    try:
+        animation = LottieAnimation.from_tgs(path)
+    except Exception as error:
+        raise FrameExtractionError(
+            f"rlottie could not open this .tgs animation: {type(error).__name__}."
+        )
+
+    total = animation.lottie_animation_get_totalframe() or 1
+    wanted = min(count, total)
+    indexes = (
+        sorted({round(i * (total - 1) / max(1, wanted - 1)) for i in range(wanted)})
+        if wanted > 1
+        else [0]
+    )
+
+    frame_rate = animation.lottie_animation_get_framerate() or 0
+    frames: list[tuple[bytes, dict[str, Any]]] = []
+    for index in indexes:
+        image = animation.render_pillow_frame(
+            frame_num=index, width=LOTTIE_RENDER_SIZE, height=LOTTIE_RENDER_SIZE
+        )
+        data, meta = encode_image(image.convert("RGBA"), image_format="png")
+        meta.update(
+            {
+                "frame_index": index,
+                "frame_count": total,
+                "source": "rlottie",
+                "animation_format": "lottie_tgs",
+            }
+        )
+        if frame_rate:
+            meta["timestamp_seconds"] = round(index / frame_rate, 3)
+        frames.append((data, meta))
+
+    if not frames:
+        raise FrameExtractionError("rlottie decoded no frames from this .tgs animation.")
+    return frames
+
+
 def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from a video file using ffmpeg input seeking."""
     if not ffmpeg_available():
@@ -209,10 +268,11 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
     count = max(1, min(int(count), MAX_FRAMES))
     suffix = (suffix or "").lower()
 
-    if suffix == ".tgs":
+    if suffix == ".tgs" and not lottie_available():
         raise FrameExtractionError(
-            "Animated .tgs stickers are gzipped Lottie vector animations and cannot be rasterised here. "
-            "Use get_media_thumbnail for the static preview, or get_telegram_frames to capture the "
+            "Animated .tgs stickers are gzipped Lottie vector animations. Install the optional "
+            "renderer with: pip install 'telegram-mcp[lottie]'. Without it, use "
+            "get_media_thumbnail for the static preview, or get_telegram_frames to capture the "
             "sticker as Telegram Desktop actually plays it."
         )
 
@@ -220,6 +280,8 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
         handle.write(data)
         path = handle.name
     try:
+        if suffix == ".tgs":
+            return _frames_with_lottie(path, count)
         if suffix in PILLOW_ANIMATED_SUFFIXES:
             try:
                 return _frames_with_pillow(path, count)

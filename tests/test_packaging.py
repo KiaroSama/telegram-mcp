@@ -181,3 +181,26 @@ def test_installed_package_imports_visual_modules(built_wheel, tmp_path):
         timeout=IMPORT_TIMEOUT_SECONDS,
     )
     assert check.returncode == 0, check.stdout + check.stderr
+
+
+def test_the_build_toolchain_is_a_declared_dev_dependency():
+    """This suite silently skipped in CI because `build` was never installed.
+
+    A skipped wheel test is indistinguishable from a passing one in the CI summary,
+    which is how a package list that omitted telegram_mcp.visual shipped unnoticed.
+    """
+    dev = _pyproject().get("dependency-groups", {}).get("dev", [])
+    names = {requirement.split(">")[0].split("=")[0].split("[")[0].strip() for requirement in dev}
+
+    for required in ("build", "setuptools", "wheel"):
+        assert (
+            required in names
+        ), f"{required} is missing from the dev group; the wheel test will skip"
+
+
+def test_the_wheel_build_is_not_skipped_in_this_environment():
+    """Guard the guard: if `build` is importable the fixture must actually run."""
+    assert importlib.util.find_spec("build") is not None, (
+        "build is not installed, so test_built_wheel_contains_every_subpackage skips. "
+        "Install the dev group: uv sync --group dev"
+    )

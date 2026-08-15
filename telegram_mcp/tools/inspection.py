@@ -6,9 +6,15 @@ without paying for a full download.
 """
 
 from telegram_mcp.runtime import *
-from telegram_mcp.message_view import deep_message_dict, describe_media
+from telegram_mcp.message_view import deep_message_dict, describe_media, display_name
 from telegram_mcp.tools.messages import LINK_DOMAIN, message_to_dict
-from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError, extract_frames
+from telegram_mcp.tools.visual import safe_window_dict
+from telegram_mcp.visual.frames import (
+    MAX_FRAMES,
+    FrameExtractionError,
+    extract_frames,
+    lottie_available,
+)
 from telegram_mcp.visual.images import (
     MAX_IMAGE_DIMENSION,
     ImageError,
@@ -234,11 +240,15 @@ async def inspect_message(
             def _screen():
                 image, window, meta = capture.capture_window()
                 png, encoded = encode_image(image, max_dimension=max_dimension)
-                title = sanitize_name(window.title or "")
+                # safe_window_dict sanitizes the nested title too. Sanitizing only
+                # the top-level copy left the raw, attacker-controlled chat name
+                # sitting in screen.window.title.
+                window_data = safe_window_dict(window.to_dict())
+                title = window_data["title"]
                 return png, {
                     **meta,
                     **encoded,
-                    "window": window.to_dict(),
+                    "window": window_data,
                     # The capture is of a window, not of this message: say so in
                     # the data, because nothing downstream can work it out.
                     "correlation": "unverified",
@@ -544,7 +554,7 @@ async def _custom_emoji_preview(cl, document, count: int, max_dimension: int) ->
     for attribute in getattr(document, "attributes", None) or []:
         alt = getattr(attribute, "alt", None)
         if alt:
-            record["placeholder"] = sanitize_name(alt)
+            record["placeholder"] = display_name(alt)
         sticker_set = getattr(attribute, "stickerset", None)
         short_name = getattr(sticker_set, "short_name", None)
         set_id = getattr(sticker_set, "id", None)
@@ -565,28 +575,36 @@ async def _custom_emoji_preview(cl, document, count: int, max_dimension: int) ->
         )
         return record, []
 
+    is_lottie = mime == "application/x-tgsticker"
+    render_lottie = is_lottie and lottie_available()
+    if is_lottie:
+        record["animation_format"] = "lottie_tgs"
+        record["animation_note"] = (
+            "Vector (Lottie) animation rendered with rlottie: the images below are real frames "
+            "of the animation."
+            if render_lottie
+            else "Vector (Lottie) animation: the image below is Telegram's static thumbnail, not "
+            "the animation. Install the renderer with pip install 'telegram-mcp[lottie]', or "
+            "play it in Telegram Desktop and call get_telegram_frames."
+        )
+
     try:
-        if mime == "application/x-tgsticker":
-            # Lottie vector animation: rasterising it needs rlottie, which is not
-            # a dependency here, so the static thumbnail is the honest preview.
-            record["animation_format"] = "lottie_tgs"
-            record["animation_note"] = (
-                "Vector (Lottie) animation: the image below is Telegram's static thumbnail, "
-                "not the animation. To see it move, play it in Telegram Desktop and call "
-                "get_telegram_frames."
-            )
-            raw = await cl.download_media(document, file=bytes, thumb=-1)
-        else:
-            raw = await cl.download_media(document, file=bytes)
+        # Only the un-renderable Lottie path settles for the thumbnail.
+        thumb_only = is_lottie and not render_lottie
+        raw = await cl.download_media(document, file=bytes, thumb=-1 if thumb_only else None)
         if not raw:
             record["preview_error"] = "Telegram returned no preview data for this document."
             return record, []
-        if mime.startswith("video/"):
+        if render_lottie or mime.startswith("video/"):
+            suffix = ".tgs" if render_lottie else _MIME_SUFFIXES.get(mime, ".webm")
             record["preview"], images = await asyncio.to_thread(
-                _encode_frames, raw, _MIME_SUFFIXES.get(mime, ".webm"), count, max_dimension
+                _encode_frames, raw, suffix, count, max_dimension
             )
         else:
             record["preview"], images = await asyncio.to_thread(_encode_one, raw, max_dimension)
+        record["preview_source"] = (
+            "rlottie" if render_lottie else "thumbnail" if thumb_only else "document"
+        )
     except (FrameExtractionError, ImageError) as error:
         # One unrenderable emoji must not sink the other nine in the batch.
         record["preview_error"] = str(error)

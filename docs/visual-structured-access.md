@@ -26,6 +26,7 @@ like. Use both together.
 |---|---|
 | Pillow | All image tools (declared dependency, installed with the server) |
 | ffmpeg on `PATH` | `get_media_frames` for video/webm media only — optional |
+| `telegram-mcp[lottie]` | Rendering `.tgs` Lottie stickers and custom emoji — optional |
 | Windows + running Telegram Desktop | The four `*_telegram_*` capture tools, and `inspect_message(include_screen=True)` |
 
 Every structured tool works on Linux and macOS. The capture tools raise a clear, actionable
@@ -171,6 +172,15 @@ BOM), the bidi overrides and isolates used for spoofing, and C0 control characte
 are rebased so they still line up after a removal. `text_fidelity` is untrusted user content like
 every other message field.
 
+## Display names keep their Unicode
+
+Chat titles, window titles and custom-emoji placeholders go through a fidelity-preserving
+cleaner rather than the general-purpose name sanitizer. The generic one strips every Unicode
+`Cf` character, which turns `👨‍👩‍👧` into three separate people, `می‌کند` into two words and a
+regional flag into nothing at all — ZWJ, ZWNJ and the tag characters behind flags are all `Cf`.
+Control characters, zero-width padding and bidi overrides are still removed, names are still
+forced to one line and bounded to 256 characters.
+
 ## Screenshots are never attributed to a message
 
 `inspect_message(include_screen=True)` captures the Telegram Desktop window as it looks right
@@ -187,9 +197,13 @@ have checked the title yourself.
 * Telegram Desktop exposes **no mapping from screen pixels to message IDs**. Region capture
   is purely coordinate-based; pair it with `inspect_message` whenever you need
   authoritative data about what is in the picture. Never infer an ID from a screenshot.
-* **`.tgs` animated stickers are Lottie vector animations** and are not rasterised.
-  `get_media_frames` refuses them by design. Use `get_media_thumbnail` for the static
-  preview, or `get_telegram_frames` to capture the sticker as Telegram Desktop plays it.
+* **`.tgs` animated stickers and custom emoji are Lottie vector animations.** They render
+  only when the optional renderer is installed: `pip install 'telegram-mcp[lottie]'` pulls in
+  `rlottie-python`, which ships prebuilt native wheels for Windows, macOS and Linux. With it,
+  `get_media_frames` and `get_custom_emoji` return real animation frames at 512x512 and the
+  metadata reports `source: "rlottie"`. Without it they fall back to Telegram's static
+  thumbnail (`preview_source: "thumbnail"`), and the error names `get_telegram_frames` as the
+  way to see the animation as Telegram Desktop plays it.
 * A **minimized window cannot be screen-captured**. Use `method="window"`.
 * In **multi-account mode**, `inspect_message`, `get_media_thumbnail` and `get_media_frames`
   require an explicit `account`. The server's read-only fan-out concatenates each account's

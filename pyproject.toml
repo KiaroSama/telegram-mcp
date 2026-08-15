@@ -39,6 +39,12 @@ dependencies = [
 proxy = [
     "python-socks>=2.4.3",
 ]
+# Renders .tgs (gzipped Lottie) animated stickers and custom emoji into frames.
+# Optional because it ships a native rlottie build; without it those media fall
+# back to Telegram's static thumbnail or a Telegram Desktop capture.
+lottie = [
+    "rlottie-python>=1.3.8",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/chigwell/telegram-mcp"
@@ -78,11 +84,16 @@ exclude = [
 [dependency-groups]
 dev = [
     "black>=25.9.0",
+    # tests/test_packaging.py builds a real wheel and imports the installed copy;
+    # without these it skips, and a broken package list ships unnoticed.
+    "build>=1.2",
     "flake8>=7.3.0",
     "pre-commit>=4.6.0",
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=6.0.0",
+    "setuptools>=68",
+    "wheel>=0.42",
 ]
 
 [tool.pytest.ini_options]

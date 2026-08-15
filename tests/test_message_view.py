@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from sanitize import sanitize_user_content
+from sanitize import sanitize_name, sanitize_user_content
 from telegram_mcp.message_view import (
     deep_message_dict,
     fidelity_text,
@@ -17,6 +17,7 @@ from telegram_mcp.message_view import (
     describe_media,
     describe_reactions,
     describe_topic,
+    display_name,
     message_permalink,
 )
 
@@ -348,3 +349,55 @@ def test_deep_message_dict_exposes_fidelity_text_when_it_differs():
     assert data["text_fidelity"] == raw
     assert data["text"] != raw, "precondition: the sanitized text really does differ"
     assert "entity offsets index into this field" in data["text_fidelity_note"]
+
+
+# --- display_name: single-line, bounded, but Unicode-faithful ----------------
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
+        (
+            "regional flag tag sequence",
+            "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+        ),
+    ],
+)
+def test_display_name_keeps_compound_sequences_sanitize_name_destroys(label, text):
+    assert display_name(text) == text, label
+    # Guard the premise: this is exactly what the generic helper gets wrong.
+    assert sanitize_name(text) != text, f"{label}: sanitize_name no longer breaks this"
+
+
+@pytest.mark.parametrize(
+    "label, text, expected",
+    [
+        ("rlo override", "a\u202eb", "ab"),
+        ("zero width space", "a\u200bb", "ab"),
+        ("newline", "a\nb", "a b"),
+        ("carriage return", "a\rb", "a b"),
+        ("tab", "a\tb", "a b"),
+        ("collapsed spaces", "a     b", "a b"),
+        ("surrounding space", "  a b  ", "a b"),
+        ("control char", "a\x07b", "ab"),
+    ],
+)
+def test_display_name_still_removes_unsafe_and_forces_one_line(label, text, expected):
+    assert display_name(text) == expected, label
+
+
+def test_display_name_bounds_its_length():
+    assert display_name("x" * 400) == "x" * 256 + "…"
+
+
+def test_display_name_handles_none():
+    assert display_name(None) == ""
+
+
+def test_display_name_preserves_a_keycap_sequence():
+    """Not a sanitize_name bug - VS16 is Mn and the keycap mark is Me, not Cf - but
+    the sequence still has to survive display_name intact."""
+    keycap = "1️⃣"
+    assert display_name(keycap) == keycap

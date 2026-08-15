@@ -18,6 +18,7 @@ from telegram_mcp.visual.frames import (
     FrameExtractionError,
     extract_frames,
     ffmpeg_available,
+    lottie_available,
 )
 from telegram_mcp.visual.images import (
     MAX_IMAGE_DIMENSION,
@@ -37,6 +38,31 @@ def _animated_gif(frame_count=3):
     buffer = io.BytesIO()
     frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:], duration=40)
     return buffer.getvalue()
+
+
+def _animated_tgs():
+    """A real .tgs: one square whose opacity animates, so frames differ."""
+    import gzip
+    import json
+
+    lottie = {
+        "v": "5.5.7", "fr": 30, "ip": 0, "op": 30, "w": 64, "h": 64, "nm": "t", "ddd": 0,
+        "assets": [],
+        "layers": [{
+            "ddd": 0, "ind": 1, "ty": 1, "nm": "solid", "sr": 1, "sc": "#ff0000",
+            "sw": 64, "sh": 64,
+            "ks": {
+                "o": {"a": 1, "k": [
+                    {"t": 0, "s": [100], "i": {"x": [1], "y": [1]}, "o": {"x": [0], "y": [0]}},
+                    {"t": 29, "s": [0]},
+                ]},
+                "r": {"a": 0, "k": 0}, "p": {"a": 0, "k": [32, 32, 0]},
+                "a": {"a": 0, "k": [32, 32, 0]}, "s": {"a": 0, "k": [100, 100, 100]},
+            },
+            "ao": 0, "ip": 0, "op": 30, "st": 0, "bm": 0,
+        }],
+    }
+    return gzip.compress(json.dumps(lottie).encode())
 
 
 @pytest.mark.parametrize(
@@ -111,9 +137,38 @@ def test_extract_frames_deletes_the_file_it_spooled_to_disk(monkeypatch, tmp_pat
     assert list(tmp_path.iterdir()) == []
 
 
-def test_extract_frames_points_tgs_stickers_at_the_thumbnail_tool():
-    with pytest.raises(FrameExtractionError, match="get_media_thumbnail"):
+def test_extract_frames_points_tgs_at_the_fallbacks_when_rlottie_is_absent(monkeypatch):
+    """Without the optional renderer the error must name every way forward."""
+    monkeypatch.setattr("telegram_mcp.visual.frames.lottie_available", lambda: False)
+
+    with pytest.raises(FrameExtractionError) as raised:
         extract_frames(b"gzipped-lottie", ".tgs")
+
+    message = str(raised.value)
+    assert "telegram-mcp[lottie]" in message
+    assert "get_media_thumbnail" in message
+    assert "get_telegram_frames" in message
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_extract_frames_reports_an_undecodable_tgs_clearly():
+    """With the renderer present, garbage must still surface as FrameExtractionError."""
+    with pytest.raises(FrameExtractionError, match="could not open this .tgs"):
+        extract_frames(b"not gzipped lottie at all", ".tgs")
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_extract_frames_renders_distinct_frames_from_a_real_lottie():
+    """A moving shape must produce different frames, not the same image N times."""
+    frames = extract_frames(_animated_tgs(), ".tgs", count=3)
+
+    assert len(frames) == 3
+    assert len({png for png, _ in frames}) == 3, "every frame rendered identically"
+    for png, meta in frames:
+        assert png[1:4] == b"PNG", "not a PNG frame"
+        assert meta["source"] == "rlottie"
+        assert meta["animation_format"] == "lottie_tgs"
+        assert meta["timestamp_seconds"] >= 0
 
 
 def test_ffmpeg_available_reports_a_bool():

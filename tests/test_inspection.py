@@ -150,3 +150,36 @@ def test_title_matches_chat(title, entity, expected):
 def test_chat_names_drops_names_too_short_to_mean_anything():
     assert _chat_names(_Entity(title="M")) == []
     assert _chat_names(_Entity(title="Persian Meme")) == ["Persian Meme"]
+
+
+# --- Nested window metadata must be sanitized too -----------------------------
+
+
+def test_safe_window_dict_sanitizes_the_nested_title():
+    """inspect_message embeds window.to_dict(); the title inside it is user content."""
+    from telegram_mcp.tools.inspection import safe_window_dict
+
+    raw = {"hwnd": 1, "title": "Chat\u202ename\nsecond line", "width": 10}
+    cleaned = safe_window_dict(dict(raw))
+
+    assert "\u202e" not in cleaned["title"], "bidi override survived into the nested title"
+    assert "\n" not in cleaned["title"], "the nested title is still multi-line"
+    assert cleaned["hwnd"] == 1 and cleaned["width"] == 10, "unrelated fields were altered"
+
+
+def test_safe_window_dict_keeps_a_persian_or_emoji_chat_name():
+    from telegram_mcp.tools.inspection import safe_window_dict
+
+    title = "\u0645\u06cc\u200c\u06a9\u0646\u062f \U0001f468\u200d\U0001f469\u200d\U0001f467"
+    assert safe_window_dict({"title": title})["title"] == title
+
+
+def test_inspect_message_screen_block_uses_the_shared_helper():
+    """The nested title and the top-level title must not diverge again."""
+    import inspect as _inspect
+
+    from telegram_mcp.tools import inspection
+
+    source = _inspect.getsource(inspection.inspect_message)
+    assert "safe_window_dict(window.to_dict())" in source
+    assert "window.to_dict()," not in source, "a raw window dict is still being embedded"

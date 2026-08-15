@@ -10,6 +10,8 @@ from telegram_mcp.runtime import *
 
 from mcp.server.fastmcp import Image
 
+from telegram_mcp.message_view import display_name
+
 from telegram_mcp.visual.capture import (
     CAPTURE_METHODS,
     DEFAULT_PROCESS_NAME,
@@ -29,9 +31,14 @@ MIN_FRAME_INTERVAL_MS = 50
 MAX_FRAME_INTERVAL_MS = 3000
 
 
-def _safe_window(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Sanitize the window title: it is the open chat name, i.e. user content."""
-    data["title"] = sanitize_name(data.get("title") or "")
+def safe_window_dict(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Sanitize the window title: it is the open chat name, i.e. user content.
+
+    Public because ``inspect_message`` embeds the same dict and must not grow its
+    own copy of this rule. ``display_name`` rather than ``sanitize_name`` so a
+    chat called "می‌کند" or one with a family emoji survives intact.
+    """
+    data["title"] = display_name(data.get("title") or "")
     return data
 
 
@@ -81,7 +88,7 @@ async def _capture_encoded(
             max_dimension=max_dimension,
             native=native_resolution,
         )
-        meta["window"] = _safe_window(window.to_dict())
+        meta["window"] = safe_window_dict(window.to_dict())
         meta["image"] = image_meta
         return data, meta
 
@@ -123,7 +130,7 @@ async def list_telegram_windows(process_name: Optional[str] = None) -> str:
                     "minimized, or set TELEGRAM_DESKTOP_PROCESS for a renamed executable."
                 )
             }
-        return format_tool_result([_safe_window(window) for window in windows], metadata)
+        return format_tool_result([safe_window_dict(window) for window in windows], metadata)
     except CaptureError as e:
         return str(e)
     except Exception as e:
