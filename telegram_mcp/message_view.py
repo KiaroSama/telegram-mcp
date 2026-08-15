@@ -50,6 +50,11 @@ _UNSAFE_INVISIBLES = frozenset(
 # them, as the generic sanitizer does, corrupts legitimate Telegram messages.
 
 
+# Everything Unicode treats as a line break. CRLF first so it collapses to one
+# space rather than two.
+_LINE_SEPARATORS = ("\r\n", "\r", "\n", "\t", "\v", "\f", "\x85", " ", " ")
+
+
 def _is_unsafe_char(char: str) -> bool:
     if char in _UNSAFE_INVISIBLES:
         return True
@@ -101,16 +106,18 @@ def display_name(raw: Optional[str], max_length: int = 256) -> str:
     Use this for chat titles, window titles and emoji placeholders — anything the
     caller is meant to read back as the user wrote it.
     """
-    # Line separators become spaces *before* the fidelity pass: a bare CR is a Cc
-    # control character, so leaving it would delete the separator and glue the two
-    # halves of the name together.
-    text = (
-        (raw or "").replace("\r\n", " ").replace("\r", " ").replace("\n", " ").replace("\t", " ")
-    )
+    # Every line separator becomes a space *before* the fidelity pass. CR and NEL
+    # are Cc, so leaving them would delete the separator and glue two words
+    # together; LINE SEPARATOR and PARAGRAPH SEPARATOR are Zl/Zp and would survive
+    # untouched, leaving a "single-line" name that still renders on two lines.
+    text = raw or ""
+    for separator in _LINE_SEPARATORS:
+        text = text.replace(separator, " ")
     text, _offsets = fidelity_text(text)
     text = re.sub(r" {2,}", " ", text).strip()
     if len(text) > max_length:
-        text = text[:max_length].rstrip() + "…"
+        # The ellipsis counts: max_length is the length of what the caller gets.
+        text = text[: max(0, max_length - 1)].rstrip() + "…"
     return text
 
 
@@ -263,6 +270,32 @@ def _describe_thumbnails(media_owner) -> list[dict[str, Any]]:
     return described
 
 
+def _describe_premium_effect(document) -> Optional[dict[str, Any]]:
+    """The extra animation a premium sticker plays on top of itself, if any.
+
+    Telegram ships it as a ``VideoSize`` of type ``"f"`` in ``video_thumbs`` — a
+    separate animation from the sticker's own, which is why a plain sticker
+    preview does not show it. Reported rather than rendered: playing it needs the
+    surrounding chat context, so ``get_telegram_frames`` is the accurate route.
+    """
+    for video_size in getattr(document, "video_thumbs", None) or []:
+        if getattr(video_size, "type", None) != "f":
+            continue
+        effect: dict[str, Any] = {
+            "kind": "premium_sticker_effect",
+            "note": (
+                "This sticker carries a separate premium effect animation that no preview here "
+                "renders. Capture it with get_telegram_frames while Telegram Desktop plays it."
+            ),
+        }
+        for field, key in (("w", "width"), ("h", "height"), ("size", "bytes")):
+            value = getattr(video_size, field, None)
+            if value is not None:
+                effect[key] = value
+        return effect
+    return None
+
+
 def describe_media(msg) -> Optional[dict[str, Any]]:
     """Full media metadata: kind, file identity, geometry, duration, thumbnails.
 
@@ -352,6 +385,10 @@ def describe_media(msg) -> Optional[dict[str, Any]]:
     if thumbnails:
         info["thumbnails"] = thumbnails
         info["has_thumbnail"] = True
+
+    effect = _describe_premium_effect(document)
+    if effect:
+        info["premium_effect"] = effect
 
     info["downloadable"] = info["kind"] in _DOWNLOADABLE_KINDS
 

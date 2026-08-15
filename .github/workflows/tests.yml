@@ -36,3 +36,35 @@ jobs:
         with:
           name: coverage-xml
           path: coverage.xml
+
+  # The job above installs the base package, where the .tgs tests skip - which is
+  # also the proof that the base install works without the optional renderer. This
+  # job installs the extra so that code path is actually exercised somewhere.
+  lottie:
+    name: Pytest With Lottie Renderer
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Fail if the lottie extra did not install
+        run: >
+          uv run --extra lottie python -c
+          "from telegram_mcp.visual.frames import lottie_available;
+          assert lottie_available(), 'rlottie-python is missing: the .tgs tests would silently skip'"
+
+      - name: Run the visual suite with the renderer available
+        env:
+          TELEGRAM_API_ID: "12345"
+          TELEGRAM_API_HASH: "dummy_hash"
+          TELEGRAM_SESSION_NAME: "test_session"
+        run: uv run --extra lottie pytest tests/test_visual_support.py tests/test_inspection.py -v

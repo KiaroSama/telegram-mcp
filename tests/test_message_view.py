@@ -389,7 +389,11 @@ def test_display_name_still_removes_unsafe_and_forces_one_line(label, text, expe
 
 
 def test_display_name_bounds_its_length():
-    assert display_name("x" * 400) == "x" * 256 + "…"
+    """The ellipsis is part of the budget, so the result is exactly max_length."""
+    result = display_name("x" * 400)
+
+    assert result == "x" * 255 + "…"
+    assert len(result) == 256
 
 
 def test_display_name_handles_none():
@@ -401,3 +405,65 @@ def test_display_name_preserves_a_keycap_sequence():
     the sequence still has to survive display_name intact."""
     keycap = "1️⃣"
     assert display_name(keycap) == keycap
+
+
+@pytest.mark.parametrize(
+    "label, separator",
+    [
+        ("carriage return", "\r"),
+        ("line feed", "\n"),
+        ("crlf", "\r\n"),
+        ("tab", "\t"),
+        ("vertical tab", "\v"),
+        ("form feed", "\f"),
+        ("next line U+0085", "\u0085"),
+        ("line separator U+2028", "\u2028"),
+        ("paragraph separator U+2029", "\u2029"),
+    ],
+)
+def test_display_name_is_single_line_for_every_unicode_break(label, separator):
+    """U+2028/U+2029 are Zl/Zp, so they survive the fidelity pass untouched."""
+    result = display_name(f"a{separator}b")
+
+    assert result == "a b", label
+    assert separator not in result
+
+
+@pytest.mark.parametrize("max_length", [1, 2, 10, 256])
+def test_display_name_never_exceeds_max_length(max_length):
+    """The ellipsis counts towards the bound the caller asked for."""
+    assert len(display_name("x" * 500, max_length=max_length)) <= max_length
+
+
+def test_display_name_leaves_text_at_the_bound_untruncated():
+    exact = "x" * 256
+    assert display_name(exact) == exact
+
+
+def test_premium_sticker_effect_is_reported_when_present():
+    """Telegram ships it as a VideoSize of type "f"; no preview here renders it."""
+    document = SimpleNamespace(
+        id=1,
+        attributes=[],
+        thumbs=[],
+        video_thumbs=[
+            SimpleNamespace(type="v", w=100, h=100, size=10),
+            SimpleNamespace(type="f", w=512, h=512, size=4096),
+        ],
+    )
+    msg = SimpleNamespace(media=object(), document=document, sticker=document, file=None)
+
+    effect = describe_media(msg)["premium_effect"]
+
+    assert effect["kind"] == "premium_sticker_effect"
+    assert (effect["width"], effect["height"], effect["bytes"]) == (512, 512, 4096)
+    assert "get_telegram_frames" in effect["note"]
+
+
+def test_no_premium_effect_key_for_an_ordinary_sticker():
+    document = SimpleNamespace(
+        id=1, attributes=[], thumbs=[], video_thumbs=[SimpleNamespace(type="v", w=1, h=1, size=1)]
+    )
+    msg = SimpleNamespace(media=object(), document=document, sticker=document, file=None)
+
+    assert "premium_effect" not in describe_media(msg)

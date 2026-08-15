@@ -225,3 +225,6 @@ incoming_feed.jsonl
 !/.env.template
 !/.env.dist
 /skills-lock.json
+
+# Local shortcut to the upstream repository (user-created).
+/Original Repository.url

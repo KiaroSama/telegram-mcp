@@ -175,11 +175,26 @@ every other message field.
 ## Display names keep their Unicode
 
 Chat titles, window titles and custom-emoji placeholders go through a fidelity-preserving
-cleaner rather than the general-purpose name sanitizer. The generic one strips every Unicode
+cleaner rather than the general-purpose name sanitizer. Both sides of the
+`title_matches_chat` comparison use it, so a Persian title containing ZWNJ still matches itself. The generic one strips every Unicode
 `Cf` character, which turns `👨‍👩‍👧` into three separate people, `می‌کند` into two words and a
 regional flag into nothing at all — ZWJ, ZWNJ and the tag characters behind flags are all `Cf`.
 Control characters, zero-width padding and bidi overrides are still removed, names are still
-forced to one line and bounded to 256 characters.
+forced to one line — CR, LF, TAB, VT, FF, NEL and the Unicode LINE/PARAGRAPH SEPARATORs all
+become a single space — and the result is bounded to 256 characters including the ellipsis.
+
+## Adaptive custom emoji and premium effects
+
+A custom emoji flagged `text_color` has no colour of its own: Telegram paints it in the colour of
+the surrounding text, and that colour is not stored in the document. `get_custom_emoji` reports
+the flag, marks the preview `"color_fidelity": "context-neutral"`, and says plainly that the
+image shows shape and motion but not the colour a reader sees. Use `get_telegram_frames` for the
+exact on-screen appearance. The `free` flag (usable without Premium) is reported alongside it.
+
+Premium stickers can carry a *second* animation — an effect Telegram plays over the sticker,
+shipped as a `VideoSize` of type `"f"`. `get_media_details` now reports it under
+`premium_effect` with its dimensions. It is reported, not rendered: the effect only makes sense
+in the chat that triggers it, so `get_telegram_frames` remains the accurate route.
 
 ## Screenshots are never attributed to a message
 

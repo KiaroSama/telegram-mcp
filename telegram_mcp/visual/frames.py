@@ -5,9 +5,10 @@ these helpers pull several frames out of the original asset:
 
 * animated GIF / animated WebP -> Pillow, no external tools needed
 * video, video note, video sticker (webm/mp4) -> ffmpeg, when it is on PATH
-* ``.tgs`` animated stickers -> not renderable here (gzipped Lottie vector JSON
-  needs rlottie); callers should fall back to the Telegram thumbnail or to
-  capturing Telegram Desktop while the sticker plays.
+* ``.tgs`` animated stickers (gzipped Lottie vector JSON) -> rlottie, when the
+  optional ``telegram-mcp[lottie]`` extra is installed. Without it the error
+  names the two fallbacks: Telegram's static thumbnail, or capturing Telegram
+  Desktop while the sticker plays.
 
 Every subprocess call is bounded by a timeout and cleans up its temporary file.
 """

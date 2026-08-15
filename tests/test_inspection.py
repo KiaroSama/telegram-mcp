@@ -5,6 +5,7 @@ Covers the two pieces that carry real logic and no network: the capped download
 own) and the window-title/chat comparison behind ``title_matches_chat``.
 """
 
+from types import SimpleNamespace
 import datetime
 
 import pytest
@@ -183,3 +184,107 @@ def test_inspect_message_screen_block_uses_the_shared_helper():
     source = _inspect.getsource(inspection.inspect_message)
     assert "safe_window_dict(window.to_dict())" in source
     assert "window.to_dict()," not in source, "a raw window dict is still being embedded"
+
+
+# --- Title matching must normalize both sides the same way -------------------
+
+
+@pytest.mark.parametrize(
+    "label, title",
+    [
+        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
+        ("emoji zwj family", "Chat \U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        (
+            "regional flag",
+            "Team \U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+        ),
+    ],
+)
+def test_title_matches_chat_survives_compound_unicode(label, title):
+    """The window title is normalized with display_name; the chat name must be too.
+
+    sanitize_name strips the ZWNJ/ZWJ from only one side, so the same title
+    stopped matching itself.
+    """
+    from telegram_mcp.tools.inspection import _title_matches_chat
+    from telegram_mcp.message_view import display_name
+
+    entity = SimpleNamespace(title=title, username=None, first_name=None, last_name=None)
+    window_title = f"{display_name(title)} (3)"  # Telegram appends an unread count
+
+    assert _title_matches_chat(window_title, entity) is True, label
+
+
+def test_title_matches_chat_still_reports_a_mismatch():
+    from telegram_mcp.tools.inspection import _title_matches_chat
+
+    entity = SimpleNamespace(
+        title="Project Updates", username=None, first_name=None, last_name=None
+    )
+    assert _title_matches_chat("Totally Different Chat (2)", entity) is False
+
+
+def test_chat_names_drops_names_too_short_to_be_evidence():
+    from telegram_mcp.tools.inspection import _chat_names
+
+    entity = SimpleNamespace(title="M", username=None, first_name=None, last_name=None)
+    assert _chat_names(entity) == []
+
+
+# --- Adaptive (context-coloured) custom emoji --------------------------------
+
+
+def _emoji_document(mime="image/webp", **attrs):
+    """A stub custom-emoji document with a DocumentAttributeCustomEmoji."""
+    attribute = SimpleNamespace(
+        alt="\U0001f600", stickerset=SimpleNamespace(short_name="SetName", id=1), **attrs
+    )
+    return SimpleNamespace(id=42, mime_type=mime, size=1234, attributes=[attribute])
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_metadata_exposes_text_color_and_free():
+    from telegram_mcp.tools.inspection import _custom_emoji_preview
+
+    document = _emoji_document(text_color=True, free=True)
+
+    class _Client:
+        async def download_media(self, *args, **kwargs):
+            return None  # the preview is irrelevant here; the flags are not
+
+    record, _images = await _custom_emoji_preview(_Client(), document, count=1, max_dimension=64)
+
+    assert record["text_color"] is True
+    assert record["free"] is True
+
+
+@pytest.mark.asyncio
+async def test_adaptive_custom_emoji_preview_is_never_called_exact():
+    """A context-coloured emoji has no colour of its own; saying otherwise lies."""
+    from telegram_mcp.tools.inspection import _custom_emoji_preview
+
+    class _Client:
+        async def download_media(self, *args, **kwargs):
+            return None
+
+    adaptive, _ = await _custom_emoji_preview(
+        _Client(), _emoji_document(text_color=True), count=1, max_dimension=64
+    )
+    plain, _ = await _custom_emoji_preview(_Client(), _emoji_document(), count=1, max_dimension=64)
+
+    assert adaptive["color_fidelity"] == "context-neutral"
+    assert "get_telegram_frames" in adaptive["color_note"]
+    assert "NOT the colour" in adaptive["color_note"]
+    # A normal emoji carries no colour caveat, so the flag stays meaningful.
+    assert "color_fidelity" not in plain
+    assert "text_color" not in plain
+
+
+def test_custom_emoji_docstring_matches_the_lottie_behaviour():
+    """MCP agents choose tools from the docstring; a stale one misroutes them."""
+    from telegram_mcp.tools import inspection
+
+    doc = inspection.get_custom_emoji.__doc__ or ""
+    assert "telegram-mcp[lottie]" in doc
+    assert "text_color" in doc
+    assert "nothing here rasterises" not in doc, "the old never-renders claim is still there"
