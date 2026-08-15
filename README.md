@@ -530,6 +530,8 @@ main.py                    # historical entrypoint and compatibility exports
 telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file safety
 telegram_mcp/runner.py     # application startup
 telegram_mcp/tools/        # tool modules grouped by domain
+telegram_mcp/message_view.py  # deep structured message view (fork addition)
+telegram_mcp/visual/       # Telegram Desktop capture and image/frame helpers (fork addition)
 sanitize.py                # output sanitization helpers
 tests/                     # pytest suite
 ```
@@ -538,6 +540,13 @@ Run tests:
 
 ```bash
 uv run pytest
+```
+
+The `.tgs` Lottie tests skip unless the optional renderer is installed, which is also how the
+base install stays verified. To exercise that path too:
+
+```bash
+uv run --extra lottie pytest
 ```
 
 Run tests with coverage:
