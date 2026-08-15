@@ -192,9 +192,23 @@ use to disguise an extension. Beyond the bidi overrides and zero-width padding, 
 removes the invisible maths operators (U+2061–U+2064), the interlinear annotation marks
 (U+FFF9–U+FFFB) and U+180E, all of which render as nothing and can hide text from a reader.
 
-A reply quote is returned as Telegram's exact fragment, and its `offset` is documented in place:
-it is the UTF-16 code-unit offset of the fragment inside the **original replied-to message**, not
-inside the replying message.
+Human-readable names — the sender, and the forwarded chat/user/author — are rebuilt from the raw
+Telethon objects rather than cleaned a second time, because the generic sanitizer runs first and a
+deleted ZWNJ cannot be recovered afterwards. IDs, dates, usernames and permalinks stay exactly as
+the upstream view computed them.
+
+A reply quote is fidelity-safe, not character-for-character exact, and says so: when unsafe
+invisibles were removed or the text was truncated it carries `"modified": true` and
+`"truncated"`, and the note states plainly that it is not exact. Either way `offset` is the
+UTF-16 code-unit offset of the fragment inside the **original replied-to message**, not inside
+the replying message.
+
+Emoji tag characters are kept only inside a well-formed sequence — an emoji base followed by tag
+specifiers and terminated by TAG CANCEL, which is how a subdivision flag like 🏴󠁧󠁢󠁳󠁣󠁴󠁿 is written. A
+stray tag character outside such a sequence is invisible on its own and is removed.
+
+Inline button labels are always replaced by the cleaned list, or dropped entirely when every
+label cleans to nothing — leaving the key untouched would have handed back the raw values.
 
 ## Adaptive custom emoji and premium effects
 

@@ -68,6 +68,45 @@ def _is_unsafe_char(char: str) -> bool:
     return unicodedata.category(char) == "Cc"
 
 
+# Supplementary tag characters (UTS #51). Valid only as
+# <emoji base> <TAG SPEC>+ <TAG CANCEL>, which is how a subdivision flag such as
+# the Scottish 🏴󠁧󠁢󠁳󠁣󠁴󠁿 is written. On their own they are invisible, so a stray one is a
+# place to hide text.
+_TAG_SPEC_RANGE = range(0xE0020, 0xE007F)
+_TAG_CANCEL = "\U000e007f"
+_EMOJI_BASE_MINIMUM = 0x1F000
+
+
+def _stray_tag_indexes(raw: str) -> set[int]:
+    """Indexes of tag characters that are not part of a valid emoji tag sequence."""
+    stray: set[int] = set()
+    index = 0
+    length = len(raw)
+    while index < length:
+        if not _is_tag_char(raw[index]):
+            index += 1
+            continue
+        start = index
+        while index < length and _is_tag_char(raw[index]):
+            index += 1
+        run = raw[start:index]
+        preceded_by_emoji = start > 0 and ord(raw[start - 1]) >= _EMOJI_BASE_MINIMUM
+        well_formed = (
+            preceded_by_emoji
+            and run.endswith(_TAG_CANCEL)
+            and len(run) > 1
+            and _TAG_CANCEL not in run[:-1]
+        )
+        if not well_formed:
+            stray.update(range(start, index))
+    return stray
+
+
+def _is_tag_char(char: str) -> bool:
+    code = ord(char)
+    return code in _TAG_SPEC_RANGE or char == _TAG_CANCEL
+
+
 def fidelity_text(raw: Optional[str]) -> tuple[str, list[int]]:
     """Return ``(text, offset_map)`` preserving Telegram's own character positions.
 
@@ -85,10 +124,11 @@ def fidelity_text(raw: Optional[str]) -> tuple[str, list[int]]:
     kept: list[str] = []
     offset_map: list[int] = []
     clean_units = 0
+    stray_tags = _stray_tag_indexes(raw)
 
-    for char in raw:
+    for index, char in enumerate(raw):
         units = 2 if ord(char) > 0xFFFF else 1  # non-BMP occupies a surrogate pair
-        if _is_unsafe_char(char):
+        if index in stray_tags or _is_unsafe_char(char):
             offset_map.extend([clean_units] * units)
             continue
         offset_map.extend(clean_units + step for step in range(units))
@@ -309,27 +349,81 @@ def describe_reply_quote(msg) -> Optional[dict[str, Any]]:
     if not quote_text:
         return None
 
-    quote: dict[str, Any] = {
-        "text": display_text(quote_text),
-        "note": (
-            "Exact quoted fragment. 'offset' is Telegram's UTF-16 code-unit offset of this "
-            "fragment inside the ORIGINAL replied-to message, not inside this message's text."
-        ),
-    }
+    text = display_text(quote_text)
+    truncated = len(text) < len(quote_text) and text.endswith("…")
+    modified = text != quote_text
+
+    quote: dict[str, Any] = {"text": text}
+    if modified:
+        quote["modified"] = True
+        quote["truncated"] = truncated
+        quote["note"] = (
+            "Quoted fragment, NOT character-for-character exact: unsafe invisible characters "
+            + ("were removed and the text was truncated. " if truncated else "were removed. ")
+            + "'offset' is Telegram's UTF-16 code-unit offset of the ORIGINAL fragment inside "
+            "the replied-to message, so it indexes that message, not this field."
+        )
+    else:
+        quote["note"] = (
+            "Quoted fragment, unchanged from what Telegram reported. 'offset' is Telegram's "
+            "UTF-16 code-unit offset of this fragment inside the ORIGINAL replied-to message, "
+            "not inside this message's text."
+        )
+
     offset = getattr(reply, "quote_offset", None)
     if offset is not None:
         quote["offset"] = offset
     return quote
 
 
-def _fidelity_forward(forwarded: dict[str, Any]) -> dict[str, Any]:
-    """Re-normalize the human-readable names in upstream's forward block."""
+def _full_name(obj) -> str:
+    """``first_name last_name`` from a raw Telethon user/chat object."""
+    parts = (getattr(obj, "first_name", None), getattr(obj, "last_name", None))
+    return " ".join(part for part in parts if part).strip()
+
+
+def _fidelity_forward(msg, forwarded: dict[str, Any]) -> dict[str, Any]:
+    """Rebuild the forward block's names from the raw Telethon objects.
+
+    Re-cleaning upstream's strings cannot work: ``sanitize_name`` has already
+    deleted the ZWNJ, and no later pass can put it back. The IDs, dates, usernames
+    and permalink upstream computed are kept as they are; only the four
+    human-readable names are recomputed from ``msg.fwd_from``/``msg.forward``.
+    """
     result = dict(forwarded)
-    for key in ("from_name", "from_chat", "from_user", "post_author"):
-        value = result.get(key)
-        if isinstance(value, str):
-            result[key] = display_name(value)
+    fwd = getattr(msg, "fwd_from", None)
+    origin = getattr(msg, "forward", None)
+
+    raw_values = {
+        "from_name": getattr(fwd, "from_name", None),
+        "post_author": getattr(fwd, "post_author", None),
+    }
+    chat = getattr(origin, "chat", None)
+    if chat is not None:
+        raw_values["from_chat"] = getattr(chat, "title", None) or _full_name(chat)
+    sender = getattr(origin, "sender", None)
+    if sender is not None:
+        raw_values["from_user"] = _full_name(sender)
+
+    for key, raw in raw_values.items():
+        if raw:
+            result[key] = display_name(raw)
     return result
+
+
+def fidelity_sender_name(msg) -> Optional[str]:
+    """The sender's display name rebuilt from the raw object, or ``None``.
+
+    Mirrors upstream's ``get_sender_name`` — channel title first, then the user's
+    full name — but keeps the ZWNJ and ZWJ that make the name what its owner
+    wrote.
+    """
+    sender = getattr(msg, "sender", None)
+    if sender is None:
+        return None
+    title = getattr(sender, "title", None)
+    raw = title or _full_name(sender)
+    return display_name(raw) if raw else None
 
 
 def describe_buttons(msg) -> list[str]:
@@ -585,10 +679,19 @@ def deep_message_dict(
         data["reply_quote"] = quote
     forwarded = data.get("forwarded")
     if isinstance(forwarded, dict):
-        data["forwarded"] = _fidelity_forward(forwarded)
-    buttons = describe_buttons(msg)
-    if buttons:
-        data["buttons"] = buttons
+        data["forwarded"] = _fidelity_forward(msg, forwarded)
+    sender = fidelity_sender_name(msg)
+    if sender:
+        data["sender"] = sender
+    if getattr(msg, "buttons", None):
+        # Always replace, never only-when-non-empty: buttons whose labels are
+        # made entirely of rejected characters clean to nothing, and leaving the
+        # key alone would hand back upstream's raw list instead.
+        buttons = describe_buttons(msg)
+        if buttons:
+            data["buttons"] = buttons
+        else:
+            data.pop("buttons", None)
     label = describe_media_label(msg)
     if label:
         data["media"] = label

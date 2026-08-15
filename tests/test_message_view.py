@@ -20,6 +20,7 @@ from telegram_mcp.message_view import (
     _fidelity_forward,
     describe_buttons,
     describe_reply_quote,
+    fidelity_sender_name,
     display_name,
     message_permalink,
 )
@@ -474,9 +475,9 @@ def test_no_premium_effect_key_for_an_ordinary_sticker():
 
 # --- Fidelity across every human-readable field -------------------------------
 
-PERSIAN = "\u0645\u06cc\u200c\u06a9\u0646\u062f"          # mi-konad, needs its ZWNJ
-FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"     # one emoji, held by ZWJ
-HOSTILE = "\u202eevil\u200b\u2062\ufff9"                   # RLO + hidden padding
+PERSIAN = "\u0645\u06cc\u200c\u06a9\u0646\u062f"  # mi-konad, needs its ZWNJ
+FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"  # one emoji, held by ZWJ
+HOSTILE = "\u202eevil\u200b\u2062\ufff9"  # RLO + hidden padding
 
 
 @pytest.mark.parametrize("bound", [0, -1, -50])
@@ -511,15 +512,16 @@ def test_fidelity_text_still_keeps_the_legitimate_joiners_and_marks(codepoint):
     assert clean == f"a{character}b"
 
 
-def test_reply_quote_keeps_the_exact_fragment_and_documents_its_offset():
+def test_reply_quote_keeps_the_readable_fragment_and_documents_its_offset():
     msg = SimpleNamespace(reply_to=SimpleNamespace(quote_text=PERSIAN + HOSTILE, quote_offset=12))
 
     quote = describe_reply_quote(msg)
 
-    assert PERSIAN in quote["text"], "the ZWNJ was stripped out of an 'exact' quote"
+    assert PERSIAN in quote["text"], "the ZWNJ was stripped out of the quote"
     assert "\u202e" not in quote["text"] and "\u200b" not in quote["text"]
     assert quote["offset"] == 12
-    assert "UTF-16" in quote["note"] and "ORIGINAL replied-to message" in quote["note"]
+    assert quote["modified"] is True
+    assert "UTF-16" in quote["note"] and "replied-to message" in quote["note"]
 
 
 def test_reply_quote_is_absent_for_a_whole_message_reply():
@@ -539,9 +541,16 @@ def test_button_labels_keep_unicode_and_drop_spoofing_characters():
 
 
 def test_forward_names_keep_their_unicode():
-    forwarded = {"from_name": PERSIAN, "from_chat": FAMILY, "from_user": "a\u202eb", "date": 1}
+    msg = SimpleNamespace(
+        fwd_from=SimpleNamespace(from_name=PERSIAN, post_author=None),
+        forward=SimpleNamespace(
+            chat=SimpleNamespace(title=FAMILY, first_name=None, last_name=None),
+            sender=SimpleNamespace(first_name="a‮b", last_name=None),
+        ),
+    )
+    forwarded = {"from_name": "x", "from_chat": "x", "from_user": "x", "date": 1}
 
-    result = _fidelity_forward(forwarded)
+    result = _fidelity_forward(msg, forwarded)
 
     assert result["from_name"] == PERSIAN
     assert result["from_chat"] == FAMILY
@@ -571,3 +580,163 @@ def test_poll_question_keeps_unicode():
 
     assert PERSIAN in info["poll_question"]
     assert "\u202e" not in info["poll_question"]
+
+
+# --- End-to-end: message_to_dict() -> deep_message_dict() ---------------------
+
+FLAG = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
+
+
+def _plain_message(**overrides):
+    """A stub carrying every attribute the upstream message_to_dict touches."""
+    fields = dict(
+        id=1,
+        date=None,
+        sender_id=5,
+        out=False,
+        message="hi",
+        media=None,
+        grouped_id=None,
+        reply_to=None,
+        fwd_from=None,
+        forward=None,
+        via_bot_id=None,
+        edit_date=None,
+        pinned=False,
+        views=None,
+        forwards=None,
+        reactions=None,
+        replies=None,
+        buttons=None,
+        entities=None,
+        action=None,
+        ttl_period=None,
+        sender=None,
+        web_preview=None,
+        photo=None,
+        sticker=None,
+        voice=None,
+        video_note=None,
+        video=None,
+        audio=None,
+        gif=None,
+        document=None,
+        contact=None,
+        geo=None,
+        poll=None,
+        file=None,
+        chat=None,
+    )
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
+def _deep(msg):
+    """The real path: upstream's compact view, then the fork's deep view."""
+    from telegram_mcp.tools.messages import message_to_dict
+
+    return deep_message_dict(msg, message_to_dict(msg))
+
+
+@pytest.mark.parametrize("label, name", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
+def test_forward_names_survive_the_full_pipeline(label, name):
+    """message_to_dict already stripped these; re-cleaning cannot bring them back."""
+    msg = _plain_message(
+        fwd_from=SimpleNamespace(date=None, from_name=name, channel_post=None, post_author=name),
+        forward=SimpleNamespace(
+            chat=SimpleNamespace(title=name, username="chan", first_name=None, last_name=None),
+            chat_id=-100123,
+            sender=SimpleNamespace(first_name=name, last_name=None),
+        ),
+    )
+
+    forwarded = _deep(msg)["forwarded"]
+
+    for key in ("from_name", "from_chat", "from_user", "post_author"):
+        assert forwarded[key] == name, f"{label}: {key} lost its joiner"
+    # Fields upstream computed must survive untouched.
+    assert forwarded["from_username"] == "chan"
+    assert forwarded["from_chat_id"] == -100123
+
+
+@pytest.mark.parametrize("label, name", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
+def test_user_sender_name_survives_the_full_pipeline(label, name):
+    msg = _plain_message(
+        sender=SimpleNamespace(first_name=name, last_name=None, username=None, title=None)
+    )
+    assert _deep(msg)["sender"] == name, label
+
+
+@pytest.mark.parametrize("label, title", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
+def test_channel_sender_title_survives_the_full_pipeline(label, title):
+    msg = _plain_message(
+        sender=SimpleNamespace(title=title, username=None, first_name=None, last_name=None)
+    )
+    assert _deep(msg)["sender"] == title, label
+
+
+def test_buttons_made_entirely_of_hostile_characters_never_leak():
+    """Cleaning them yields an empty list, which must not fall back to the raw one."""
+    msg = _plain_message(
+        buttons=[
+            [SimpleNamespace(text="\u202e\u200b"), SimpleNamespace(text="\u2062\ufff9")],
+            [SimpleNamespace(text="\u180e")],
+        ]
+    )
+
+    result = _deep(msg)
+
+    assert "buttons" not in result, f"raw labels leaked: {result.get('buttons')!r}"
+
+
+def test_partly_hostile_buttons_keep_only_the_readable_ones():
+    msg = _plain_message(
+        buttons=[[SimpleNamespace(text="\u202e\u200b"), SimpleNamespace(text=PERSIAN)]]
+    )
+    assert _deep(msg)["buttons"] == [PERSIAN]
+
+
+def test_reply_quote_declares_when_it_was_modified():
+    hostile = PERSIAN + "\u202e"
+    msg = _plain_message(
+        reply_to=SimpleNamespace(quote_text=hostile, quote_offset=12, forum_topic=False)
+    )
+
+    quote = _deep(msg)["reply_quote"]
+
+    assert quote["modified"] is True
+    assert quote["truncated"] is False
+    assert "NOT character-for-character exact" in quote["note"]
+    assert quote["offset"] == 12
+    assert "UTF-16" in quote["note"]
+
+
+def test_reply_quote_claims_no_change_when_nothing_changed():
+    msg = _plain_message(
+        reply_to=SimpleNamespace(quote_text=PERSIAN, quote_offset=3, forum_topic=False)
+    )
+
+    quote = _deep(msg)["reply_quote"]
+
+    assert "modified" not in quote
+    assert quote["text"] == PERSIAN
+    assert "unchanged from what Telegram reported" in quote["note"]
+
+
+def test_a_valid_emoji_tag_sequence_survives():
+    clean, _offsets = fidelity_text(f"Team {FLAG}!")
+    assert clean == f"Team {FLAG}!"
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("lone tag letter", "a\U000e0067b"),
+        ("tag run with no emoji base", "ab\U000e0067\U000e007f"),
+        ("tag run with no cancel", "\U0001f3f4\U000e0067\U000e0062"),
+        ("cancel on its own", "a\U000e007fb"),
+    ],
+)
+def test_stray_tag_characters_are_removed(label, text):
+    clean, _offsets = fidelity_text(text)
+    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label
