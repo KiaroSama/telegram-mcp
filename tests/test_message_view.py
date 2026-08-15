@@ -757,7 +757,7 @@ def _tags(*letters):
     [
         ("scotland", TAG_BASE + _tags(*"gbsct") + TAG_END),
         ("wales", TAG_BASE + _tags(*"gbwls") + TAG_END),
-        ("digits in the spec", TAG_BASE + _tags(*"us01") + TAG_END),
+        ("england", TAG_BASE + _tags(*"gbeng") + TAG_END),
     ],
 )
 def test_valid_subdivision_flags_survive(label, text):
@@ -871,3 +871,92 @@ def test_text_fidelity_reports_an_untouched_message_as_unmodified():
     data = _deep(msg)
 
     assert data["text_fidelity_modified"] is False
+
+
+# --- Truncation: whole sequences only, cut at every internal position ---------
+
+ZWNJ_PAIR = "\u06cc\u200c\u06a9"  # a ZWNJ-joined Persian pair
+REGIONAL_PAIR = "\U0001f1ee\U0001f1f7"  # a two-codepoint regional flag
+SCOTLAND = "\U0001f3f4" + "".join(chr(0xE0000 + ord(c)) for c in "gbsct") + "\U000e007f"
+
+
+@pytest.mark.parametrize(
+    "label, sequence",
+    [
+        ("zwj family", FAMILY),
+        ("vs16 emoji", "\u2764\ufe0f"),
+        ("base plus combining mark", "e\u0301"),
+        ("persian zwnj pair", ZWNJ_PAIR),
+        ("subdivision flag", SCOTLAND),
+        ("regional indicator pair", REGIONAL_PAIR),
+    ],
+)
+def test_truncation_keeps_a_sequence_whole_or_drops_it_entirely(label, sequence):
+    """Cut at every position inside the sequence: a prefix fragment is never allowed.
+
+    Checking only the final code point is not enough — a cut landing immediately
+    *before* a ZWJ leaves a complete-looking man emoji that is really a third of a
+    family.
+    """
+    prefix = "y" * 20
+    text = prefix + sequence
+
+    for bound in range(len(prefix), len(text) + 2):
+        result = display_name(text, max_length=bound)
+        body = result[:-1] if result.endswith("…") else result
+        tail = body[len(prefix) :] if body.startswith(prefix) else body.lstrip("y")
+
+        assert len(result) <= bound, f"{label} @ {bound}: exceeded the bound"
+        assert tail in ("", sequence), f"{label} @ {bound}: fragment {tail!r}"
+
+
+@pytest.mark.parametrize("sequence", [FAMILY, ZWNJ_PAIR, SCOTLAND, REGIONAL_PAIR])
+def test_truncation_never_ends_on_a_joiner(sequence):
+    text = "y" * 20 + sequence
+    for bound in range(len(text) + 2):
+        body = display_name(text, max_length=bound).rstrip("…")
+        assert not body.endswith("\u200d")
+        assert not body.endswith("\u200c")
+
+
+# --- Emoji tag sequences: RGI only -------------------------------------------
+
+
+def _tag_seq(spec):
+    return "\U0001f3f4" + "".join(chr(0xE0000 + ord(c)) for c in spec) + "\U000e007f"
+
+
+@pytest.mark.parametrize("spec", ["gbeng", "gbsct", "gbwls"])
+def test_rgi_subdivision_flags_survive(spec):
+    text = f"Flag {_tag_seq(spec)} here"
+    clean, _offsets = fidelity_text(text)
+    assert clean == text
+
+
+@pytest.mark.parametrize(
+    "label, spec",
+    [
+        ("syntactically fine, not a subdivision", "us01"),
+        ("not a region at all", "zzzzz"),
+        ("valid region, no subdivision", "gb"),
+        ("uppercase", "GBSCT"),
+    ],
+)
+def test_well_formed_but_non_rgi_tag_sequences_are_stripped(label, spec):
+    """Only RGI sequences render; anything else is invisible, so it can hide text."""
+    clean, _offsets = fidelity_text(_tag_seq(spec))
+    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label
+
+
+def test_an_overlong_tag_sequence_is_rejected_by_the_uts51_bound():
+    """UTS #51 caps the whole emoji tag sequence at 32 code points."""
+    long_spec = "a" * 40
+    clean, _offsets = fidelity_text(_tag_seq(long_spec))
+    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean)
+
+
+def test_the_rgi_set_is_the_documented_policy():
+    """The narrower-than-syntax policy is explicit, not inferred."""
+    from telegram_mcp.message_view import _RGI_TAG_SPECS
+
+    assert _RGI_TAG_SPECS == {"gbeng", "gbsct", "gbwls"}

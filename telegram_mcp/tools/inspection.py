@@ -445,7 +445,9 @@ async def get_media_thumbnail(
         )
 
 
-async def _premium_effect_frames(cl, msg, details: dict, count: int, max_dimension: int):
+async def _premium_effect_frames(
+    cl, msg, details: dict, count: int, max_dimension: int, max_bytes: int
+):
     """Frames of a premium sticker's separate effect animation.
 
     Telegram ships the effect as a ``VideoSize`` of type ``"f"`` alongside the
@@ -471,9 +473,27 @@ async def _premium_effect_frames(cl, msg, details: dict, count: int, max_dimensi
     if effect is None:
         return "The premium effect was reported but its asset is missing from this document."
 
+    # The effect asset carries its own size; the sticker's size says nothing about
+    # it. Telethon's iter_download cannot target a VideoSize, so the transfer is
+    # not streamed: the advertised size is checked first and the delivered bytes
+    # are checked again afterwards.
+    limit = min(max_bytes, MAX_FRAME_SOURCE_BYTES)
+    advertised = getattr(effect, "size", None)
+    if advertised is not None and advertised > limit:
+        return (
+            f"The premium effect asset is {advertised} bytes, above the {limit}-byte limit "
+            f"(hard ceiling {MAX_FRAME_SOURCE_BYTES}). Raise max_bytes up to that ceiling."
+        )
+
     raw = await cl.download_media(document, file=bytes, thumb=effect)
     if not raw:
         return "Telegram returned no data for the premium effect asset."
+    if len(raw) > limit:
+        return (
+            f"The premium effect asset turned out to be {len(raw)} bytes, above the "
+            f"{limit}-byte limit (its size was not advertised before the transfer). "
+            f"Raise max_bytes up to the {MAX_FRAME_SOURCE_BYTES}-byte ceiling."
+        )
 
     # The effect asset is a WebM animation; ffmpeg reads it the same as any video.
     records, images = await asyncio.to_thread(_encode_frames, raw, ".webm", count, max_dimension)
@@ -560,6 +580,11 @@ async def get_media_frames(
                 "Use get_media_details to see what this message holds."
             )
 
+        if premium_effect:
+            # Before the sticker's size gate: the effect is a separate asset, so a
+            # large sticker must not veto a small effect (or vice versa).
+            return await _premium_effect_frames(cl, msg, details, count, max_dimension, max_bytes)
+
         size_bytes = details.get("size_bytes") or 0
         max_bytes = max(1, min(int(max_bytes), MAX_FRAME_SOURCE_BYTES))
         if size_bytes > max_bytes:
@@ -569,9 +594,6 @@ async def get_media_frames(
                 "Raise max_bytes up to that ceiling, or use download_media to save the "
                 "original to disk."
             )
-
-        if premium_effect:
-            return await _premium_effect_frames(cl, msg, details, count, max_dimension)
 
         data, over_cap = await _download_capped(cl, msg, max_bytes)
         if over_cap:

@@ -76,7 +76,7 @@ so a 200 MB video costs a few kilobytes. `thumb_index` picks a size from the `th
 list in `get_media_details`; the default `-1` is the largest available.
 `get_media_thumbnail("@somechannel", 190)`
 
-**`get_media_frames(chat_id, message_id, count=4, max_bytes=52428800, max_dimension=900, account=None) -> list`**
+**`get_media_frames(chat_id, message_id, count=4, max_bytes=52428800, max_dimension=900, premium_effect=False, account=None) -> list`**
 Downloads the media into memory — it never lands in a download folder, though the extractor
 does spill it to a temporary file that is deleted immediately after — and extracts up to
 `count` evenly spaced frames (hard cap 10) as image blocks. Animated GIF/WebP/APNG go through
@@ -205,14 +205,19 @@ from a truncated one by inspection. `text_fidelity` is described the same way an
 UTF-16 code-unit offset of the fragment inside the **original replied-to message**, not inside
 the replying message.
 
-Emoji tag characters are kept only inside a sequence that is well formed by UTS #51: the black
-flag base, one to six tag specifiers drawn from the digits and lowercase letters, and TAG CANCEL —
-which is how a subdivision flag like 🏴󠁧󠁢󠁳󠁣󠁴󠁿 is written. Anything else is removed, including a tag run
-hiding behind a CJK ideograph or an unrelated emoji.
+Emoji tag sequences pass two gates. First UTS #51 well-formedness: the black flag base, a tag
+spec of characters from U+E0020–U+E007E, TAG CANCEL, and at most 32 code points in total. Then
+membership of the RGI set — currently exactly `gbeng`, `gbsct` and `gbwls`. **This is deliberately
+narrower than the syntax allows:** a sequence like `us01` is perfectly well formed and is not a
+subdivision, so it renders as nothing and is therefore only useful for hiding text. Extend
+`_RGI_TAG_SPECS` in `message_view.py` when Unicode adds a sequence.
 
-Truncation cuts on a safe boundary: it never leaves a dangling ZWJ, variation selector, combining
-mark, or a flag base whose tag specifiers were cut away, so a family emoji or a Persian word is
-either kept whole or dropped whole.
+Truncation is sequence-aware on **both** sides of the cut, so the result contains whole sequences
+only. A ZWJ family emoji, a variation-selector sequence, a base plus its combining marks, a
+ZWNJ-joined Persian pair, a regional-indicator flag and a subdivision flag are each either kept
+entire or dropped entire — never a prefix fragment. Checking only the last character kept was not
+enough: a cut landing immediately *before* a ZWJ leaves a complete-looking 👨 that is really the
+first third of 👨‍👩‍👧.
 
 Inline button labels are always replaced by the cleaned list, or dropped entirely when every
 label cleans to nothing — leaving the key untouched would have handed back the raw values.
@@ -228,7 +233,10 @@ exact on-screen appearance. The `free` flag (usable without Premium) is reported
 Premium stickers can carry a *second* animation — an effect Telegram plays over the sticker,
 shipped as a `VideoSize` of type `"f"`. `get_media_details` now reports it under
 `premium_effect` with its dimensions, and `get_media_frames(..., premium_effect=True)` samples
-that asset on demand. Those frames are the effect **on its own**: Telegram composites it over the
+that asset on demand under its **own** byte limit — the sticker's size neither vetoes a small
+effect nor admits a large one. Telethon cannot stream a `VideoSize`, so the advertised effect size
+is checked before the transfer and the delivered bytes are checked again afterwards, with
+`MAX_FRAME_SOURCE_BYTES` as the hard ceiling either way. Those frames are the effect **on its own**: Telegram composites it over the
 sticker in the chat, so the finished appearance is neither these frames nor the sticker alone.
 Every record is marked `"composite_fidelity": "asset-only"` and points at `get_telegram_frames`
 for the real composite.

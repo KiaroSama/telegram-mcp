@@ -293,10 +293,10 @@ def test_custom_emoji_docstring_matches_the_lottie_behaviour():
 # --- Premium sticker effect sampling -----------------------------------------
 
 
-def _effect_message(with_effect=True):
+def _effect_message(with_effect=True, effect_size=4096):
     video_thumbs = [SimpleNamespace(type="v", w=100, h=100, size=10)]
     if with_effect:
-        video_thumbs.append(SimpleNamespace(type="f", w=512, h=512, size=4096))
+        video_thumbs.append(SimpleNamespace(type="f", w=512, h=512, size=effect_size))
     document = SimpleNamespace(id=7, attributes=[], thumbs=[], video_thumbs=video_thumbs)
     return SimpleNamespace(id=99, media=object(), document=document, sticker=document, file=None)
 
@@ -330,6 +330,7 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
             {"premium_effect": {"kind": "premium_sticker_effect"}, "kind": "sticker"},
             count=2,
             max_dimension=256,
+            max_bytes=50 * 1024 * 1024,
         )
     finally:
         inspection.asyncio.to_thread = original
@@ -351,8 +352,116 @@ async def test_premium_effect_request_without_an_effect_says_so():
         {"kind": "sticker"},
         count=2,
         max_dimension=64,
+        max_bytes=50 * 1024 * 1024,
     )
 
     assert isinstance(result, str)
     assert "no premium sticker effect" in result
     assert "get_media_details" in result
+
+
+_EFFECT_DETAILS = {"premium_effect": {"kind": "premium_sticker_effect"}, "kind": "sticker"}
+
+
+class _EffectClient:
+    """Records what was requested and returns bytes of a chosen length."""
+
+    def __init__(self, payload=b"webm"):
+        self.payload = payload
+        self.called = False
+
+    async def download_media(self, document, file=None, thumb=None):
+        self.called = True
+        return self.payload
+
+
+@pytest.mark.asyncio
+async def test_oversized_effect_is_refused_before_the_transfer():
+    """The advertised effect size gates the transfer, so nothing is pulled."""
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    client = _EffectClient()
+    result = await _premium_effect_frames(
+        client,
+        _effect_message(effect_size=10_000),
+        _EFFECT_DETAILS,
+        count=2,
+        max_dimension=64,
+        max_bytes=1000,
+    )
+
+    assert isinstance(result, str) and "above the 1000-byte limit" in result
+    assert client.called is False, "the transfer started despite the size gate"
+
+
+@pytest.mark.asyncio
+async def test_an_unadvertised_oversized_effect_is_caught_after_the_transfer():
+    """Telethon cannot stream a VideoSize, so the delivered bytes are re-checked."""
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+
+    message = _effect_message(effect_size=None)
+    client = _EffectClient(payload=b"x" * 5000)
+
+    result = await _premium_effect_frames(
+        client, message, _EFFECT_DETAILS, count=2, max_dimension=64, max_bytes=1000
+    )
+
+    assert isinstance(result, str) and "turned out to be 5000 bytes" in result
+
+
+@pytest.mark.asyncio
+async def test_the_hard_ceiling_still_applies_when_max_bytes_is_raised():
+    from telegram_mcp.tools.inspection import MAX_FRAME_SOURCE_BYTES, _premium_effect_frames
+
+    client = _EffectClient()
+    result = await _premium_effect_frames(
+        client,
+        _effect_message(effect_size=MAX_FRAME_SOURCE_BYTES + 1),
+        _EFFECT_DETAILS,
+        count=2,
+        max_dimension=64,
+        max_bytes=10 * MAX_FRAME_SOURCE_BYTES,
+    )
+
+    assert isinstance(result, str)
+    assert f"above the {MAX_FRAME_SOURCE_BYTES}-byte limit" in result
+
+
+@pytest.mark.asyncio
+async def test_an_effect_at_exactly_the_limit_is_accepted():
+    from telegram_mcp.tools.inspection import _premium_effect_frames
+    import telegram_mcp.tools.inspection as inspection
+
+    client = _EffectClient(payload=b"x" * 1000)
+
+    async def _fake(fn, raw, suffix, count, max_dimension):
+        return [{"frame_index": 0}], ["image"]
+
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
+    try:
+        result = await _premium_effect_frames(
+            client,
+            _effect_message(effect_size=1000),
+            _EFFECT_DETAILS,
+            count=1,
+            max_dimension=64,
+            max_bytes=1000,
+        )
+    finally:
+        inspection.asyncio.to_thread = original
+
+    assert not isinstance(result, str), f"the exact limit was refused: {result}"
+    assert client.called is True
+
+
+def test_the_sticker_size_gate_runs_after_the_effect_branch():
+    """A large sticker must not veto a small effect, nor a small one admit a large."""
+    import inspect as _inspect
+
+    from telegram_mcp.tools import inspection
+
+    source = _inspect.getsource(inspection.get_media_frames)
+    effect_branch = source.index("if premium_effect:")
+    sticker_gate = source.index('size_bytes = details.get("size_bytes")')
+    assert effect_branch < sticker_gate, "the sticker's own size still gates the effect"

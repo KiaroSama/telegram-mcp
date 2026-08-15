@@ -77,8 +77,18 @@ def _is_unsafe_char(char: str) -> bool:
 # hide behind any CJK ideograph or unrelated emoji.
 _TAG_BASE = "\U0001f3f4"
 _TAG_END = "\U000e007f"
-_TAG_SPEC_CODES = frozenset(range(0xE0030, 0xE003A)) | frozenset(range(0xE0061, 0xE007B))
-_TAG_MAX_SPEC = 6  # longest ISO 3166-2 subdivision code Unicode admits
+# UTS #51 well-formedness: tag_spec is one or more characters from U+E0020..U+E007E
+# and the whole emoji tag sequence is limited to 32 code points.
+_TAG_SPEC_CODES = frozenset(range(0xE0020, 0xE007F))
+_TAG_SEQUENCE_MAX = 32
+
+# Well-formed is not the same as displayable. Only RGI ("recommended for general
+# interchange") tag sequences render as a flag anywhere; everything else is
+# invisible, which makes it a place to hide text. This fork therefore accepts the
+# RGI set only, listed explicitly rather than guessed from syntax: a syntactically
+# perfect "us01" is not a subdivision and renders as nothing. Extend this set when
+# Unicode adds a sequence — deliberately narrower than the syntax allows.
+_RGI_TAG_SPECS = frozenset({"gbeng", "gbsct", "gbwls"})
 
 
 def _is_tag_char(char: str) -> bool:
@@ -103,16 +113,25 @@ def _stray_tag_indexes(raw: str) -> set[int]:
 
 
 def _is_valid_tag_sequence(raw: str, start: int, end: int) -> bool:
-    """Is ``raw[start:end]`` a well-formed tag_spec + tag_end after a tag_base?"""
+    """Is ``raw[start:end]`` an RGI emoji tag sequence following its tag_base?
+
+    Two gates. First UTS #51 well-formedness: the black flag base, a tag_spec of
+    characters from U+E0020..U+E007E, TAG CANCEL, and at most 32 code points
+    overall. Then RGI membership, because only those actually render — see
+    :data:`_RGI_TAG_SPECS`.
+    """
     if start == 0 or raw[start - 1] != _TAG_BASE:
         return False
     run = raw[start:end]
     if not run.endswith(_TAG_END):
         return False
-    spec = run[:-1]
-    if not 1 <= len(spec) <= _TAG_MAX_SPEC:
+    if 1 + len(run) > _TAG_SEQUENCE_MAX:  # the base counts toward the limit
         return False
-    return all(ord(char) in _TAG_SPEC_CODES for char in spec)
+    spec = run[:-1]
+    if not spec or not all(ord(char) in _TAG_SPEC_CODES for char in spec):
+        return False
+    decoded = "".join(chr(ord(char) - 0xE0000) for char in spec)
+    return decoded in _RGI_TAG_SPECS
 
 
 def fidelity_text(raw: Optional[str]) -> tuple[str, list[int]]:
@@ -151,36 +170,68 @@ _VARIATION_SELECTORS = frozenset(range(0xFE00, 0xFE10)) | frozenset(range(0xE010
 _ZWJ = "‍"
 
 
-def _ends_mid_sequence(text: str) -> bool:
-    """Would cutting here leave a dangling half of a compound character?"""
-    if not text:
-        return False
-    last = text[-1]
-    code = ord(last)
-    if last == _ZWJ or code in _VARIATION_SELECTORS or _is_tag_char(last):
-        return True
-    if last == _TAG_BASE:  # a flag base whose tag spec was cut away
-        return True
-    return unicodedata.category(last) in ("Mn", "Mc", "Me")
+_ZWNJ = "‌"
+_JOINERS = (_ZWJ, _ZWNJ)
+
+
+def _is_regional_indicator(char: str) -> bool:
+    return 0x1F1E6 <= ord(char) <= 0x1F1FF
+
+
+def _sequence_starts(text: str) -> list[int]:
+    """Indices where a new user-perceived sequence begins.
+
+    Checking only the character before the cut is not enough: a cut landing
+    immediately *before* a ZWJ leaves a complete-looking 👨 that is really the
+    first third of 👨‍👩‍👧, and a cut before a ZWNJ splits a Persian word. Both
+    sides of every boundary have to agree, which is what this scan produces.
+    """
+    starts: list[int] = []
+    regional_run = 0
+    for index, char in enumerate(text):
+        if index == 0:
+            starts.append(0)
+            regional_run = 1 if _is_regional_indicator(char) else 0
+            continue
+
+        previous = text[index - 1]
+        continues = (
+            unicodedata.category(char) in ("Mn", "Mc", "Me")
+            or ord(char) in _VARIATION_SELECTORS
+            or _is_tag_char(char)
+            or char in _JOINERS
+            or previous in _JOINERS  # whatever a joiner joins binds to it
+            or (_is_regional_indicator(char) and regional_run == 1)
+        )
+        if _is_regional_indicator(char):
+            regional_run = 0 if regional_run == 1 else 1
+        else:
+            regional_run = 0
+        if not continues:
+            starts.append(index)
+    return starts
 
 
 def _bounded(text: str, max_length: int) -> tuple[str, bool]:
-    """Return ``(text, truncated)`` cut on a safe boundary, ellipsis included.
+    """Return ``(text, truncated)`` cut on a sequence boundary, ellipsis included.
 
     A raw slice happily lands inside a family emoji, between a base letter and its
     combining mark, or halfway through a subdivision flag's tag sequence — which
-    is exactly what these helpers promise not to do. Back off until the tail is a
-    complete character.
+    is exactly what these helpers promise not to do. The result therefore contains
+    whole sequences only: a sequence that does not fit is dropped entirely.
     """
     if max_length <= 0:
         return "", bool(text)
     if len(text) <= max_length:
         return text, False
 
-    body = text[: max_length - 1]
-    while body and _ends_mid_sequence(body):
-        body = body[:-1]
-    return body.rstrip() + "…", True
+    budget = max_length - 1  # the ellipsis occupies one
+    cut = 0
+    for start in _sequence_starts(text):
+        if start > budget:
+            break
+        cut = start
+    return text[:cut].rstrip() + "…", True
 
 
 def display_name(raw: Optional[str], max_length: int = 256) -> str:
