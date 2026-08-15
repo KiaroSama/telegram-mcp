@@ -76,11 +76,14 @@ list in `get_media_details`; the default `-1` is the largest available.
 `get_media_thumbnail("@somechannel", 190)`
 
 **`get_media_frames(chat_id, message_id, count=4, max_bytes=52428800, max_dimension=900, account=None) -> list`**
-Downloads the media into memory (never to disk) and extracts up to `count` evenly spaced
-frames (hard cap 10) as image blocks. Animated GIF/WebP/APNG go through Pillow; video, video
-notes and WebM video stickers go through ffmpeg, which samples inside the clip because the
-first and last frames of a video are frequently black. Media larger than `max_bytes`
-(50 MB default) is refused rather than downloaded — raise it, or use `download_media`.
+Downloads the media into memory — it never lands in a download folder, though the extractor
+does spill it to a temporary file that is deleted immediately after — and extracts up to
+`count` evenly spaced frames (hard cap 10) as image blocks. Animated GIF/WebP/APNG go through
+Pillow; video, video notes and WebM video stickers go through ffmpeg, which samples inside the
+clip because the first and last frames of a video are frequently black. Media larger than
+`max_bytes` (50 MB default) is refused rather than downloaded; `max_bytes` itself is clamped to
+200 MB because the whole file is held in memory. When Telegram does not advertise the size up
+front, the check runs after the transfer instead. Use `download_media` for anything bigger.
 `get_media_frames(-1001234567890, 5533, count=6)`
 
 ### Visual (Windows only)

@@ -34,6 +34,29 @@ _MIME_SUFFIXES = {
 MAX_FRAME_SOURCE_BYTES = 200 * 1024 * 1024
 
 
+def require_explicit_account(fn):
+    """Refuse the multi-account fan-out for tools that return images.
+
+    ``with_account(readonly=True)`` fans a tool out across every account and joins
+    the results with ``f"[{label}]\\n{result}"``. For a tool returning
+    ``[metadata, Image, ...]`` that formats the Python list into a string, so the
+    images are silently destroyed and the JSON arrives nested in a list repr.
+    Applied ABOVE ``with_account`` so it intercepts before the fan-out happens.
+    """
+
+    @wraps(fn)
+    async def wrapper(*args, **kwargs):
+        if kwargs.get("account") is None and is_multi_mode():
+            labels = ", ".join(clients.keys())
+            return (
+                f"'account' is required for {fn.__name__} in multi-account mode: image "
+                f"results cannot be merged across accounts. Available accounts: {labels}."
+            )
+        return await fn(*args, **kwargs)
+
+    return wrapper
+
+
 async def _get_message(chat_id: Union[int, str], message_id: int, account: str = None):
     """Resolve the chat and fetch one message: ``(client, entity, message)``."""
     cl = get_client(account)
@@ -52,6 +75,7 @@ def _media_suffix(details: dict) -> str:
 @mcp.tool(
     annotations=ToolAnnotations(title="Inspect Message", openWorldHint=True, readOnlyHint=True)
 )
+@require_explicit_account
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def inspect_message(
@@ -210,6 +234,7 @@ async def get_media_details(chat_id: Union[int, str], message_id: int, account: 
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Media Thumbnail", openWorldHint=True, readOnlyHint=True)
 )
+@require_explicit_account
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_media_thumbnail(
@@ -283,6 +308,7 @@ async def get_media_thumbnail(
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Media Frames", openWorldHint=True, readOnlyHint=True)
 )
+@require_explicit_account
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_media_frames(
@@ -334,6 +360,15 @@ async def get_media_frames(
         data = await cl.download_media(msg, file=bytes)
         if not data:
             return f"Telegram returned no media data for message {message_id}."
+        if len(data) > max_bytes:
+            # ponytail: the pre-check above cannot fire when Telethon reports no
+            # size, so re-check after the transfer. This bounds the extraction
+            # work, not the download itself — Telethon has no partial-fetch limit.
+            return (
+                f"This media turned out to be {len(data)} bytes, above the {max_bytes}-byte "
+                "limit (its size was not advertised before the download). Raise max_bytes, "
+                "or use download_media to save the original to disk."
+            )
 
         def _frames():
             processed = []
