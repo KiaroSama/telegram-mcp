@@ -17,6 +17,9 @@ from telegram_mcp.message_view import (
     describe_media,
     describe_reactions,
     describe_topic,
+    _fidelity_forward,
+    describe_buttons,
+    describe_reply_quote,
     display_name,
     message_permalink,
 )
@@ -467,3 +470,104 @@ def test_no_premium_effect_key_for_an_ordinary_sticker():
     msg = SimpleNamespace(media=object(), document=document, sticker=document, file=None)
 
     assert "premium_effect" not in describe_media(msg)
+
+
+# --- Fidelity across every human-readable field -------------------------------
+
+PERSIAN = "\u0645\u06cc\u200c\u06a9\u0646\u062f"          # mi-konad, needs its ZWNJ
+FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"     # one emoji, held by ZWJ
+HOSTILE = "\u202eevil\u200b\u2062\ufff9"                   # RLO + hidden padding
+
+
+@pytest.mark.parametrize("bound", [0, -1, -50])
+def test_display_name_with_a_non_positive_bound_returns_nothing(bound):
+    """A zero budget has no room for text or for the ellipsis."""
+    assert display_name("x" * 50, max_length=bound) == ""
+
+
+@pytest.mark.parametrize(
+    "label, codepoint",
+    [
+        ("function application", 0x2061),
+        ("invisible times", 0x2062),
+        ("invisible separator", 0x2063),
+        ("invisible plus", 0x2064),
+        ("interlinear anchor", 0xFFF9),
+        ("interlinear separator", 0xFFFA),
+        ("interlinear terminator", 0xFFFB),
+        ("mongolian vowel separator", 0x180E),
+    ],
+)
+def test_fidelity_text_strips_the_remaining_hidden_characters(label, codepoint):
+    """These render as nothing, so they hide text from a reader."""
+    clean, _offsets = fidelity_text(f"a{chr(codepoint)}b")
+    assert clean == "ab", label
+
+
+@pytest.mark.parametrize("codepoint", [0x200C, 0x200D, 0x200E, 0x200F])
+def test_fidelity_text_still_keeps_the_legitimate_joiners_and_marks(codepoint):
+    character = chr(codepoint)
+    clean, _offsets = fidelity_text(f"a{character}b")
+    assert clean == f"a{character}b"
+
+
+def test_reply_quote_keeps_the_exact_fragment_and_documents_its_offset():
+    msg = SimpleNamespace(reply_to=SimpleNamespace(quote_text=PERSIAN + HOSTILE, quote_offset=12))
+
+    quote = describe_reply_quote(msg)
+
+    assert PERSIAN in quote["text"], "the ZWNJ was stripped out of an 'exact' quote"
+    assert "\u202e" not in quote["text"] and "\u200b" not in quote["text"]
+    assert quote["offset"] == 12
+    assert "UTF-16" in quote["note"] and "ORIGINAL replied-to message" in quote["note"]
+
+
+def test_reply_quote_is_absent_for_a_whole_message_reply():
+    msg = SimpleNamespace(reply_to=SimpleNamespace(quote_text=None, reply_to_msg_id=7))
+    assert describe_reply_quote(msg) is None
+
+
+def test_button_labels_keep_unicode_and_drop_spoofing_characters():
+    msg = SimpleNamespace(
+        buttons=[[SimpleNamespace(text=PERSIAN), SimpleNamespace(text="Pay\u202eDNES")]]
+    )
+
+    labels = describe_buttons(msg)
+
+    assert labels[0] == PERSIAN
+    assert "\u202e" not in labels[1], "a bidi override survived into a button label"
+
+
+def test_forward_names_keep_their_unicode():
+    forwarded = {"from_name": PERSIAN, "from_chat": FAMILY, "from_user": "a\u202eb", "date": 1}
+
+    result = _fidelity_forward(forwarded)
+
+    assert result["from_name"] == PERSIAN
+    assert result["from_chat"] == FAMILY
+    assert "\u202e" not in result["from_user"]
+    assert result["date"] == 1, "an unrelated field was rewritten"
+
+
+def test_media_title_and_performer_keep_unicode_but_filenames_stay_strict():
+    file = SimpleNamespace(
+        name="track\u200c.mp3", title=PERSIAN, performer=FAMILY, mime_type="audio/mpeg"
+    )
+    msg = SimpleNamespace(media=object(), audio=object(), file=file, document=None)
+
+    info = describe_media(msg)
+
+    assert info["title"] == PERSIAN
+    assert info["performer"] == FAMILY
+    # A filename can reach a filesystem, so it keeps the strict policy.
+    assert "\u200c" not in info["file_name"]
+
+
+def test_poll_question_keeps_unicode():
+    poll = SimpleNamespace(poll=SimpleNamespace(question=SimpleNamespace(text=PERSIAN + HOSTILE)))
+    msg = SimpleNamespace(media=object(), poll=poll, file=None, document=None)
+
+    info = describe_media(msg)
+
+    assert PERSIAN in info["poll_question"]
+    assert "\u202e" not in info["poll_question"]

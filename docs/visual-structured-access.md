@@ -181,7 +181,20 @@ cleaner rather than the general-purpose name sanitizer. Both sides of the
 regional flag into nothing at all — ZWJ, ZWNJ and the tag characters behind flags are all `Cf`.
 Control characters, zero-width padding and bidi overrides are still removed, names are still
 forced to one line — CR, LF, TAB, VT, FF, NEL and the Unicode LINE/PARAGRAPH SEPARATORs all
-become a single space — and the result is bounded to 256 characters including the ellipsis.
+become a single space — and the result is bounded to 256 characters including the ellipsis (a
+zero or negative bound yields an empty string).
+
+The same treatment now covers every human-readable field the structured tools return: reply
+quotes, forwarded sender/chat/author names, inline button labels, the media label, audio
+title/performer and poll questions. Filenames are the deliberate exception — they can reach a
+filesystem, so they keep the strict sanitizer that also strips the invisibles an attacker would
+use to disguise an extension. Beyond the bidi overrides and zero-width padding, the cleaner also
+removes the invisible maths operators (U+2061–U+2064), the interlinear annotation marks
+(U+FFF9–U+FFFB) and U+180E, all of which render as nothing and can hide text from a reader.
+
+A reply quote is returned as Telegram's exact fragment, and its `offset` is documented in place:
+it is the UTF-16 code-unit offset of the fragment inside the **original replied-to message**, not
+inside the replying message.
 
 ## Adaptive custom emoji and premium effects
 
