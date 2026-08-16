@@ -866,3 +866,86 @@ async def test_a_failing_close_does_not_replace_the_real_error():
 
     with pytest.raises(RuntimeError, match="dc"):
         await _stream_capped(_Client(), object(), 4096)
+
+
+# --- an expired file reference is recoverable everywhere, not just for effects
+
+
+@pytest.mark.asyncio
+async def test_a_stale_reference_is_refreshed_and_retried_once():
+    """The ids stay valid; only the reference expires, and refetching is the cure."""
+    from telethon.errors import FileReferenceExpiredError
+
+    from telegram_mcp.tools.inspection import with_reference_retry
+
+    attempts, refreshes = [], []
+
+    async def download(fresh):
+        attempts.append(fresh)
+        if fresh is None:
+            raise FileReferenceExpiredError(request=None)
+        return b"payload", False
+
+    async def refresh():
+        refreshes.append(1)
+        return "fresh-object"
+
+    assert await with_reference_retry(download, refresh) == (b"payload", False)
+    assert attempts == [None, "fresh-object"], "the retry did not use the refreshed object"
+    assert len(refreshes) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_second_stale_failure_is_not_retried_again():
+    """One refresh is the contract; a loop here is indistinguishable from a hang."""
+    from telethon.errors import FileReferenceExpiredError
+
+    from telegram_mcp.tools.inspection import with_reference_retry
+
+    attempts = []
+
+    async def download(fresh):
+        attempts.append(fresh)
+        raise FileReferenceExpiredError(request=None)
+
+    async def refresh():
+        return "fresh-object"
+
+    with pytest.raises(FileReferenceExpiredError):
+        await with_reference_retry(download, refresh)
+    assert len(attempts) == 2, "the retry looped instead of giving up"
+
+
+@pytest.mark.asyncio
+async def test_an_unrelated_error_is_not_treated_as_a_stale_reference():
+    from telegram_mcp.tools.inspection import with_reference_retry
+
+    refreshes = []
+
+    async def download(fresh):
+        raise RuntimeError("connection reset")
+
+    async def refresh():
+        refreshes.append(1)
+        return "fresh-object"
+
+    with pytest.raises(RuntimeError):
+        await with_reference_retry(download, refresh)
+    assert refreshes == [], "an unrelated error triggered a reference refresh"
+
+
+@pytest.mark.asyncio
+async def test_a_source_that_cannot_refresh_reraises_the_original_error():
+    """A deleted message has no fresh reference to give; do not dress that up."""
+    from telethon.errors import FileReferenceExpiredError
+
+    from telegram_mcp.tools.inspection import with_reference_retry
+
+    async def download(fresh):
+        raise FileReferenceExpiredError(request=None)
+
+    async def refresh():
+        return None
+
+    with pytest.raises(FileReferenceExpiredError):
+        await with_reference_retry(download, refresh)

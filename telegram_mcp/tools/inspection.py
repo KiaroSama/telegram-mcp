@@ -24,6 +24,11 @@ from telegram_mcp.visual.images import (
 )
 
 from mcp.server.fastmcp import Image
+from telethon.errors import (
+    FileReferenceEmptyError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+)
 from telethon.tl.types import InputDocumentFileLocation, InputPhotoFileLocation
 
 # Fallbacks for media whose Telethon-reported extension is empty; ``mimetypes``
@@ -185,6 +190,39 @@ async def _download_whole_capped(cl, target, max_bytes: int) -> tuple:
         data = await cl.download_media(target, file=bytes)
         return data, bool(data) and len(data) > max_bytes
     return await _stream_capped(cl, target, max_bytes)
+
+
+# A file reference authorises one download and Telegram expires it on its own
+# schedule. The ids stay valid; only the reference does not, and the cure is
+# always to fetch the object again from whatever produced it. It must be told
+# apart from ordinary RPC trouble, where refetching would fix nothing and a blind
+# retry would hide a real failure.
+_STALE_REFERENCE = (
+    FileReferenceEmptyError,
+    FileReferenceExpiredError,
+    FileReferenceInvalidError,
+)
+
+
+async def with_reference_retry(download, refresh):
+    """Run ``download``; on a stale file reference, ``refresh`` once and retry.
+
+    ``download`` takes the object to download and returns ``(data, over_cap)``;
+    ``refresh`` returns a freshly fetched replacement for that object, or ``None``
+    when the source can no longer produce one. Exactly one retry — a second
+    failure is a real one, and a loop here would be indistinguishable from a hang.
+
+    This lived only in ``tools/effects.py``. Message media and custom emoji have
+    the same expiry and had no recovery at all: the transfer simply failed, with
+    an error naming a cause the caller could do nothing about.
+    """
+    try:
+        return await download(None)
+    except _STALE_REFERENCE:
+        fresh = await refresh()
+        if fresh is None:
+            raise
+        return await download(fresh)
 
 
 def _thumb_owner(msg):
@@ -817,7 +855,17 @@ async def get_media_frames(
                 "original to disk."
             )
 
-        data, over_cap = await _download_capped(cl, msg, max_bytes)
+        async def _fetch(fresh_msg):
+            return await _download_capped(cl, fresh_msg or msg, max_bytes)
+
+        async def _refetch_message():
+            # The reference came with the message, so the message is what
+            # produces a fresh one. A message deleted in between returns None,
+            # and the original error is re-raised rather than dressed up.
+            _, _, refreshed = await _get_message(chat_id, message_id, account)
+            return refreshed or None
+
+        data, over_cap = await with_reference_retry(_fetch, _refetch_message)
         if over_cap:
             # The pre-check above cannot fire when Telegram advertises no size,
             # which is why the transfer itself is capped rather than the result.
@@ -941,9 +989,24 @@ async def _custom_emoji_preview(
                 record["preview_error"] = selection
                 return record, []
             _, size = selection
-            raw, over_cap = await _download_size_capped(cl, document, size, max_bytes)
+
+            async def _fetch(fresh):
+                return await _download_size_capped(cl, fresh or document, size, max_bytes)
+
         else:
-            raw, over_cap = await _download_whole_capped(cl, document, max_bytes)
+
+            async def _fetch(fresh):
+                return await _download_whole_capped(cl, fresh or document, max_bytes)
+
+        async def _refetch_emoji():
+            # A custom emoji document is produced by exactly one call, so that is
+            # where a fresh file reference comes from.
+            refreshed = await cl(
+                functions.messages.GetCustomEmojiDocumentsRequest(document_id=[document.id])
+            )
+            return next((d for d in refreshed or [] if d.id == document.id), None)
+
+        raw, over_cap = await with_reference_retry(_fetch, _refetch_emoji)
         if over_cap:
             claim = "absent" if advertised is None else f"{advertised} bytes, which was wrong"
             record["preview_error"] = (

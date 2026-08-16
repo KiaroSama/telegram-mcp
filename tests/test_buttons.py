@@ -308,3 +308,119 @@ async def test_a_matching_expectation_presses_normally(_wire):
 
     assert client.calls[0].data == b"OK"
     assert payload["results"][0]["button_text"] == "Confirm"
+
+
+# --- resolving what the icon emoji actually is ------------------------------
+
+
+class _IconClient(_Client):
+    """Answers GetCustomEmojiDocuments, the call a real client makes before drawing."""
+
+    def __init__(self, msg, documents=None, raises=False):
+        super().__init__(msg)
+        self._documents = documents or []
+        self._raises = raises
+
+    async def __call__(self, request):
+        self.calls.append(request)
+        if self._raises:
+            raise RuntimeError("emoji service unavailable")
+        return self._documents
+
+
+def _emoji_doc(doc_id, mime="application/x-tgsticker", alt="🔥"):
+    return SimpleNamespace(
+        id=doc_id,
+        mime_type=mime,
+        attributes=[SimpleNamespace(alt=alt)],
+    )
+
+
+@pytest.fixture
+def _wire_icons(monkeypatch):
+    def use(msg, documents=None, raises=False):
+        client = _IconClient(msg, documents, raises)
+        monkeypatch.setattr(buttons_tool, "get_client", lambda account=None: client)
+
+        async def _connect(cl):
+            return None
+
+        async def _resolve(chat_id, cl):
+            return SimpleNamespace(id=chat_id)
+
+        monkeypatch.setattr(buttons_tool, "ensure_connected", _connect)
+        monkeypatch.setattr(buttons_tool, "resolve_entity", _resolve)
+        return client
+
+    return use
+
+
+@pytest.mark.asyncio
+async def test_a_styled_buttons_icon_is_resolved_to_the_emoji_it_shows(_wire_icons):
+    """The number in style.icon is a document id — the same one a client resolves."""
+    styled = _callback(style=_Style(bg_primary=True, icon=555))
+    client = _wire_icons(_message([[styled]]), documents=[_emoji_doc(555, alt="🎉")])
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+    style = payload["results"][0]["style"]
+
+    assert style["alt"] == "🎉", "the fallback glyph was not resolved"
+    assert style["animated"] is True
+    assert style["icon_document_id"] == 555
+    assert len(client.calls) == 1, "one request should cover the whole keyboard"
+
+
+@pytest.mark.asyncio
+async def test_one_request_covers_every_icon_on_the_keyboard(_wire_icons):
+    rows = [[_callback(text="a", style=_Style(icon=1)), _callback(text="b", style=_Style(icon=2))]]
+    client = _wire_icons(
+        _message(rows), documents=[_emoji_doc(1, alt="A"), _emoji_doc(2, alt="B")]
+    )
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+
+    assert [b["style"]["alt"] for b in payload["results"]] == ["A", "B"]
+    assert len(client.calls) == 1
+    assert sorted(client.calls[0].document_id) == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_an_id_telegram_will_not_resolve_is_reported_not_invented(_wire_icons):
+    """An id that resolves to nothing was not a custom emoji after all."""
+    _wire_icons(_message([[_callback(style=_Style(icon=999))]]), documents=[])
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+    style = payload["results"][0]["style"]
+
+    assert "alt" not in style
+    assert "no document" in style["icon_error"]
+
+
+@pytest.mark.asyncio
+async def test_a_failed_icon_lookup_does_not_cost_the_listing(_wire_icons):
+    _wire_icons(_message([[_callback(style=_Style(icon=7))]]), raises=True)
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+
+    assert payload["button_count"] == 1, "the listing was lost to an icon lookup"
+    assert "could not resolve" in payload["results"][0]["style"]["icon_error"]
+
+
+@pytest.mark.asyncio
+async def test_resolve_icons_false_sends_no_extra_request(_wire_icons):
+    client = _wire_icons(_message([[_callback(style=_Style(icon=7))]]), documents=[_emoji_doc(7)])
+
+    payload = json.loads(await inspect_buttons(1, 7, resolve_icons=False, account="default"))
+
+    assert client.calls == [], "an extra round trip was made despite resolve_icons=False"
+    assert payload["results"][0]["style"]["icon_document_id"] == 7
+    assert "alt" not in payload["results"][0]["style"]
+
+
+@pytest.mark.asyncio
+async def test_a_keyboard_with_no_styled_button_makes_no_lookup(_wire_icons):
+    client = _wire_icons(_message([[_callback()]]))
+
+    await inspect_buttons(1, 7, account="default")
+
+    assert client.calls == [], "a lookup was made for a keyboard with no icons"
