@@ -310,7 +310,7 @@ def _referenced(catalog: Catalog, document_id, label: str) -> Optional[dict[str,
     return describe_document(document, label)
 
 
-def _is_unresolved(reference) -> bool:
+def is_unresolved(reference) -> bool:
     return bool(reference) and bool(reference.get("unresolved"))
 
 
@@ -347,7 +347,7 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
     # report a Telegram decision Telegram never made.
     if not icon_id:
         icon_source = "emoticon"
-    elif _is_unresolved(icon):
+    elif is_unresolved(icon):
         icon_source = "unresolved_reference"
     else:
         icon_source = "static_icon"
@@ -362,7 +362,7 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
         "effect_animation": animation,
     }
 
-    if _is_unresolved(animation):
+    if is_unresolved(animation):
         # Do not quietly fall back to the sticker: the effect *has* an animation,
         # and substituting a different asset would hide the fault.
         info["animation_source"] = "unresolved_reference"
@@ -384,7 +384,7 @@ def resolve_effect(catalog: Catalog, effect_id: int) -> Optional[dict[str, Any]]
                 if value is not None:
                     fallback[key] = value
             info["effect_animation"] = fallback
-        elif _is_unresolved(sticker):
+        elif is_unresolved(sticker):
             info["animation_source"] = "unresolved_reference"
         else:
             info["animation_source"] = "none"

@@ -11,9 +11,9 @@ Two facts about Telegram's data model shape this module:
   plain ``text: str`` and no ``entities`` field, so a premium/custom emoji inside
   a label arrives as its fallback glyph with no ``document_id`` — unresolvable by
   design, not by omission. Verified against the TL schema.
-* **Every button type carries ``style``**, and its ``icon`` is serialised as a
-  64-bit integer — the shape Telegram uses for document IDs, not a small enum.
-  It is reported as ``icon_document_id`` so ``get_custom_emoji`` can resolve it.
+* **Every button type carries ``style``**, and its ``icon`` is a custom-emoji
+  document ID. Confirmed live: @EVdlcbot's keyboard carries two styled buttons
+  whose icons resolve to animated ``.tgs`` emoji, beside a third with no style.
 
 Kept free of MCP so the description rules are testable without a client.
 """
@@ -66,20 +66,18 @@ _NOT_PRESSABLE = {
 PREMIUM_EMOJI_NOTE = (
     "A premium or custom emoji inside a button LABEL cannot be resolved: no "
     "KeyboardButton type carries entities, so only the fallback glyph reaches the API. "
-    "A styled button's own icon is different - it arrives as 'icon_document_id' below "
-    "and get_custom_emoji resolves that. For how the button really looks, including an "
-    "animated emoji, capture it with get_telegram_frames."
+    "A styled button's own icon is different - it arrives as 'icon_document_id' below, "
+    "already resolved to its glyph and mime type. get_custom_emoji returns the picture; "
+    "ask for more than one frame, or the still you get back will not look animated."
 )
 
 
 def describe_style(button) -> Optional[dict[str, Any]]:
     """Background colour and icon of a styled button, or ``None``.
 
-    ``icon`` is written to the wire as a ``long``. A predefined icon set would
-    need an int32; a 64-bit id is what Telegram uses for documents, so it is
-    surfaced as a custom-emoji document id — flagged as unconfirmed against a
-    live styled button, because inventing certainty here would be the same
-    mistake as claiming a label's emoji is resolvable.
+    ``icon`` is a custom-emoji document id — the same id a Telegram client
+    resolves before drawing the button. ``inspect_buttons`` resolves it too; here
+    it is only reported, because this module stays free of the network.
     """
     style = getattr(button, "style", None)
     if style is None:
@@ -99,9 +97,9 @@ def describe_style(button) -> Optional[dict[str, Any]]:
     if icon:
         described["icon_document_id"] = icon
         described["icon_note"] = (
-            "Telegram serialises this as a 64-bit id, the shape it uses for documents "
-            "rather than for a fixed icon set. Pass it to get_custom_emoji to resolve it; "
-            "if that returns nothing, the id is not a custom emoji document."
+            "A custom emoji document id. inspect_buttons resolves it to the fallback glyph "
+            "and mime type; get_custom_emoji returns the picture, and a count above 1 "
+            "returns frames of the animation rather than one still."
         )
     return described or None
 
@@ -197,7 +195,4 @@ def describe_keyboard(msg) -> Optional[dict[str, Any]]:
 
 def find_button(buttons: list[dict[str, Any]], index: int) -> Optional[dict[str, Any]]:
     """The described button at ``index``, or ``None``."""
-    for button in buttons:
-        if button["index"] == index:
-            return button
-    return None
+    return next((b for b in buttons if b["index"] == index), None)

@@ -9,6 +9,7 @@ import asyncio
 
 from telegram_mcp.runtime import *
 from telegram_mcp.effect_catalog import (
+    is_unresolved,
     load_catalog,
     sniff_asset_format,
     premium_effect_size,
@@ -59,11 +60,6 @@ _SEPARATION_NOTE = (
     "A message effect is separate from a premium sticker's own effect; a message can carry "
     "both. get_telegram_frames is the source of truth for the finished animation."
 )
-
-
-def _suffix_for(raw: bytes, fmt: str) -> str:
-    """The extension the frame extractor should decode this asset as."""
-    return sniff_asset_format(raw, fmt)[0]
 
 
 def _not_found(effect_id, catalog, checked: bool) -> str:
@@ -124,11 +120,6 @@ async def _resolved_effect(cl, account, effect_id: int):
     return catalog, info, True
 
 
-def _unresolved(reference) -> bool:
-    """Whether a described asset is a marker for a reference the catalogue lacked."""
-    return bool(reference) and bool(reference.get("unresolved"))
-
-
 def _dangling(effect_id: int, reference, label: str) -> str:
     """A catalogue inconsistency, named precisely enough to be actionable.
 
@@ -152,7 +143,7 @@ def _select_asset(catalog, info, asset: str, effect_id: int):
     """
     if asset == "icon":
         described = info.get("static_icon")
-        if _unresolved(described):
+        if is_unresolved(described):
             return _dangling(effect_id, described, "static icon")
         document = catalog.documents.get((described or {}).get("document_id"))
         if document is None:
@@ -165,7 +156,7 @@ def _select_asset(catalog, info, asset: str, effect_id: int):
             )
     elif asset == "sticker":
         described = info.get("preview_sticker")
-        if _unresolved(described):
+        if is_unresolved(described):
             return _dangling(effect_id, described, "preview sticker")
         document = catalog.documents.get((described or {}).get("document_id"))
         if document is None:
@@ -177,7 +168,7 @@ def _select_asset(catalog, info, asset: str, effect_id: int):
             # report: the effect named an animation the catalogue omitted, or it
             # named no animation and the preview sticker it would have fallen back
             # to is the one missing.
-            if _unresolved(described):
+            if is_unresolved(described):
                 return _dangling(effect_id, described, "effect animation")
             return _dangling(
                 effect_id,
@@ -305,12 +296,12 @@ async def get_message_effect(
             return f"Telegram returned no data for effect {effect_id}'s {asset} asset."
 
         fmt = (described or {}).get("format", "unknown")
-        suffix = _suffix_for(raw, fmt)
+        suffix, _ = sniff_asset_format(raw, fmt)
         # Which encoder an asset needs is a property of the asset, not of the rung
         # the caller asked for: an effect's preview sticker and its animation can
         # both be a static WebP or PNG, and extract_frames refuses a still image
         # ("File is not animated") instead of returning the one frame it has. The
-        # gzip check inside _suffix_for still wins, so a payload that is really
+        # gzip check inside sniff_asset_format still wins, so a payload that is really
         # Lottie is never called static.
         if fmt == "static_image" and suffix != ".tgs":
             records, images = await asyncio.to_thread(_encode_one, raw, max_dimension)

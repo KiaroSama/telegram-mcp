@@ -184,12 +184,8 @@ def fidelity_text(raw: Optional[str]) -> tuple[str, list[int]]:
     return "".join(kept), offset_map
 
 
-_VARIATION_SELECTORS = frozenset(range(0xFE00, 0xFE10)) | frozenset(range(0xE0100, 0xE01F0))
 _ZWJ = "‍"
-
-
 _ZWNJ = "‌"
-_JOINERS = (_ZWJ, _ZWNJ)
 
 
 def _sequence_starts(text: str) -> list[int]:

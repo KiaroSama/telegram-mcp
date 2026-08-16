@@ -398,7 +398,8 @@ Two different things, and only one of them resolves:
 
   This is also why the icon looked unavailable at first: neither this fork nor upstream read
   `style` at all, so both the icon and the background flags were invisible. The field was always
-  being sent.
+  being sent — confirmed against a live bot whose keyboard carries two styled buttons, each
+  resolving to an animated `.tgs` custom emoji, alongside a third button with no `style` at all.
 
 `style` also reports the background as `primary`, `danger` or `success` when the sender set one.
 
