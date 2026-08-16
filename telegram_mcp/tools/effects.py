@@ -17,12 +17,14 @@ from telegram_mcp.effect_catalog import (
     resolve_effect,
     revalidate_catalog,
 )
-from telegram_mcp.tools.inspection import (
+from telegram_mcp.media_transfer import (
     MAX_FRAME_SOURCE_BYTES,
     _download_thumb_capped,
+    _stream_capped,
+)
+from telegram_mcp.tools.inspection import (
     _encode_frames,
     _encode_one,
-    _stream_capped,
     require_explicit_account,
 )
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
