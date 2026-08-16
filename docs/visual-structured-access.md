@@ -343,8 +343,8 @@ sticker effect at once, so only `get_telegram_frames`, captured while it plays, 
 
 ## Glass buttons: reading one, and pressing one
 
-`inspect_buttons(chat_id, message_id)` lists a message's inline keyboard; `click_button(chat_id,
-message_id, button_index, expect_text=None)` presses one. Everything about the pair follows from
+`inspect_buttons(chat_id, message_id, resolve_icons=True)` lists a message's inline keyboard;
+`click_button(chat_id, message_id, button_index, expect_text=None)` presses one. Everything about the pair follows from
 two facts about the data.
 
 **A label is written by the sender.** It is also the thing an agent reads to decide which button
@@ -387,12 +387,18 @@ Two different things, and only one of them resolves:
   field, so a custom emoji in a label arrives as its fallback glyph with no `document_id`. That is
   a property of the schema, not a gap in this tool. `get_telegram_frames` is the only way to see it
   rendered.
-* **The button's own icon — resolvable.** Every button type carries `style`, whose `icon` is
-  serialised as a 64-bit integer, the shape Telegram uses for document IDs rather than for a fixed
-  icon set. It is reported as `icon_document_id`, and `get_custom_emoji` resolves it. The response
-  says so in `icon_note`, including that an id which resolves to nothing was not a custom emoji
-  after all — the interpretation is read off the wire format and has not been confirmed against a
-  live styled button.
+* **The button's own icon — resolvable, and this is what a client shows you.** Every button type
+  carries `style`, whose `icon` is `flags.3?long` — a document ID, which is exactly what Telegram
+  Desktop resolves through `GetCustomEmojiDocuments` before drawing the button. `inspect_buttons`
+  makes the same call: one request covers every icon on the keyboard and each `style` gains the
+  fallback glyph (`alt`), the `mime_type` and whether it is `animated`. `get_custom_emoji` on the
+  same `icon_document_id` returns the picture. Pass `resolve_icons=False` to keep the listing to a
+  single round trip. An id Telegram declines to resolve is reported as `icon_error` rather than
+  guessed at, and a failed lookup costs the icon detail, never the listing.
+
+  This is also why the icon looked unavailable at first: neither this fork nor upstream read
+  `style` at all, so both the icon and the background flags were invisible. The field was always
+  being sent.
 
 `style` also reports the background as `primary`, `danger` or `success` when the sender set one.
 
