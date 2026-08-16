@@ -784,13 +784,25 @@ async def test_a_gzip_payload_is_still_decoded_as_lottie_whatever_the_mime_says(
     assert used == ["_encode_frames"], f"a gzipped Lottie was treated as static: {used}"
 
 
-# --- the negative cache must die with the window ----------------------------
+# --- the negative cache must die with the SNAPSHOT, not with the window ------
 
 
 @pytest.mark.asyncio
-async def test_unknown_ids_does_not_grow_across_a_refreshed_window(monkeypatch):
-    """The set is justified by dying with the snapshot; a refreshed window is that death."""
-    _use(monkeypatch, _ToolClient())
+async def test_a_recorded_miss_survives_a_not_modified_revalidation(monkeypatch):
+    """A refreshed window is not the snapshot's death — the opposite, in fact.
+
+    This test previously asserted that a miss is discarded whenever the freshness
+    window is refreshed, on the premise that "the set is justified by dying with
+    the snapshot; a refreshed window is that death". Measured, that premise was
+    wrong twice over: a "not modified" answer means the snapshot LIVES, and the
+    window restarted on the same object every time, so the set never held more
+    than one ID and N lookups of N dead IDs cost N round trips.
+
+    The memory justification is unchanged, and still holds — the ceiling now sits
+    on the addition (`remember_unknown`) instead of on the one event that proves
+    every recorded miss still valid.
+    """
+    client = _use(monkeypatch, _ToolClient())
     await _call(1)
     await _call(999999)
 
@@ -801,8 +813,14 @@ async def test_unknown_ids_does_not_grow_across_a_refreshed_window(monkeypatch):
     await _call(1)  # the window has expired: a not-modified revalidation
 
     assert (
-        effect_catalog.cached_catalog("default").unknown_ids == set()
-    ), "the negative cache outlived the window it was supposed to die with"
+        999999 in effect_catalog.cached_catalog("default").unknown_ids
+    ), "a miss was discarded by the very answer that proved it still valid"
+
+    calls_so_far = len(client.catalogue_calls)
+    await _call(999999)
+    assert (
+        len(client.catalogue_calls) == calls_so_far
+    ), "the surviving miss still cost a round trip, which is what it exists to save"
 
 
 # --- the not-found message must describe the path that produced it ----------

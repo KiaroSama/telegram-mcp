@@ -44,6 +44,11 @@ _BUTTON_KINDS: dict[str, tuple[str, bool]] = {
     "KeyboardButton": ("plain", False),
 }
 
+# A URL, a copy payload or an inline query is a machine value: it is bounded so a
+# hostile button cannot flood the context, but far above display_name's prose
+# default, which cut real Mini App links in half.
+MAX_MACHINE_VALUE = 2048
+
 _NOT_PRESSABLE = {
     "url": "Opens a link. The URL is reported; nothing here follows it.",
     "url_auth": "Opens a link that would log the account in to a third-party site.",
@@ -137,17 +142,37 @@ def describe_button(button, index: int, row: int, column: int) -> dict[str, Any]
     else:
         described["press_note"] = _NOT_PRESSABLE.get(kind, "Not a callback button.")
 
-    for attribute, key in (
-        ("url", "url"),
-        ("copy_text", "copy_text"),
-        ("query", "query"),
-        ("user_id", "user_id"),
-        ("peer_type", "peer_type"),
-        ("button_id", "button_id"),
-    ):
+    # Machine values, not prose. A caller may follow, copy or compare these
+    # verbatim, so they are reported whole: display_name's 256-character prose
+    # default silently returned a URL ending in an ellipsis, which is not the
+    # button's URL, with nothing to say so — and Mini App start params and OAuth
+    # links routinely run past 256. They are still sanitized, because a bidi
+    # override inside a URL is the same spoof as one inside a label, and any
+    # change is now flagged the way `text_altered` flags the label.
+    for attribute in ("url", "copy_text", "query"):
+        value = getattr(button, attribute, None)
+        if value is None:
+            continue
+        if isinstance(value, str):
+            cleaned = display_name(value, max_length=MAX_MACHINE_VALUE)
+            described[attribute] = cleaned
+            if cleaned != value:
+                described[f"{attribute}_altered"] = True
+        else:
+            described[attribute] = value
+
+    for attribute in ("user_id", "button_id"):
         value = getattr(button, attribute, None)
         if value is not None:
-            described[key] = display_name(value) if isinstance(value, str) else value
+            described[attribute] = value
+
+    peer_type = getattr(button, "peer_type", None)
+    if peer_type is not None:
+        # RequestPeerTypeChat/User/Broadcast is a TLObject, the only non-scalar in
+        # this group. Copied as itself it reached json.dumps and raised TypeError,
+        # which failed the WHOLE listing — every other button on that keyboard
+        # included, and click_button's expect_text guard along with it.
+        described["peer_type"] = type(peer_type).__name__
 
     style = describe_style(button)
     if style:

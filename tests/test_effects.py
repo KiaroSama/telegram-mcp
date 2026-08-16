@@ -519,3 +519,72 @@ def test_both_tool_modules_share_one_sniff():
         assert "x1f" not in source.lower().replace(
             "sniff_asset_format", ""
         ), f"{module.__name__} still carries its own gzip magic check"
+
+
+# --- the negative cache must outlive the check that validates it -------------
+
+
+class _NotModifiedClient:
+    """Answers every request with AvailableEffectsNotModified (no `effects`)."""
+
+    def __init__(self):
+        self.calls = 0
+
+    async def __call__(self, request):
+        self.calls += 1
+        return _Namespace()
+
+
+class _Namespace:
+    pass
+
+
+def _catalog_with_misses(*ids):
+    effect_catalog._reset_catalog()
+    state = effect_catalog._state("default")
+    state.catalog = Catalog(123, {}, {}, 1.0, 1)
+    state.catalog.checked_epoch = 0
+    for effect_id in ids:
+        state.catalog.remember_unknown(effect_id)
+    return state
+
+
+def test_a_not_modified_answer_keeps_the_recorded_misses():
+    """ "Not modified" PROVES the content behind every miss is unchanged.
+
+    Clearing the set there made it hold at most one ID — the freshness window
+    restarted on the same object each time — so N lookups of N dead IDs cost N
+    round trips, which is exactly what the cache exists to prevent.
+    """
+    state = _catalog_with_misses(901, 902, 903)
+
+    fresh = asyncio.run(
+        effect_catalog.revalidate_catalog(_NotModifiedClient(), "default", state.catalog, 0)
+    )
+
+    assert fresh.unknown_ids == {901, 902, 903}
+
+
+def test_a_miss_does_not_survive_a_catalogue_that_actually_changed():
+    """The negative result rides on the snapshot; a new payload is a new snapshot."""
+    state = _catalog_with_misses(901)
+    state.catalog.fetched_at = 0.0  # force a real fetch rather than a cached serve
+
+    class _NewPayload:
+        async def __call__(self, request):
+            return type("Result", (), {"hash": 999, "effects": [], "documents": []})()
+
+    fresh = asyncio.run(effect_catalog.refresh_catalog(_NewPayload(), "default", state.catalog))
+
+    assert fresh.unknown_ids == set(), "a stale miss survived a changed catalogue"
+
+
+def test_the_negative_cache_is_bounded_where_ids_are_added():
+    """The ID comes from tool input, so the set needs a ceiling — but on the
+    addition, not on the revalidation that confirms the snapshot."""
+    catalog = Catalog(1, {}, {}, 1.0, 1)
+
+    for effect_id in range(effect_catalog.MAX_UNKNOWN_IDS + 5):
+        catalog.remember_unknown(effect_id)
+
+    assert len(catalog.unknown_ids) <= effect_catalog.MAX_UNKNOWN_IDS

@@ -112,8 +112,14 @@ def describe_entities(msg) -> list[dict[str, Any]]:
         else:
             # Offsets outside the message (Telegram occasionally reports these for
             # service entities): keep the raw numbers rather than inventing a slice.
+            # Say so, though — this function's whole contract is that an offset
+            # indexes "text_fidelity", and these do not. Published under the same
+            # key with no marker, a caller had no way to tell the two apart: the
+            # only hint was an absent "text", which also goes missing for a
+            # legitimate offset that lands mid-surrogate.
             if offset is not None:
                 item["offset"] = offset
+                item["offset_is_raw"] = True
             if length is not None:
                 item["length"] = length
 
@@ -151,6 +157,8 @@ def describe_custom_emoji(msg) -> list[dict[str, Any]]:
             item["placeholder"] = entity["text"]
         if entity.get("offset") is not None:
             item["offset"] = entity["offset"]
+            if entity.get("offset_is_raw"):
+                item["offset_is_raw"] = True
         found.append(item)
     return found
 
@@ -346,11 +354,18 @@ def describe_media_label(msg) -> Optional[str]:
     label = get_media_label(msg)
     if not label:
         return None
+
+    # Branch on the KIND, never on the payload. Splitting at the first ": " asked
+    # the attacker-controlled value which format it was in: a sticker whose alt
+    # contains ": " — a pack creator picks that text — took the "document: <name>"
+    # path, and everything before the colon, including the whole alt, was returned
+    # verbatim. A bidi override in it then survived intact, which is the exact
+    # spoof this function exists to remove.
     prefix, separator, value = label.partition(": ")
-    if separator:  # "document: <filename>"
+    if separator and prefix == "document":
         return f"{prefix}{separator}{sanitize_name(value)}"
     kind, space, alt = label.partition(" ")
-    if space:  # "sticker <alt>"
+    if space:  # "sticker <alt>", and any other "<kind> <value>" upstream adds
         return f"{kind}{space}{display_name(alt)}".strip()
     return label
 

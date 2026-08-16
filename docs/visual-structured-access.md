@@ -462,14 +462,26 @@ have checked the title yourself.
 This feature is deliberately additive. Every module it introduces is a **new file**:
 
 ```
-telegram_mcp/visual/__init__.py, capture.py, images.py, frames.py
-telegram_mcp/message_view.py
+telegram_mcp/visual/__init__.py, telegram_mcp/visual/capture.py
+telegram_mcp/visual/images.py, telegram_mcp/visual/frames.py
+telegram_mcp/message_view.py, telegram_mcp/text_fidelity.py
 telegram_mcp/button_view.py
-telegram_mcp/effect_catalog.py
+telegram_mcp/effect_catalog.py, telegram_mcp/media_transfer.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
 telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
+conftest.py
 docs/visual-structured-access.md
 ```
+
+`text_fidelity.py` holds the string rules split out of `message_view.py`, and
+`media_transfer.py` the bounded-download layer split out of `tools/inspection.py`; both
+are re-exported from their original modules, so no import moved.
+
+The root `conftest.py` is a test-only file, and it is at the root rather than in `tests/`
+for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralises the
+`TELEGRAM_*` environment before anything imports `runtime.py`, whose import-time
+`load_dotenv()` otherwise lets the operator's own `.env` decide test results — two
+`test_file_path_security.py` assertions failed on exactly that.
 
 The only upstream files touched are `telegram_mcp/tools/__init__.py` (four import lines),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py`

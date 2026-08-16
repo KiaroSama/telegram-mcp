@@ -105,7 +105,7 @@ async def _resolved_effect(cl, account, effect_id: int):
     if info is not None:
         return catalog, info, contacted
     if contacted:
-        catalog.unknown_ids.add(effect_id)
+        catalog.remember_unknown(effect_id)
         return catalog, None, True
     if effect_id in catalog.unknown_ids:
         return catalog, None, False
@@ -116,7 +116,7 @@ async def _resolved_effect(cl, account, effect_id: int):
     catalog = await revalidate_catalog(cl, account, catalog, seen_epoch)
     info = resolve_effect(catalog, effect_id)
     if info is None:
-        catalog.unknown_ids.add(effect_id)
+        catalog.remember_unknown(effect_id)
     # Either the request went out or a check that completed against this same
     # snapshot while we waited was reused — the epoch's whole purpose.
     return catalog, info, True

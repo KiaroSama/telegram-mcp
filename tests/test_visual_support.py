@@ -5,6 +5,7 @@ argument guards are exercised here; the image and frame helpers are covered end
 to end with images built in memory by Pillow.
 """
 
+import gzip
 import importlib.util
 import io
 import subprocess
@@ -707,3 +708,77 @@ def test_repeated_captures_do_not_leak_gdi_objects():
     for _ in range(15):
         capture.capture_window()
     assert gdi_objects() - before <= 2
+
+
+# --- the decoder fallback is for capability, not for policy ------------------
+
+
+def _gif_of_frames(count=4, size=(32, 32)):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    images = [Image.new("RGB", size, (index * 60 % 255, 0, 0)) for index in range(count)]
+    images[0].save(
+        buffer, format="GIF", save_all=True, append_images=images[1:], duration=100, loop=0
+    )
+    return buffer.getvalue()
+
+
+def _apng_of_frames(count=4, size=(64, 64)):
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    images = [Image.new("RGBA", size, (index * 60 % 255, 10, 10, 255)) for index in range(count)]
+    images[0].save(buffer, format="PNG", save_all=True, append_images=images[1:], duration=100)
+    return buffer.getvalue()
+
+
+def test_the_frame_limit_refusal_is_not_downgraded_into_an_ffmpeg_decode(monkeypatch):
+    """.gif is the one suffix Pillow and ffmpeg both claim.
+
+    Catching FrameExtractionError to decide the fallback treated "I refuse to
+    decode this" as "I cannot read this format", so ffmpeg decoded the very file
+    the guard had just refused — leaving MAX_ANIMATION_FRAMES dead for the most
+    common animated format there is.
+    """
+    monkeypatch.setattr(frames, "MAX_ANIMATION_FRAMES", 2)
+
+    with pytest.raises(frames.FrameExtractionError, match="above the 2 limit"):
+        frames.extract_frames(_gif_of_frames(count=4), ".gif", 4)
+
+
+def test_a_static_gif_keeps_pillows_accurate_diagnosis():
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), (10, 20, 30)).save(buffer, format="GIF")
+
+    with pytest.raises(frames.FrameExtractionError, match="not animated"):
+        frames.extract_frames(buffer.getvalue(), ".gif", 4)
+
+
+def test_a_truncated_animation_fails_as_a_frame_error_not_a_raw_oserror():
+    """The failure happens while decoding a LATER frame, outside Image.open.
+
+    Both a raw OSError and a bare SyntaxError from Pillow's PNG plugin escaped
+    every handler in the tool layer. The suffix comes from the sender's mime
+    type, so the sender chooses which decoder runs.
+    """
+    whole = _apng_of_frames()
+
+    for fraction in (0.5, 0.8):
+        with pytest.raises(frames.FrameExtractionError):
+            frames.extract_frames(whole[: int(len(whole) * fraction)], ".png", 4)
+
+
+@pytest.mark.skipif(not frames.lottie_available(), reason="rlottie not installed")
+def test_an_unparseable_tgs_is_refused_rather_than_rendered_blank():
+    """rlottie returns totalframe=0 for garbage instead of raising.
+
+    `or 1` turned that into a legitimate-looking one-frame animation and
+    rendered a fully transparent canvas, which the tool layer then labelled a
+    successful frame — a blank picture presented as the emoji's real content.
+    """
+    for payload in (b"nonsense", b"{}"):
+        with pytest.raises(frames.FrameExtractionError, match="zero frames"):
+            frames.extract_frames(gzip.compress(payload), ".tgs", 3)

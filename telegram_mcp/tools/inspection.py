@@ -219,19 +219,41 @@ async def inspect_message(
                 data["thumbnail_error"] = selection
             else:
                 _, size = selection
-                raw, over_cap = await _download_size_capped(
-                    cl, owner, size, DEFAULT_THUMBNAIL_BYTES
-                )
-                if over_cap:
-                    data["thumbnail_error"] = (
-                        f"The thumbnail is larger than this tool's {DEFAULT_THUMBNAIL_BYTES}-byte "
-                        "budget; the transfer was aborted once it crossed that. Use "
-                        "get_media_thumbnail, which takes a max_bytes of its own."
-                    )
-                elif raw:
-                    metas, encoded = await asyncio.to_thread(_encode_one, raw, max_dimension)
-                    data["thumbnail"] = metas[0]
-                    images.extend(encoded)
+                try:
+
+                    async def _fetch_thumb(fresh_msg):
+                        # A refreshed message carries a fresh file reference; the
+                        # size object is only a descriptor and stays valid.
+                        target = _thumb_owner(fresh_msg) if fresh_msg else owner
+                        return await _download_size_capped(
+                            cl, target, size, DEFAULT_THUMBNAIL_BYTES
+                        )
+
+                    async def _refetch_message():
+                        _, _, refreshed = await _get_message(chat_id, message_id, account)
+                        return refreshed or None
+
+                    raw, over_cap = await with_reference_retry(_fetch_thumb, _refetch_message)
+                    if over_cap:
+                        data["thumbnail_error"] = (
+                            f"The thumbnail is larger than this tool's "
+                            f"{DEFAULT_THUMBNAIL_BYTES}-byte budget; the transfer was aborted "
+                            "once it crossed that. Use get_media_thumbnail, which takes a "
+                            "max_bytes of its own."
+                        )
+                    elif raw:
+                        metas, encoded = await asyncio.to_thread(_encode_one, raw, max_dimension)
+                        data["thumbnail"] = metas[0]
+                        images.extend(encoded)
+                except Exception as error:
+                    # The thumbnail is an optional extra, and the comment above has
+                    # always said so — but only the refusal and over-cap paths were
+                    # actually optional. An undecodable image or a file reference
+                    # that stayed stale raised straight past this block, and the
+                    # tool returned a bare error string, throwing away the entire
+                    # structured message the caller came for. The sibling
+                    # include_screen block below has always handled it this way.
+                    data["thumbnail_error"] = f"{type(error).__name__}: {error}"
 
         if include_screen:
             # Imported here so this module stays importable on non-Windows hosts.
@@ -433,7 +455,18 @@ async def get_media_thumbnail(
                 f"(hard ceiling {MAX_FRAME_SOURCE_BYTES}). Raise max_bytes up to that ceiling."
             )
 
-        raw, over_cap = await _download_size_capped(cl, owner, size, max_bytes)
+        async def _fetch_thumb(fresh_msg):
+            # The size is a descriptor; the file reference lives on the owner, so
+            # a refreshed message is what makes the retry worth anything.
+            return await _download_size_capped(
+                cl, _thumb_owner(fresh_msg) if fresh_msg else owner, size, max_bytes
+            )
+
+        async def _refetch_message():
+            _, _, refreshed = await _get_message(chat_id, message_id, account)
+            return refreshed or None
+
+        raw, over_cap = await with_reference_retry(_fetch_thumb, _refetch_message)
         if over_cap:
             claim = "absent" if advertised is None else f"{advertised} bytes, which was wrong"
             return (
@@ -471,7 +504,7 @@ async def get_media_thumbnail(
 
 
 async def _premium_effect_frames(
-    cl, msg, details: dict, count: int, max_dimension: int, max_bytes: int
+    cl, msg, details: dict, count: int, max_dimension: int, max_bytes: int, refresh=None
 ):
     """Frames of a premium sticker's separate effect animation.
 
@@ -509,7 +542,19 @@ async def _premium_effect_frames(
             f"(hard ceiling {MAX_FRAME_SOURCE_BYTES}). Raise max_bytes up to that ceiling."
         )
 
-    raw, over_cap = await _download_thumb_capped(cl, document, effect, limit)
+    async def _fetch_effect(fresh_msg):
+        # Same asymmetry the caller's non-premium branch never had: within one
+        # tool, premium_effect=False recovered from a stale file reference and
+        # premium_effect=True did not.
+        target = document
+        if fresh_msg is not None:
+            target = getattr(fresh_msg, "document", None) or getattr(fresh_msg, "sticker", None)
+        return await _download_thumb_capped(cl, target or document, effect, limit)
+
+    if refresh is None:
+        raw, over_cap = await _fetch_effect(None)
+    else:
+        raw, over_cap = await with_reference_retry(_fetch_effect, refresh)
     if over_cap:
         return (
             f"The premium effect asset is larger than the {limit}-byte limit. The transfer was "
@@ -615,10 +660,19 @@ async def get_media_frames(
         # media: 0, a negative number and an absurd number must all behave alike.
         max_bytes = max(1, min(int(max_bytes), MAX_FRAME_SOURCE_BYTES))
 
+        async def _refetch_message():
+            # The reference came with the message, so the message is what
+            # produces a fresh one. A message deleted in between returns None,
+            # and the original error is re-raised rather than dressed up.
+            _, _, refreshed = await _get_message(chat_id, message_id, account)
+            return refreshed or None
+
         if premium_effect:
             # Before the sticker's size gate: the effect is a separate asset, so a
             # large sticker must not veto a small effect (or vice versa).
-            return await _premium_effect_frames(cl, msg, details, count, max_dimension, max_bytes)
+            return await _premium_effect_frames(
+                cl, msg, details, count, max_dimension, max_bytes, _refetch_message
+            )
 
         size_bytes = details.get("size_bytes") or 0
         if size_bytes > max_bytes:
@@ -631,13 +685,6 @@ async def get_media_frames(
 
         async def _fetch(fresh_msg):
             return await _download_capped(cl, fresh_msg or msg, max_bytes)
-
-        async def _refetch_message():
-            # The reference came with the message, so the message is what
-            # produces a fresh one. A message deleted in between returns None,
-            # and the original error is re-raised rather than dressed up.
-            _, _, refreshed = await _get_message(chat_id, message_id, account)
-            return refreshed or None
 
         data, over_cap = await with_reference_retry(_fetch, _refetch_message)
         if over_cap:
@@ -876,14 +923,40 @@ async def get_custom_emoji(
         # between the items. gather preserves order, so records and images stay
         # aligned, and _custom_emoji_preview already handles its own failures per
         # document rather than raising.
+        # return_exceptions is what makes the batch a batch. _custom_emoji_preview
+        # handles the two errors it expects, but anything else — an RPC error, a
+        # file reference still stale after the retry, a Pillow failure escaping the
+        # decoder — propagated out of gather and sank all ten records. Worse, a
+        # bare gather abandons the other nine coroutines at that moment rather than
+        # cancelling them: measured, they went on downloading and finished after
+        # the tool had already returned its error.
         resolved = await asyncio.gather(
             *(
                 _custom_emoji_preview(cl, document, count, max_dimension, max_bytes)
                 for document in documents
-            )
+            ),
+            return_exceptions=True,
         )
         records, images = [], []
-        for record, previews in resolved:
+        for document, outcome in zip(documents, resolved):
+            if isinstance(outcome, asyncio.CancelledError):
+                # Real cancellation of this tool, not one emoji failing.
+                raise outcome
+            if isinstance(outcome, BaseException):
+                logger.warning(
+                    "custom emoji %s failed to resolve: %s: %s",
+                    getattr(document, "id", None),
+                    type(outcome).__name__,
+                    outcome,
+                )
+                records.append(
+                    {
+                        "document_id": getattr(document, "id", None),
+                        "preview_error": f"{type(outcome).__name__}: {outcome}",
+                    }
+                )
+                continue
+            record, previews = outcome
             records.append(record)
             images.extend(previews)
         return [format_tool_result(records, {"requested_ids": ids}), *images]

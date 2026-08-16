@@ -424,3 +424,57 @@ async def test_a_keyboard_with_no_styled_button_makes_no_lookup(_wire_icons):
     await inspect_buttons(1, 7, account="default")
 
     assert client.calls == [], "a lookup was made for a keyboard with no icons"
+
+
+# --- values that are machine data, not prose --------------------------------
+
+
+def test_a_request_peer_button_does_not_break_the_whole_listing():
+    """`peer_type` is a TLObject, the only non-scalar among the copied fields.
+
+    Left as itself it reached json.dumps and raised TypeError, which failed the
+    entire listing — every other button on that keyboard included.
+    """
+    keyboard = _buttons_of(
+        _message(
+            [
+                [
+                    _callback(text="Confirm"),
+                    _button(
+                        "KeyboardButtonRequestPeer",
+                        text="Choose a group",
+                        button_id=1,
+                        peer_type=type("RequestPeerTypeChat", (SimpleNamespace,), {})(),
+                    ),
+                ]
+            ]
+        )
+    )
+
+    json.dumps(keyboard)  # the contract every inspect_buttons test relies on
+    assert keyboard[1]["peer_type"] == "RequestPeerTypeChat"
+    assert keyboard[0]["text"] == "Confirm", "an unrelated button was lost"
+
+
+def test_a_long_url_is_reported_whole_rather_than_ellipsised():
+    """A Mini App start param routinely runs past display_name's prose default."""
+    url = "https://app.example/webapp?tgWebAppStartParam=" + "s" * 260
+
+    described = describe_button(_button("KeyboardButtonWebView", text="Open", url=url), 0, 0, 0)
+
+    assert described["url"] == url
+    assert not described["url"].endswith("\u2026")
+    assert "url_altered" not in described
+
+
+def test_a_url_carrying_a_direction_override_is_cleaned_and_flagged():
+    """Sanitizing still applies — a bidi override in a URL is the same spoof."""
+    described = describe_button(
+        _button("KeyboardButtonUrl", text="Open", url="https://e.example/\u202egpj.exe"),
+        0,
+        0,
+        0,
+    )
+
+    assert "\u202e" not in described["url"]
+    assert described["url_altered"] is True, "a changed URL was asserted as the real one"

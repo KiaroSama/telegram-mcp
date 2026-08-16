@@ -37,6 +37,11 @@ from telethon import functions
 # which costs a round trip and no payload.
 _REVALIDATE_AFTER_SECONDS = 60 * 60
 
+# Ceiling on the per-snapshot negative cache. The effect ID comes from tool input,
+# so it needs one; it is enforced where an ID is added, not where the snapshot is
+# confirmed unchanged.
+MAX_UNKNOWN_IDS = 1024
+
 # Telegram hands back one flat document list covering every effect. Verified
 # against a live account: of 697 effects, not one referenced a document id that
 # was missing from that list, so resolving through it needs no second call.
@@ -96,15 +101,30 @@ class Catalog:
         self.checked_epoch = 0
         # IDs this exact snapshot does not contain. Asking Telegram again for the
         # same ID against the same catalogue gets the same answer, so the negative
-        # result rides along with the snapshot. It is dropped both when the
-        # snapshot is replaced and when its freshness window is refreshed in
-        # place — otherwise a catalogue that never changes keeps one int per
-        # distinct ID, and the ID comes from tool input.
+        # result rides along with the snapshot and dies with it — a new payload
+        # builds a new Catalog, and its set starts empty.
         self.unknown_ids = set()
 
     def is_fresh(self, now: float) -> bool:
         """Whether this snapshot may be served without asking Telegram again."""
         return (now - self.fetched_at) < _REVALIDATE_AFTER_SECONDS
+
+    def remember_unknown(self, effect_id: int) -> None:
+        """Record that this snapshot does not contain ``effect_id``.
+
+        The bound lives here, on the addition, rather than on the revalidation
+        that confirms the snapshot: the ID comes from tool input, so the set does
+        need a ceiling, but a "not modified" answer is the one event that PROVES
+        every recorded miss is still a miss. Clearing there made the cache hold
+        at most one ID — the freshness window restarted on the same object each
+        time — so 50 lookups of 50 dead IDs cost 50 round trips.
+        """
+        if len(self.unknown_ids) >= MAX_UNKNOWN_IDS:
+            # ponytail: crude reset rather than an LRU. The set only exists to
+            # save a round trip, so the worst case of a reset is the cost we
+            # already pay on a cold cache. Swap in an LRU if that ever shows up.
+            self.unknown_ids.clear()
+        self.unknown_ids.add(effect_id)
 
 
 class _AccountState:
@@ -181,10 +201,10 @@ async def _fetch(state: _AccountState, cl, known_hash: int, now: float) -> Catal
         if state.catalog is not None:
             state.catalog.fetched_at = now
             state.catalog.checked_epoch = state.check_epoch
-            # The window restarts on this same object, so a negative result that
-            # only dies with the snapshot never dies. A cleared set costs at most
-            # one revalidation per ID per window, which is the cadence anyway.
-            state.catalog.unknown_ids.clear()
+            # The recorded misses deliberately SURVIVE: "not modified" is proof
+            # that the content behind them has not changed, so re-asking about the
+            # same ID would buy the same answer. Their ceiling is enforced in
+            # remember_unknown instead.
             return state.catalog
         # "Unchanged" against a hash we do not hold. Nothing to serve, and
         # repeating the same hash would repeat the answer.

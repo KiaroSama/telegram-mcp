@@ -949,3 +949,94 @@ async def test_a_source_that_cannot_refresh_reraises_the_original_error():
 
     with pytest.raises(FileReferenceExpiredError):
         await with_reference_retry(download, refresh)
+
+
+# --- an optional extra must never cost the answer -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_broken_thumbnail_does_not_discard_the_whole_message(monkeypatch):
+    """inspect_message's comment has always called the thumbnail optional.
+
+    Only the refusal and over-cap paths actually were. An undecodable image or a
+    file reference still stale after the retry raised straight past that block,
+    and the tool returned a bare error string — throwing away the entire
+    structured message the caller came for. The sibling include_screen block has
+    always handled it the right way.
+    """
+    import json
+
+    from telegram_mcp.tools import inspection
+
+    async def _to_thread(fn, *args):
+        raise OSError("image file is truncated")
+
+    photo = _photo_with([_MEDIUM])
+    msg = SimpleNamespace(id=5, document=None, sticker=None, photo=photo, media=object())
+
+    async def _get_message(chat_id, message_id, account=None):
+        return _CountingClient(total=512), SimpleNamespace(title="Chat"), msg
+
+    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(inspection, "_get_message", _get_message)
+    monkeypatch.setattr(
+        inspection, "describe_media", lambda m: {"kind": "photo", "has_thumbnail": True}
+    )
+    monkeypatch.setattr(inspection, "message_to_dict", lambda m: {})
+    monkeypatch.setattr(
+        inspection, "deep_message_dict", lambda *a, **k: {"text_fidelity": "the real answer"}
+    )
+
+    result = await inspection.inspect_message(1, 5, include_thumbnail=True, account="a")
+
+    assert isinstance(result, list), f"the message was discarded: {result!r}"
+    payload = json.loads(result[0])
+    assert payload["results"][0]["text_fidelity"] == "the real answer"
+    assert "OSError" in payload["results"][0]["thumbnail_error"]
+
+
+@pytest.mark.asyncio
+async def test_one_unresolvable_emoji_does_not_sink_the_other_nine(monkeypatch):
+    """_custom_emoji_preview handles the two errors it expects and no others.
+
+    Anything else — an RPC error, a reference still stale after the retry, a
+    Pillow failure escaping the decoder — propagated out of a bare gather and
+    sank all ten records, while the other coroutines were abandoned rather than
+    cancelled.
+    """
+    import json
+
+    from telegram_mcp.tools import inspection
+
+    documents = [
+        SimpleNamespace(id=1, mime_type="image/webp", size=10, attributes=[]),
+        SimpleNamespace(id=2, mime_type="image/webp", size=10, attributes=[]),
+    ]
+
+    class _Client:
+        async def __call__(self, request):
+            return documents
+
+    async def _ensure(client):
+        return None
+
+    finished = []
+
+    async def _preview(client, document, count, max_dimension, max_bytes):
+        if document.id == 1:
+            raise RuntimeError("file reference still stale after the retry")
+        finished.append(document.id)
+        return {"document_id": document.id, "preview_source": "document"}, []
+
+    monkeypatch.setattr(inspection, "get_client", lambda account=None: _Client())
+    monkeypatch.setattr(inspection, "ensure_connected", _ensure)
+    monkeypatch.setattr(inspection, "_custom_emoji_preview", _preview)
+
+    result = await inspection.get_custom_emoji([1, 2], account="a")
+
+    assert isinstance(result, list), f"the whole batch was lost: {result!r}"
+    records = json.loads(result[0])["results"]
+    assert finished == [2], "the surviving document never completed"
+    assert [r["document_id"] for r in records] == [1, 2]
+    assert "RuntimeError" in records[0]["preview_error"]
+    assert records[1]["preview_source"] == "document"

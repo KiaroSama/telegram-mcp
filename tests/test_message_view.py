@@ -620,6 +620,23 @@ def test_a_sticker_label_keeps_the_alt_glyph_intact():
     assert sanitize_name(FAMILY) != FAMILY, "sanitize_name no longer breaks this"
 
 
+def test_a_sticker_alt_containing_a_colon_is_still_cleaned():
+    """The branch must come from the KIND, never from the payload.
+
+    Splitting at the first ": " asked the attacker-controlled value which format
+    it was in. A sticker alt containing ": " — a pack creator picks that text —
+    took the "document: <name>" path, and everything before the colon, the whole
+    alt included, was returned verbatim with its bidi override intact.
+    """
+    alt = "‮fdp.exe: report"
+    msg = SimpleNamespace(sticker=SimpleNamespace(attributes=[SimpleNamespace(alt=alt)]))
+
+    label = describe_media_label(msg)
+
+    assert "‮" not in label, "the direction override survived the label"
+    assert label.startswith("sticker ")
+
+
 def test_a_message_with_no_media_has_no_label():
     assert describe_media_label(SimpleNamespace()) is None
 
@@ -927,6 +944,32 @@ REPO = Path(__file__).resolve().parents[1]
 _FORK_IMPORT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
 
 
+def _fork_owned_paths():
+    """Fork-authored modules under telegram_mcp/, straight from git.
+
+    A fork file is one upstream does not have, so upstream is the authority
+    rather than a list in this test. Skips where that cannot be established —
+    a shallow clone, no upstream remote — instead of asserting against a guess.
+    """
+    import subprocess
+
+    def _tracked(ref):
+        result = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", ref, "telegram_mcp/"],
+            cwd=REPO,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            pytest.skip(f"cannot resolve {ref}: {result.stderr.strip()[:120]}")
+        return {line for line in result.stdout.splitlines() if line.endswith(".py")}
+
+    fork_only = _tracked("HEAD") - _tracked("upstream/main")
+    # tools/*.py are covered by the derived import block above.
+    return sorted(p for p in fork_only if not p.startswith("telegram_mcp/tools/"))
+
+
 def test_the_merge_contract_matches_the_fork_imports():
     """The merge policy block is what someone reads before `git merge upstream/main`.
     A fork module missing from it reads as upstream code, so it is derived from the
@@ -943,8 +986,11 @@ def test_the_merge_contract_matches_the_fork_imports():
     for name in modules:
         assert f"telegram_mcp/tools/{name}.py" in doc, f"merge policy omits tools/{name}.py"
 
-    # The two fork modules that are not tool imports, so they cannot be derived above.
-    for path in ("telegram_mcp/message_view.py", "telegram_mcp/effect_catalog.py"):
+    # Fork modules that are not tool imports cannot be derived from the block
+    # above. Listing them by hand is what let text_fidelity.py and
+    # media_transfer.py go missing when message_view.py and tools/inspection.py
+    # were split, so ask git which files upstream does not have.
+    for path in _fork_owned_paths():
         assert path in doc, f"merge policy omits {path}"
 
     word = _FORK_IMPORT_WORDS.get(len(modules))
@@ -955,3 +1001,25 @@ def test_the_merge_contract_matches_the_fork_imports():
 
     # Prove the check bites: this is exactly how tools/effects.py went missing.
     assert "telegram_mcp/tools/nonexistent.py" not in doc
+
+
+def test_an_offset_that_could_not_be_rebased_says_so():
+    """describe_entities promises an offset indexes `text_fidelity`.
+
+    An offset it cannot rebase keeps Telegram's raw number, deliberately — but
+    published under the same key with no marker, a caller could not tell the two
+    coordinate spaces apart. The only hint was an absent "text", which also goes
+    missing for a legitimate offset landing mid-surrogate.
+    """
+    msg = SimpleNamespace(
+        message="ab",
+        entities=[
+            SimpleNamespace(offset=0, length=1, document_id=111, url=None, user_id=None),
+            SimpleNamespace(offset=99, length=1, document_id=222, url=None, user_id=None),
+        ],
+    )
+
+    emoji = describe_custom_emoji(msg)
+
+    assert emoji[0].get("offset_is_raw") is None, "a rebased offset was marked raw"
+    assert emoji[1]["offset_is_raw"] is True, "a raw offset was published as a rebased one"

@@ -49,6 +49,19 @@ class FrameExtractionError(RuntimeError):
     """Raised when frames cannot be extracted from a media file."""
 
 
+class DecoderMismatch(FrameExtractionError):
+    """Raised when *this* decoder cannot open the file — try the next one.
+
+    The distinction matters because ``.gif`` is the one suffix both Pillow and
+    ffmpeg claim. Catching the base class to decide whether to fall through
+    treats "I refuse to decode this" as "I cannot read this format", so the
+    frame-count refusal below was silently downgraded into a full ffmpeg decode
+    of the very file it had just refused — and Pillow's accurate "not animated"
+    diagnosis was replaced by ffmpeg's vaguer one. Only a decode *capability*
+    failure justifies the fallback; a policy refusal is a final answer.
+    """
+
+
 def ffmpeg_available() -> bool:
     """Whether ffmpeg is on PATH."""
     return shutil.which("ffmpeg") is not None
@@ -123,7 +136,7 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
     """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
     from PIL import Image, ImageSequence
 
-    from telegram_mcp.visual.images import encode_image
+    from telegram_mcp.visual.images import ImageError, encode_image
 
     try:
         source = Image.open(path)
@@ -131,7 +144,7 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
         # UnidentifiedImageError and friends are neither FrameExtractionError nor
         # ImageError, so without this they escape every handler in the tool layer
         # and surface as an opaque internal error.
-        raise FrameExtractionError(f"Pillow could not decode this media: {type(error).__name__}.")
+        raise DecoderMismatch(f"Pillow could not decode this media: {type(error).__name__}.")
 
     with source:
         total = getattr(source, "n_frames", 1)
@@ -150,14 +163,28 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
         )
 
         frames: list[tuple[bytes, dict[str, Any]]] = []
-        for index, frame in enumerate(ImageSequence.Iterator(source)):
-            if index not in indexes:
-                continue
-            data, meta = encode_image(frame.convert("RGB"), image_format="png")
-            meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
-            frames.append((data, meta))
-            if len(frames) >= wanted:
-                break
+        try:
+            for index, frame in enumerate(ImageSequence.Iterator(source)):
+                if index not in indexes:
+                    continue
+                data, meta = encode_image(frame.convert("RGB"), image_format="png")
+                meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
+                frames.append((data, meta))
+                if len(frames) >= wanted:
+                    break
+        except (FrameExtractionError, ImageError):
+            raise
+        except Exception as error:
+            # A truncated animation opens cleanly and fails while decoding a LATER
+            # frame, so wrapping only Image.open was not enough: a raw OSError
+            # ("image file is truncated") and, at another truncation point, a bare
+            # SyntaxError from Pillow's PNG plugin both escaped every handler in
+            # the tool layer. Both are reachable from the wire — the suffix comes
+            # from the sender's mime_type, so the sender picks the decoder.
+            raise FrameExtractionError(
+                f"Pillow failed after {len(frames)} frame(s) while decoding this animation: "
+                f"{type(error).__name__}. The file is most likely truncated or corrupt."
+            )
     if not frames:
         raise FrameExtractionError("Pillow decoded no frames from the animation.")
     return frames
@@ -190,7 +217,18 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
             f"rlottie could not open this .tgs animation: {type(error).__name__}."
         )
 
-    total = animation.lottie_animation_get_totalframe() or 1
+    total = animation.lottie_animation_get_totalframe()
+    if not total:
+        # rlottie does not raise on garbage: it returns an animation reporting
+        # totalframe=0, framerate=0. `or 1` turned that "I parsed nothing" signal
+        # into a legitimate-looking one-frame animation and rendered a fully
+        # transparent canvas, which the tool layer then labelled a successful
+        # frame. A blank picture presented as the emoji's real content is worse
+        # than an error, because nothing downstream can tell it is wrong.
+        raise FrameExtractionError(
+            "rlottie parsed no animation from this .tgs payload (it reports zero frames), so "
+            "it is not a valid gzipped Lottie file. Any frame rendered from it would be blank."
+        )
     wanted = min(count, total)
     indexes = (
         sorted({round(i * (total - 1) / max(1, wanted - 1)) for i in range(wanted)})
@@ -323,7 +361,11 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
         if suffix in PILLOW_ANIMATED_SUFFIXES:
             try:
                 return _frames_with_pillow(path, count)
-            except FrameExtractionError:
+            except DecoderMismatch:
+                # Only "Pillow cannot read this format" is worth a second decoder.
+                # A frame-count refusal or "not animated" is a decision about the
+                # content, and .gif is in both suffix sets, so catching the base
+                # class here handed the refused file straight to ffmpeg.
                 if suffix not in FFMPEG_SUFFIXES:
                     raise
         return _frames_with_ffmpeg(path, count)
