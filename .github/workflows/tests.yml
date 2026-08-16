@@ -62,9 +62,13 @@ jobs:
           "from telegram_mcp.visual.frames import lottie_available;
           assert lottie_available(), 'rlottie-python is missing: the .tgs tests would silently skip'"
 
-      - name: Run the visual suite with the renderer available
+      # The whole suite, not a file list. Selecting by path re-creates the exact
+      # hole the guard above exists to close: a renderer-gated test added to any
+      # unlisted file would run with the renderer nowhere and skip silently
+      # everywhere. Running everything under the extra cannot drift.
+      - name: Run the whole suite with the renderer available
         env:
           TELEGRAM_API_ID: "12345"
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
-        run: uv run --extra lottie pytest tests/test_visual_support.py tests/test_inspection.py -v
+        run: uv run --extra lottie pytest -q

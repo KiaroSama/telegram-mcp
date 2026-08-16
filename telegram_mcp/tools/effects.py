@@ -10,6 +10,7 @@ import asyncio
 from telegram_mcp.runtime import *
 from telegram_mcp.effect_catalog import (
     load_catalog,
+    sniff_asset_format,
     premium_effect_size,
     refresh_catalog,
     resolve_effect,
@@ -62,24 +63,28 @@ _SEPARATION_NOTE = (
 
 def _suffix_for(raw: bytes, fmt: str) -> str:
     """The extension the frame extractor should decode this asset as."""
-    if raw[:2] == b"\x1f\x8b":  # gzip: Telegram's .tgs Lottie
-        return ".tgs"
-    if fmt == "video":
-        return ".webm"
-    return ".webp"
+    return sniff_asset_format(raw, fmt)[0]
 
 
-def _not_found(effect_id, catalog) -> str:
+def _not_found(effect_id, catalog, checked: bool) -> str:
+    # The cached-miss path contacts nobody, so claiming a check happened there
+    # would be exactly the kind of confident lie the rest of this file avoids.
+    provenance = (
+        "which was checked against Telegram for this lookup"
+        if checked
+        else "which was last checked against Telegram less than an hour ago; this ID was "
+        "already missing from that same catalogue, so no new check was made"
+    )
     return (
         f"Effect {effect_id} is not in Telegram's current effect catalogue "
-        f"({len(catalog.effects)} effects), which was checked against Telegram for this lookup. "
+        f"({len(catalog.effects)} effects), {provenance}. "
         "Telegram retires effects and a message keeps the ID it was sent with, so the effect "
         "still played when it was sent."
     )
 
 
 async def _resolved_effect(cl, account, effect_id: int):
-    """``(catalog, info)`` for one effect, revalidating once if the ID is unknown.
+    """``(catalog, info, checked)`` for one effect, revalidating once if the ID is unknown.
 
     An unknown ID is the one case Telegram singles out as worth breaking the
     hourly cadence for: it usually means a *new* effect, not a retired one, and
@@ -92,14 +97,20 @@ async def _resolved_effect(cl, account, effect_id: int):
       it holds is by definition the newest there is;
     * the miss is remembered on the snapshot, so asking again about the same
       still-unknown ID is answered locally until the catalogue actually changes.
+
+    ``checked`` says which of those happened, because only the third answers
+    without reaching Telegram — and a "not found" that claims a check it never
+    made is the one thing worse than a slow one.
     """
     catalog, contacted = await load_catalog(cl, account)
     info = resolve_effect(catalog, effect_id)
     if info is not None:
-        return catalog, info
-    if contacted or effect_id in catalog.unknown_ids:
+        return catalog, info, contacted
+    if contacted:
         catalog.unknown_ids.add(effect_id)
-        return catalog, None
+        return catalog, None, True
+    if effect_id in catalog.unknown_ids:
+        return catalog, None, False
 
     # Read before the first await: this is the check we are asking to improve on,
     # and it is the value a concurrent caller's completed check is compared to.
@@ -108,7 +119,9 @@ async def _resolved_effect(cl, account, effect_id: int):
     info = resolve_effect(catalog, effect_id)
     if info is None:
         catalog.unknown_ids.add(effect_id)
-    return catalog, info
+    # Either the request went out or a check that completed against this same
+    # snapshot while we waited was reused — the epoch's whole purpose.
+    return catalog, info, True
 
 
 def _unresolved(reference) -> bool:
@@ -244,9 +257,9 @@ async def get_message_effect(
         cl = get_client(account)
         await ensure_connected(cl)
         effect_id = int(effect_id)
-        catalog, info = await _resolved_effect(cl, account, effect_id)
+        catalog, info, checked = await _resolved_effect(cl, account, effect_id)
         if info is None:
-            return _not_found(effect_id, catalog)
+            return _not_found(effect_id, catalog, checked)
 
         info["catalogue_size"] = len(catalog.effects)
         info["note"] = _SEPARATION_NOTE
@@ -274,7 +287,7 @@ async def get_message_effect(
             catalog = await refresh_catalog(cl, account, catalog)
             info = resolve_effect(catalog, effect_id)
             if info is None:
-                return _not_found(effect_id, catalog)
+                return _not_found(effect_id, catalog, True)
             info["catalogue_size"] = len(catalog.effects)
             info["note"] = _SEPARATION_NOTE
             selection = _select_asset(catalog, info, asset, effect_id)
@@ -291,8 +304,15 @@ async def get_message_effect(
         if not raw:
             return f"Telegram returned no data for effect {effect_id}'s {asset} asset."
 
-        suffix = _suffix_for(raw, (described or {}).get("format", "unknown"))
-        if asset == "icon" and suffix == ".webp":
+        fmt = (described or {}).get("format", "unknown")
+        suffix = _suffix_for(raw, fmt)
+        # Which encoder an asset needs is a property of the asset, not of the rung
+        # the caller asked for: an effect's preview sticker and its animation can
+        # both be a static WebP or PNG, and extract_frames refuses a still image
+        # ("File is not animated") instead of returning the one frame it has. The
+        # gzip check inside _suffix_for still wins, so a payload that is really
+        # Lottie is never called static.
+        if fmt == "static_image" and suffix != ".tgs":
             records, images = await asyncio.to_thread(_encode_one, raw, max_dimension)
         else:
             records, images = await asyncio.to_thread(

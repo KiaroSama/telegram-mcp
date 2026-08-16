@@ -693,3 +693,131 @@ async def test_a_missing_fallback_sticker_is_not_called_a_missing_animation(monk
     assert "names document 30 as its preview sticker" in result
     assert "no effect_animation_id of its own" in result
     assert "effect animation" not in result.split("preview sticker")[0]
+
+
+# --- a static asset is renderable on every rung -----------------------------
+
+
+class _StaticAssetClient(_ToolClient):
+    """Every asset of effect 7 is a static WebP, and the bytes are not gzip."""
+
+    chunk_bytes = b"RIFF\x00\x00\x00\x00WEBPVP8 " + b"x" * 500
+
+    async def __call__(self, request):
+        self.catalogue_calls.append(request.hash)
+        self.payloads_sent.append(True)
+
+        class Available:
+            hash = 1
+            effects = [_Effect(7, 20, icon=10, animation=21)]
+            documents = [
+                _Doc(10, mime="image/webp", size=1462),
+                _Doc(20, mime="image/webp", size=2048),
+                _Doc(21, mime="image/webp", size=2048),
+            ]
+
+        return Available()
+
+    def iter_download(self, target):
+        self.downloads += 1
+        client = self
+
+        class Chunks:
+            def __init__(self):
+                self.sent = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.sent >= client.payload_size:
+                    raise StopAsyncIteration
+                self.sent += len(client.chunk_bytes)
+                return client.chunk_bytes
+
+            async def close(self):
+                pass
+
+        return Chunks()
+
+
+class _GzipStaticAssetClient(_StaticAssetClient):
+    """Static mime, gzip payload: the bytes are what decide, not the metadata."""
+
+    chunk_bytes = b"\x1f\x8b" + b"x" * 510
+
+
+def _records_encoder(monkeypatch):
+    """Replace the to_thread stub with one that remembers which encoder it got."""
+    used = []
+
+    async def _record(fn, *args):
+        used.append(fn.__name__)
+        return [{"frame_index": 0}], ["image"]
+
+    monkeypatch.setattr(effects_tool.asyncio, "to_thread", _record)
+    return used
+
+
+@pytest.mark.parametrize("asset", ["sticker", "animation"])
+@pytest.mark.asyncio
+async def test_a_static_preview_sticker_renders_as_one_image(monkeypatch, asset):
+    """extract_frames refuses a still image, so choosing it by rung name kills the rung."""
+    used = _records_encoder(monkeypatch)
+    _use(monkeypatch, _StaticAssetClient())
+
+    payload = _payload(await _call(7, asset=asset))
+
+    assert used == ["_encode_one"], f"a static {asset} was sent to the frame extractor: {used}"
+    assert payload["asset"] == asset
+    assert payload["results"][0]["composite_fidelity"] == "asset-only"
+
+
+@pytest.mark.asyncio
+async def test_a_gzip_payload_is_still_decoded_as_lottie_whatever_the_mime_says(monkeypatch):
+    """Bytes beat metadata: a mislabelled Lottie must not be called a still image."""
+    used = _records_encoder(monkeypatch)
+    _use(monkeypatch, _GzipStaticAssetClient())
+
+    _payload(await _call(7, asset="sticker"))
+
+    assert used == ["_encode_frames"], f"a gzipped Lottie was treated as static: {used}"
+
+
+# --- the negative cache must die with the window ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_unknown_ids_does_not_grow_across_a_refreshed_window(monkeypatch):
+    """The set is justified by dying with the snapshot; a refreshed window is that death."""
+    _use(monkeypatch, _ToolClient())
+    await _call(1)
+    await _call(999999)
+
+    catalog = effect_catalog.cached_catalog("default")
+    assert 999999 in catalog.unknown_ids, "the miss was not recorded at all"
+
+    catalog.fetched_at -= effect_catalog._REVALIDATE_AFTER_SECONDS + 1
+    await _call(1)  # the window has expired: a not-modified revalidation
+
+    assert (
+        effect_catalog.cached_catalog("default").unknown_ids == set()
+    ), "the negative cache outlived the window it was supposed to die with"
+
+
+# --- the not-found message must describe the path that produced it ----------
+
+
+@pytest.mark.asyncio
+async def test_the_not_found_message_distinguishes_a_check_from_a_cached_miss(monkeypatch):
+    """The cached-miss path contacts nobody, so it must not claim a check."""
+    client = _use(monkeypatch, _ToolClient())
+    await _call(1)  # warm the cache
+
+    checked = await _call(999999)  # revalidates against Telegram
+    cached = await _call(999999)  # answered locally
+
+    assert "checked against Telegram for this lookup" in checked
+    assert "checked against Telegram for this lookup" not in cached
+    assert "no new check was made" in cached
+    assert client.catalogue_calls == [0, 1], "the cached miss reached Telegram after all"

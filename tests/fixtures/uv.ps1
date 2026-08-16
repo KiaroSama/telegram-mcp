@@ -3,6 +3,22 @@ param(
     [string[]] $Arguments
 )
 
+# The updater's Python test invocation: `uv run python -m pytest ...`. It exits
+# with TELEGRAM_MCP_FAKE_PYTEST_EXIT (default 0) so a caller can tell "the tests
+# ran and failed" from "the tests never ran".
+if ($Arguments.Count -ge 4 -and
+    $Arguments[0] -eq 'run' -and
+    $Arguments[1] -eq 'python' -and
+    $Arguments[2] -eq '-m' -and
+    $Arguments[3] -eq 'pytest') {
+    [Console]::Out.WriteLine('fake-pytest-output')
+    $pytestExit = 0
+    if (-not [string]::IsNullOrWhiteSpace($env:TELEGRAM_MCP_FAKE_PYTEST_EXIT)) {
+        $pytestExit = [int] $env:TELEGRAM_MCP_FAKE_PYTEST_EXIT
+    }
+    exit $pytestExit
+}
+
 if ($Arguments.Count -lt 6 -or
     $Arguments[0] -ne 'run' -or
     $Arguments[1] -ne 'python' -or

@@ -622,15 +622,23 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 ## Fork addition: visual and structured access
 
-This fork adds ten read-only tools that let an agent see Telegram the way a person does — the
-full Telegram API view of a message (entities, custom emoji, reactions, media metadata) and the
-real Telegram Desktop rendering as an image.
+This fork adds tools that let an agent see Telegram the way a person does — the full Telegram
+API view of a message (entities, custom emoji, reactions, media metadata) and the real Telegram
+Desktop rendering as an image. All of them are read-only except `click_button`, which sends a
+real callback and is the one addition with an effect.
 
 | | Tools |
 |---|---|
-| Structured | `inspect_message`, `inspect_messages`, `get_media_details` |
+| Structured | `inspect_message`, `inspect_messages`, `get_media_details`, `inspect_buttons` |
 | Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect` |
 | Visual (Windows) | `list_telegram_windows`, `get_telegram_screen`, `get_telegram_region`, `get_telegram_frames` |
+| Actions | `click_button` |
+
+`inspect_buttons` and `click_button` cover the inline ("glass") keyboard. The pairing matters:
+a button label is written by whoever sent the message and can carry a bidi override that makes
+it read as a different button, so `inspect_buttons` cleans every label, flags one that changed,
+and publishes a stable index — and `click_button` presses by that index rather than by text.
+Pass `expect_text` to make the press refuse if the keyboard changed underneath it.
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool
 reference, requirements and limitations. All of it lives in new modules, so merging upstream

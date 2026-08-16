@@ -16,6 +16,14 @@ from typing import Any, Optional
 MAX_IMAGE_DIMENSION = 1568
 MIN_IMAGE_DIMENSION = 64
 
+# Pillow only *warns* between 1x and 2x its MAX_IMAGE_PIXELS and raises above 2x
+# (~179M pixels on 12.x), so a few-KB PNG declaring ~178M pixels decodes and
+# allocates roughly 700 MB in a worker thread. The download cap upstream bounds
+# compressed bytes, not decoded pixels, and output is capped at
+# MAX_IMAGE_DIMENSION anyway — nothing above this is usable. Telegram's largest
+# photo is 2560px on the long side (~6.5 MP).
+MAX_DECODED_PIXELS = 50_000_000
+
 IMAGE_FORMATS = {
     "png": ("PNG", "image/png"),
     "jpeg": ("JPEG", "image/jpeg"),
@@ -44,8 +52,19 @@ def open_image_bytes(data: bytes):
 
     try:
         image = Image.open(io.BytesIO(data))
+        # open() only reads the header; load() is what allocates the pixels.
+        pixels = image.width * image.height
+        if pixels > MAX_DECODED_PIXELS:
+            raise ImageError(
+                f"Image declares {pixels} pixels, above the {MAX_DECODED_PIXELS} limit; "
+                "refusing to decode it. Use get_media_thumbnail for a bounded preview."
+            )
         image.load()
         return image
+    except ImageError:
+        # Our own guard must not be re-wrapped by the handler below, which would
+        # bury the real reason inside a generic "could not decode" message.
+        raise
     except Exception as error:
         raise ImageError(f"Could not decode image data ({len(data)} bytes): {error}") from error
 

@@ -48,6 +48,29 @@ _MIME_FORMATS = {
 }
 
 
+# gzip. Telegram's .tgs is a gzipped Lottie, and the premium-effect asset turned
+# out to be one where the code had assumed WebM — which is exactly why the format
+# is read from the bytes rather than from where the asset came from.
+_GZIP_MAGIC = bytes((0x1F, 0x8B))
+
+
+def sniff_asset_format(raw: bytes, mime_format: str = "unknown") -> tuple[str, str]:
+    """``(suffix, asset_format)`` for downloaded asset bytes.
+
+    Lived in two modules with two slightly different rules, and the two suites
+    that guard it each covered only one — so one copy could regress green. The
+    magic bytes win over the advertised format: an advertised type is what
+    Telegram says, and the bytes are what arrived.
+    """
+    if raw[:2] == _GZIP_MAGIC:
+        return ".tgs", "lottie_tgs"
+    if mime_format == "video":
+        return ".webm", "video"
+    if mime_format == "static_image":
+        return ".webp", "static_image"
+    return ".webm", "video"
+
+
 class Catalog:
     """One fetched snapshot of the effect catalog, for one account."""
 
@@ -73,7 +96,10 @@ class Catalog:
         self.checked_epoch = 0
         # IDs this exact snapshot does not contain. Asking Telegram again for the
         # same ID against the same catalogue gets the same answer, so the negative
-        # result rides along with the snapshot and dies with it.
+        # result rides along with the snapshot. It is dropped both when the
+        # snapshot is replaced and when its freshness window is refreshed in
+        # place — otherwise a catalogue that never changes keeps one int per
+        # distinct ID, and the ID comes from tool input.
         self.unknown_ids = set()
 
     def is_fresh(self, now: float) -> bool:
@@ -155,11 +181,24 @@ async def _fetch(state: _AccountState, cl, known_hash: int, now: float) -> Catal
         if state.catalog is not None:
             state.catalog.fetched_at = now
             state.catalog.checked_epoch = state.check_epoch
+            # The window restarts on this same object, so a negative result that
+            # only dies with the snapshot never dies. A cleared set costs at most
+            # one revalidation per ID per window, which is the cadence anyway.
+            state.catalog.unknown_ids.clear()
             return state.catalog
         # "Unchanged" against a hash we do not hold. Nothing to serve, and
         # repeating the same hash would repeat the answer.
         result = await cl(functions.messages.GetAvailableEffectsRequest(hash=0))
         state.check_epoch += 1
+        if not hasattr(result, "effects"):
+            # Defensive: "not modified" against hash=0 is not documented behaviour,
+            # but the fall-through below would store an empty catalogue with a fresh
+            # timestamp, and is_fresh would then serve "0 effects" as authoritative
+            # for an hour — every lookup confidently reporting a retired effect.
+            raise RuntimeError(
+                "Telegram answered 'not modified' to a hash=0 effect catalogue request, "
+                "so there is no catalogue to cache."
+            )
 
     state.generation += 1
     state.catalog = Catalog(

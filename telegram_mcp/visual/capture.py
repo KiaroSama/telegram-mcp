@@ -260,41 +260,52 @@ def list_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[WindowInfo]:
     windows: list[WindowInfo] = []
 
     def _collect(hwnd: int, _lparam: int) -> bool:
-        if not user32.IsWindowVisible(hwnd):
-            return True
-        pid = wintypes.DWORD()
-        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-        path = _process_image_path(pid.value)
-        if not path or os.path.basename(path).lower() != target:
-            return True
-
-        length = user32.GetWindowTextLengthW(hwnd)
-        title_buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, title_buffer, length + 1)
-        class_buffer = ctypes.create_unicode_buffer(256)
-        user32.GetClassNameW(hwnd, class_buffer, 256)
-
-        rect = wintypes.RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(rect))
-
-        dpi = None
         try:
-            dpi = int(user32.GetDpiForWindow(hwnd)) or None
-        except Exception:  # pragma: no cover - pre-Windows 10 1607
-            dpi = None
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            path = _process_image_path(pid.value)
+            if not path or os.path.basename(path).lower() != target:
+                return True
 
-        windows.append(
-            WindowInfo(
-                hwnd=int(hwnd),
-                title=title_buffer.value,
-                class_name=class_buffer.value,
-                rect=(rect.left, rect.top, rect.right, rect.bottom),
-                is_foreground=int(hwnd) == int(foreground),
-                is_minimized=bool(user32.IsIconic(hwnd)),
-                dpi=dpi,
-                process_path=path,
+            length = user32.GetWindowTextLengthW(hwnd)
+            title_buffer = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, title_buffer, length + 1)
+            class_buffer = ctypes.create_unicode_buffer(256)
+            user32.GetClassNameW(hwnd, class_buffer, 256)
+
+            rect = wintypes.RECT()
+            if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                # The window died between EnumWindows handing over the handle and
+                # this call. rect is still zero-filled, and reporting it would
+                # surface a real-looking window with width/height 0.
+                return True
+
+            dpi = None
+            try:
+                dpi = int(user32.GetDpiForWindow(hwnd)) or None
+            except Exception:  # pragma: no cover - pre-Windows 10 1607
+                dpi = None
+
+            windows.append(
+                WindowInfo(
+                    hwnd=int(hwnd),
+                    title=title_buffer.value,
+                    class_name=class_buffer.value,
+                    rect=(rect.left, rect.top, rect.right, rect.bottom),
+                    is_foreground=int(hwnd) == int(foreground),
+                    is_minimized=bool(user32.IsIconic(hwnd)),
+                    dpi=dpi,
+                    process_path=path,
+                )
             )
-        )
+        except Exception:
+            # ctypes swallows an exception raised in a callback and converts the
+            # return value to 0 — which STOPS EnumWindows. One transient failure
+            # would silently truncate the whole window list, after which
+            # find_target_window picks a popup or reports "no window found".
+            pass
         return True
 
     callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_collect)
@@ -402,6 +413,14 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
         # that is still selected into a DC, so dropping this handle leaks the
         # bitmap on every single capture.
         previous_object = gdi32.SelectObject(memory_dc, bitmap)
+        if not previous_object:
+            # NULL means the bitmap was never selected, so PrintWindow below would
+            # render into the DC's 1x1 default bitmap and the blank result would be
+            # blamed on PrintWindow.
+            raise CaptureError(
+                "Could not select the capture bitmap into the device context "
+                f"(SelectObject failed, error {ctypes.get_last_error()})."
+            )
 
         flags = _PW_RENDERFULLCONTENT | (_PW_CLIENTONLY if client_only else 0)
         if not user32.PrintWindow(window.hwnd, memory_dc, flags):
@@ -409,6 +428,13 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
                 "PrintWindow refused to render the window. Retry with method='screen' "
                 "after bringing Telegram to the foreground."
             )
+
+        # GetDIBits must not be called on a bitmap that is still selected into a
+        # DC. It happens to work on this driver stack; where it does not it either
+        # returns 0 or hands back stale scanlines that pass _looks_blank and
+        # become a plausible-looking screenshot of the wrong thing.
+        gdi32.SelectObject(memory_dc, previous_object)
+        previous_object = None
 
         info = BITMAPINFO()
         info.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
@@ -456,8 +482,12 @@ def _looks_blank(image) -> bool:
     it is the difference between returning a useless black rectangle and falling
     back to the screen grab.
     """
-    probe = image.convert("RGB").resize((32, 32))
-    return all(low == high for low, high in probe.getextrema())
+    # Both callers already hand this an RGB image, so convert("RGB") was a pure
+    # full-frame copy (~25 MB on a 4K window) and resize then resampled every
+    # source pixel — twice the memory traffic of the capture itself, paid once per
+    # frame (up to 8 per get_telegram_frames call). getextrema() is one C pass
+    # over the bands with no allocation, and exact rather than approximate.
+    return all(low == high for low, high in image.getextrema())
 
 
 def capture_window(
@@ -492,7 +522,16 @@ def capture_window(
     meta: dict[str, Any] = {"method": method, "client_only": client_only}
     if method == "window":
         image = _capture_print_window(window, client_only=client_only)
-        if _looks_blank(image) and not window.is_minimized:
+        if _looks_blank(image):
+            if window.is_minimized:
+                # PrintWindow has no client surface to render for a minimized
+                # window, so the "capture" is a black rectangle. Returning it
+                # silently lets the model describe an empty frame as the chat,
+                # and the screen fallback below refuses minimized windows too.
+                raise CaptureError(
+                    f"Window {window.hwnd} is minimized and rendered a blank frame. "
+                    "Restore the Telegram window and retry."
+                )
             # Hardware-accelerated windows occasionally decline to redraw off-screen.
             # The fallback keeps client_only, so the caller still gets the area it
             # asked for rather than a silently different framing.

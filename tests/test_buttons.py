@@ -1,0 +1,310 @@
+"""Inline-keyboard inspection and pressing.
+
+The fakes mirror Telethon's real shapes: every ``KeyboardButton*`` class carries
+``text`` and ``style`` and nothing else in common, only ``KeyboardButtonCallback``
+carries ``data``, and no button type carries entities.
+"""
+
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from telegram_mcp.button_view import describe_button, describe_keyboard, describe_style
+import telegram_mcp.tools.buttons as buttons_tool
+from telegram_mcp.tools.buttons import click_button, inspect_buttons
+
+
+class _Style:
+    def __init__(self, bg_primary=None, bg_danger=None, bg_success=None, icon=None):
+        self.bg_primary, self.bg_danger = bg_primary, bg_danger
+        self.bg_success, self.icon = bg_success, icon
+
+
+def _button(cls_name, **fields):
+    """A button whose class NAME drives the description, as in Telethon."""
+    fields.setdefault("style", None)
+    return type(cls_name, (SimpleNamespace,), {})(**fields)
+
+
+def _callback(text="Confirm", data=b"cb:1", **kw):
+    return _button("KeyboardButtonCallback", text=text, data=data, **kw)
+
+
+def _message(rows, message_id=7, inline=True):
+    """A message with a keyboard. `inline` picks glass vs reply — Telethon
+    distinguishes them by the markup CLASS, and both fill `rows`."""
+    markup_cls = "ReplyInlineMarkup" if inline else "ReplyKeyboardMarkup"
+    markup = type(markup_cls, (SimpleNamespace,), {})(
+        rows=[SimpleNamespace(buttons=r) for r in rows]
+    )
+    return SimpleNamespace(id=message_id, reply_markup=markup)
+
+
+def _buttons_of(msg):
+    """The flat button list, for tests that do not care about the keyboard kind."""
+    return describe_keyboard(msg)["buttons"]
+
+
+# --- what a button is -------------------------------------------------------
+
+
+def test_a_callback_button_is_pressable_and_a_url_button_is_not():
+    keyboard = _buttons_of(
+        _message(
+            [[_callback(), _button("KeyboardButtonUrl", text="Open", url="https://e.example")]]
+        )
+    )
+
+    assert [b["kind"] for b in keyboard] == ["callback", "url"]
+    assert [b["pressable"] for b in keyboard] == [True, False]
+    assert keyboard[1]["url"] == "https://e.example"
+    assert "press_note" in keyboard[1]
+
+
+def test_a_mini_app_button_says_it_cannot_be_pressed_and_names_the_capture_route():
+    """A WebView opens a Mini App; there is no callback to answer."""
+    keyboard = _buttons_of(
+        _message([[_button("KeyboardButtonWebView", text="Play", url="https://app.example")]])
+    )
+
+    assert keyboard[0]["pressable"] is False
+    assert "get_telegram_frames" in keyboard[0]["press_note"]
+
+
+def test_a_password_gated_callback_is_refused_rather_than_attempted():
+    keyboard = _buttons_of(_message([[_callback(requires_password=True)]]))
+
+    assert keyboard[0]["requires_password"] is True
+    assert keyboard[0]["pressable"] is False
+    assert "2FA" in keyboard[0]["press_note"]
+
+
+def test_indexes_are_flat_and_row_major_across_rows():
+    """click_button takes this index, so its meaning must not depend on layout."""
+    keyboard = _buttons_of(
+        _message([[_callback(text="a"), _callback(text="b")], [_callback(text="c")]])
+    )
+
+    assert [(b["index"], b["row"], b["column"]) for b in keyboard] == [
+        (0, 0, 0),
+        (1, 0, 1),
+        (2, 1, 0),
+    ]
+
+
+def test_a_message_without_a_keyboard_is_none_not_empty():
+    """None means "no keyboard"; [] would mean "a keyboard whose buttons vanished"."""
+    assert describe_keyboard(SimpleNamespace(id=1, reply_markup=None)) is None
+
+
+# --- the label is a security surface ---------------------------------------
+
+
+def test_a_bidi_override_in_a_label_is_stripped_and_flagged():
+    """The label is what an agent reads to choose; a raw one can read as another."""
+    keyboard = _buttons_of(_message([[_callback(text="Cancel‮Delete")]]))
+
+    assert "‮" not in keyboard[0]["text"], "the override survived into the label"
+    assert keyboard[0]["text_altered"] is True
+
+
+def test_a_persian_or_emoji_label_survives_intact_and_is_not_flagged():
+    label = "می‌کند \U0001f468‍\U0001f469‍\U0001f467"
+    keyboard = _buttons_of(_message([[_callback(text=label)]]))
+
+    assert keyboard[0]["text"] == label
+    assert "text_altered" not in keyboard[0]
+
+
+# --- style and the premium-emoji question ----------------------------------
+
+
+def test_a_styled_button_reports_its_background_and_icon_document_id():
+    styled = _callback(style=_Style(bg_danger=True, icon=5107584321108051014))
+    described = describe_button(styled, 0, 0, 0)
+
+    assert described["style"]["background"] == "danger"
+    assert described["style"]["icon_document_id"] == 5107584321108051014
+    assert "get_custom_emoji" in described["style"]["icon_note"]
+
+
+def test_an_unstyled_button_reports_no_style_key():
+    assert describe_style(_callback()) is None
+    assert "style" not in describe_button(_callback(), 0, 0, 0)
+
+
+def test_a_style_with_only_an_icon_still_reports_it():
+    described = describe_style(_callback(style=_Style(icon=42)))
+    assert described == {"icon_document_id": 42, "icon_note": described["icon_note"]}
+    assert "background" not in described
+
+
+# --- the tools --------------------------------------------------------------
+
+
+class _Client:
+    def __init__(self, msg, answer=None):
+        self._msg, self._answer = msg, answer
+        self.calls = []
+
+    async def get_messages(self, entity, ids=None):
+        return self._msg
+
+    async def __call__(self, request):
+        self.calls.append(request)
+        return self._answer
+
+
+@pytest.fixture
+def _wire(monkeypatch):
+    def use(msg, answer=None):
+        client = _Client(msg, answer)
+        monkeypatch.setattr(buttons_tool, "get_client", lambda account=None: client)
+
+        async def _connect(cl):
+            return None
+
+        async def _resolve(chat_id, cl):
+            return SimpleNamespace(id=chat_id)
+
+        monkeypatch.setattr(buttons_tool, "ensure_connected", _connect)
+        monkeypatch.setattr(buttons_tool, "resolve_entity", _resolve)
+        return client
+
+    return use
+
+
+@pytest.mark.asyncio
+async def test_inspect_buttons_publishes_the_pressable_indexes(_wire):
+    _wire(_message([[_callback(), _button("KeyboardButtonUrl", text="Open", url="u")]]))
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+
+    assert payload["pressable_indexes"] == [0]
+    assert payload["button_count"] == 2
+    assert "cannot be resolved" in payload["premium_emoji"]
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_callback_button_sends_that_buttons_payload(_wire):
+    """The payload must come from the button at the index, not from a label match."""
+    rows = [[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]
+    client = _wire(_message(rows), answer=SimpleNamespace(message="done", alert=None, url=None))
+
+    payload = json.loads(await click_button(1, 7, 1, account="default"))
+
+    assert client.calls[0].data == b"NO", "pressed the wrong button"
+    assert payload["results"][0]["button_index"] == 1
+    assert payload["results"][0]["bot_message"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_non_callback_button_is_refused_without_a_request(_wire):
+    client = _wire(_message([[_button("KeyboardButtonUrl", text="Open", url="u")]]))
+
+    result = await click_button(1, 7, 0, account="default")
+
+    assert isinstance(result, str) and "not a callback button" in result
+    assert client.calls == [], "a request was sent for a button that cannot be pressed"
+
+
+@pytest.mark.asyncio
+async def test_clicking_an_out_of_range_index_names_the_valid_range(_wire):
+    client = _wire(_message([[_callback()]]))
+
+    result = await click_button(1, 7, 5, account="default")
+
+    assert "no button 5" in result and "0-0" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_a_password_gated_button_is_never_pressed(_wire):
+    client = _wire(_message([[_callback(requires_password=True)]]))
+
+    result = await click_button(1, 7, 0, account="default")
+
+    assert "2FA" in result or "password" in result
+    assert client.calls == [], "a 2FA-gated callback was attempted"
+
+
+@pytest.mark.asyncio
+async def test_a_silent_answer_is_reported_as_delivered_not_as_empty(_wire):
+    _wire(
+        _message([[_callback()]]),
+        answer=SimpleNamespace(message=None, alert=None, url=None),
+    )
+
+    payload = json.loads(await click_button(1, 7, 0, account="default"))
+
+    assert payload["results"][0]["bot_message"] is None
+    assert "delivered" in payload["results"][0]["note_no_answer"]
+
+
+# --- glass vs reply keyboard: both fill reply_markup.rows -------------------
+
+
+def test_a_reply_keyboard_is_not_reported_as_glass():
+    """Found live: the first real keyboard sampled was a reply keyboard, and
+    an earlier version of this module listed its buttons as glass ones."""
+    keyboard = describe_keyboard(_message([[_callback()]], inline=False))
+
+    assert keyboard["keyboard_type"] == "reply"
+    assert keyboard["is_glass"] is False
+
+
+def test_an_inline_keyboard_is_reported_as_glass():
+    keyboard = describe_keyboard(_message([[_callback()]]))
+
+    assert keyboard["keyboard_type"] == "inline"
+    assert keyboard["is_glass"] is True
+
+
+@pytest.mark.asyncio
+async def test_inspect_buttons_names_a_reply_keyboard_for_what_it_is(_wire):
+    _wire(_message([[_callback()]], inline=False))
+
+    payload = json.loads(await inspect_buttons(1, 7, account="default"))
+
+    assert payload["keyboard_type"] == "reply"
+    assert "REPLY keyboard" in payload["keyboard_note"]
+    assert "send_message" in payload["keyboard_note"]
+
+
+@pytest.mark.asyncio
+async def test_clicking_a_reply_keyboard_button_is_refused_without_a_request(_wire):
+    """Its buttons have callback-shaped fakes here, so only the markup type saves us."""
+    client = _wire(_message([[_callback()]], inline=False))
+
+    result = await click_button(1, 7, 0, account="default")
+
+    assert "REPLY keyboard" in result and "send_message" in result
+    assert client.calls == [], "a callback was sent for a reply-keyboard button"
+
+
+# --- an index is a position, not an identity -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_changed_keyboard_refuses_the_press_instead_of_hitting_the_wrong_button(_wire):
+    """A bot can edit its own keyboard between the listing and the press."""
+    client = _wire(_message([[_callback(text="Delete", data=b"DEL")]]))
+
+    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
+
+    assert "now reads 'Delete'" in result and "nothing was pressed" in result
+    assert client.calls == [], "pressed a button whose label had changed"
+
+
+@pytest.mark.asyncio
+async def test_a_matching_expectation_presses_normally(_wire):
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"OK")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+
+    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
+
+    assert client.calls[0].data == b"OK"
+    assert payload["results"][0]["button_text"] == "Confirm"

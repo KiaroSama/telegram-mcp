@@ -204,6 +204,8 @@ incoming_feed.jsonl
 
 # Hook Maker: local/private files (auto-managed)
 /.ai/
+# Advisor handoff plans: local working notes, not project deliverables.
+/plans/
 /secrets.md
 /explain-AI.md
 /reference.md

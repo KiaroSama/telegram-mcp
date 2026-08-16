@@ -108,15 +108,28 @@ addopts = [
 
 [tool.coverage.run]
 branch = true
-# Unit coverage focuses on deterministic local logic. The Telegram tool modules
-# are live API adapters and should get separate mocked or integration coverage.
+# Unit coverage focuses on deterministic local logic, which includes the fork's
+# own pure modules: message_view (text/entity/media description), effect_catalog
+# (catalogue caching and revalidation) and the visual package (decode/encode/
+# capture). The telegram_mcp.tools.* modules stay out: they are live API adapters
+# and need separate mocked or integration coverage.
 source = [
     "main",
     "sanitize",
     "telegram_mcp.runtime",
+    "telegram_mcp.message_view",
+    "telegram_mcp.effect_catalog",
+    "telegram_mcp.visual",
 ]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 80
+# A measured floor, not an aspiration. Measured 2026-08-16: the old three-module
+# list reported 90.04% over 1009 statements; this list reports 88.60% over 2053.
+# The number went down because it now measures twice as much code - that is the
+# point. 85 is the floor rather than 88 because the earliest measurement of this
+# list was 85.62% and the value moves with in-flight work. Raising it is a
+# separate, deliberate change once the largest Missing ranges get tests
+# (telegram_mcp/visual/capture.py and frames.py are the worst).
+fail_under = 85

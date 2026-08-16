@@ -114,8 +114,19 @@ function Invoke-LauncherTests {
     )
 }
 
-function Invoke-PythonTests {
-    $uv = Get-Command uv -ErrorAction Stop
+function Start-PythonTests {
+    <#
+      Runs the Python suite and RETURNS pytest's exit code. Throws only when the
+      suite could not be started at all (no uv on PATH, no resolvable
+      environment) - the caller must be able to tell "tests ran and failed" from
+      "tests never ran". Invoke-Checked is deliberately not used here: it
+      collapses both meanings into one throw.
+    #>
+    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    if (-not $uv) {
+        throw 'uv was not found in PATH, so the Python tests could not be started.'
+    }
+
     $names = @(
         'TELEGRAM_API_ID',
         'TELEGRAM_API_HASH',
@@ -132,14 +143,26 @@ function Invoke-PythonTests {
         $env:TELEGRAM_API_HASH = 'dummy_hash'
         $env:TELEGRAM_SESSION_NAME = 'test_session'
         $env:TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK = '0'
-        Invoke-Checked -FilePath $uv.Path -Arguments @(
-            'run', 'python', '-m', 'pytest', '--cov', '--cov-report=term-missing'
-        )
+        # Out-Host keeps pytest's output off this function's output stream; the
+        # caller reads the return value as the exit code, not as a transcript.
+        & $uv.Path 'run' 'python' '-m' 'pytest' '--cov' '--cov-report=term-missing' | Out-Host
+        $testExit = $LASTEXITCODE
     }
     finally {
         foreach ($name in $names) {
             [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process')
         }
+    }
+
+    return $testExit
+}
+
+function Invoke-PythonTests {
+    # Menu option 6 must keep failing loudly: the menu's catch turns a throw into
+    # a non-zero exit code.
+    $code = Start-PythonTests
+    if ($code -ne 0) {
+        throw "pytest exited with code $code."
     }
 }
 
@@ -173,12 +196,12 @@ function Invoke-FullUpdate {
     Merge-Upstream
     Invoke-LauncherTests
 
-    try {
-        Invoke-PythonTests
-    }
-    catch {
-        Write-Warning "Local Python tests failed: $($_.Exception.Message)"
-        Write-Warning 'Continuing to Push as requested; GitHub Actions will run the Linux CI suite.'
+    # No try/catch: a throw here means the suite never ran, and that must abort
+    # before Push-Origin. Only a real, completed, failing run is allowed through.
+    $testExit = Start-PythonTests
+    if ($testExit -ne 0) {
+        Write-Warning "Local Python tests ran and reported failures (pytest exit $testExit)."
+        Write-Warning 'Pushing anyway; note that GitHub Actions is not gating this push.'
     }
 
     Push-Origin

@@ -604,3 +604,265 @@ def test_max_bytes_is_clamped_before_the_effect_branch():
     clamp = source.index("max_bytes = max(1, min(")
     branch = source.index("if premium_effect:")
     assert clamp < branch, "the effect path still receives the raw max_bytes"
+
+
+# --- a thumbnail request must cost a thumbnail --------------------------------
+
+
+class _CountingClient:
+    """Streams a payload, recording every location and every byte delivered."""
+
+    def __init__(self, total=512, chunk=1024, inline=b"inline-bytes"):
+        self.total, self.chunk, self.inline = total, chunk, inline
+        self.delivered = 0
+        self.locations = []
+        self.thumbs_asked = []
+
+    def iter_download(self, target):
+        self.locations.append(target)
+        client = self
+
+        class Chunks:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if client.delivered >= client.total:
+                    raise StopAsyncIteration
+                size = min(client.chunk, client.total - client.delivered)
+                client.delivered += size
+                return b"x" * size
+
+            async def close(self):
+                pass
+
+        return Chunks()
+
+    async def download_media(self, owner, file=None, thumb=None):
+        self.thumbs_asked.append(thumb)
+        return self.inline
+
+
+_SMALL = t.PhotoSize(type="m", w=320, h=320, size=10_000)
+_MEDIUM = t.PhotoSize(type="x", w=800, h=800, size=90_000)
+_ORIGINAL = t.PhotoSizeProgressive(type="y", w=2560, h=2560, sizes=[2_000_000])
+
+
+def _photo_with(sizes, video_sizes=None):
+    return t.Photo(
+        id=1,
+        access_hash=2,
+        file_reference=b"\x00",
+        date=datetime.datetime.now(),
+        sizes=list(sizes),
+        dc_id=2,
+        has_stickers=False,
+        video_sizes=video_sizes,
+    )
+
+
+def _document_with(thumbs):
+    return SimpleNamespace(id=7, access_hash=11, file_reference=b"ref", thumbs=list(thumbs))
+
+
+def test_a_photo_thumbnail_request_never_selects_the_original():
+    """Telethon's own thumb=-1 returns the full-resolution photo; this must not."""
+    from telegram_mcp.tools.inspection import DEFAULT_THUMBNAIL_BYTES, _select_thumb
+
+    sizes = [_SMALL, _MEDIUM, _ORIGINAL]
+    index, size = _select_thumb(sizes, -1, DEFAULT_THUMBNAIL_BYTES)
+
+    assert size is _MEDIUM, f"selected {getattr(size, 'type', size)!r}, not the largest that fits"
+    assert index == 1
+    assert size is not _ORIGINAL, "the full-resolution original was offered as a thumbnail"
+
+
+def test_the_video_size_of_an_animated_photo_is_never_a_thumbnail():
+    """Telethon folds photo.video_sizes into the sortable list; the fork must not."""
+    from telegram_mcp.tools.inspection import (
+        DEFAULT_THUMBNAIL_BYTES,
+        _declared_sizes,
+        _select_thumb,
+    )
+
+    mp4 = t.VideoSize(type="u", w=1280, h=1280, size=3_000_000)
+    photo = _photo_with([_SMALL, _MEDIUM, _ORIGINAL], video_sizes=[mp4])
+
+    declared = _declared_sizes(photo)
+    assert mp4 not in declared, "the animated photo's mp4 entered the thumbnail vocabulary"
+
+    _, size = _select_thumb(declared, -1, DEFAULT_THUMBNAIL_BYTES)
+    assert type(size).__name__ == "PhotoSize"
+
+
+@pytest.mark.asyncio
+async def test_an_over_cap_thumbnail_aborts_during_the_transfer():
+    """An unannounced or misreported size must never be buffered in full."""
+    from telegram_mcp.tools.inspection import _download_size_capped
+
+    client = _CountingClient(total=10 * 1024 * 1024)
+    photo = _photo_with([_MEDIUM])
+
+    raw, over_cap = await _download_size_capped(client, photo, _MEDIUM, 4096)
+
+    assert (raw, over_cap) == (None, True)
+    assert client.delivered <= 4096 + 1024, (
+        f"{client.delivered} bytes crossed a 4096-byte cap; the transfer must abort at the "
+        "limit, not download 10 MB and measure it afterwards"
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_inline_thumb_costs_no_request():
+    """PhotoStrippedSize pixels already arrived with the message; fetching them is waste."""
+    from telegram_mcp.tools.inspection import _download_size_capped
+
+    stripped = t.PhotoStrippedSize(type="i", bytes=b"\x01\x02\x03")
+    client = _CountingClient()
+    photo = _photo_with([stripped])
+
+    raw, over_cap = await _download_size_capped(client, photo, stripped, 4096)
+
+    assert (raw, over_cap) == (b"inline-bytes", False)
+    assert client.locations == [], "an inline thumbnail was turned into a network request"
+    assert client.thumbs_asked == [stripped], "download_media was not given the size object"
+
+
+def test_a_vector_outline_is_never_offered_as_a_thumbnail():
+    """PhotoPathSize is an SVG outline; Pillow cannot decode one and Telethon drops it."""
+    from telegram_mcp.tools.inspection import DEFAULT_THUMBNAIL_BYTES, _select_thumb
+
+    outline = t.PhotoPathSize(type="j", bytes=b"M0 0")
+    sizes = [outline, _MEDIUM]
+
+    _, chosen = _select_thumb(sizes, -1, DEFAULT_THUMBNAIL_BYTES)
+    assert chosen is _MEDIUM
+
+    refusal = _select_thumb(sizes, 0, DEFAULT_THUMBNAIL_BYTES)
+    assert isinstance(refusal, str), "the vector outline was handed to the decoder"
+    assert "PhotoPathSize" in refusal and "carries no picture" in refusal
+
+
+@pytest.mark.asyncio
+async def test_a_photo_thumb_streams_an_input_photo_location():
+    """A Photo and a Document need different location types for the same thumb_size."""
+    from telethon.tl.types import InputDocumentFileLocation, InputPhotoFileLocation
+
+    from telegram_mcp.tools.inspection import _download_size_capped
+
+    client = _CountingClient(total=512)
+    await _download_size_capped(client, _photo_with([_MEDIUM]), _MEDIUM, 4096)
+
+    location = client.locations[0]
+    assert isinstance(location, InputPhotoFileLocation)
+    assert location.thumb_size == "x"
+    assert (location.id, location.file_reference) == (1, b"\x00")
+
+    document_client = _CountingClient(total=512)
+    await _download_size_capped(document_client, _document_with([_MEDIUM]), _MEDIUM, 4096)
+
+    assert isinstance(document_client.locations[0], InputDocumentFileLocation)
+    assert document_client.locations[0].thumb_size == "x"
+
+
+# --- one oversized custom emoji must not sink the batch -----------------------
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_refuses_a_document_over_the_cap(monkeypatch):
+    from telegram_mcp.tools import inspection
+    from telegram_mcp.tools.inspection import _custom_emoji_preview
+
+    async def _to_thread(fn, *args):
+        return [{"frame_index": 0}], ["image"]
+
+    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+
+    client = _CountingClient(total=512)
+    oversized = SimpleNamespace(id=1, mime_type="image/webp", size=10_000_000, attributes=[])
+    ordinary = SimpleNamespace(id=2, mime_type="image/webp", size=1234, attributes=[])
+
+    refused, no_images = await _custom_emoji_preview(client, oversized, 1, 64, 5 * 1024 * 1024)
+    rendered, images = await _custom_emoji_preview(client, ordinary, 1, 64, 5 * 1024 * 1024)
+
+    assert "10000000 bytes" in refused["preview_error"]
+    assert no_images == []
+    assert client.locations == [ordinary], "the oversized document was still downloaded"
+    assert images and "preview_error" not in rendered, "one bad emoji sank the whole batch"
+
+
+@pytest.mark.asyncio
+async def test_custom_emoji_transfer_is_bounded_when_no_size_is_advertised():
+    """The advertised size is a free refusal, not the limit that counts."""
+    from telegram_mcp.tools.inspection import _custom_emoji_preview
+
+    client = _CountingClient(total=10 * 1024 * 1024)
+    document = SimpleNamespace(id=3, mime_type="image/webp", size=None, attributes=[])
+
+    record, images = await _custom_emoji_preview(client, document, 1, 64, 4096)
+
+    assert "advertised size was absent" in record["preview_error"]
+    assert images == []
+    assert client.delivered <= 4096 + 1024, f"{client.delivered} bytes crossed a 4096-byte cap"
+
+
+# --- Pillow must never decode on the event loop -------------------------------
+
+
+@pytest.mark.asyncio
+async def test_both_thumbnail_encodes_run_off_the_event_loop(monkeypatch):
+    """A full-resolution decode plus LANCZOS resize stalls every other tool call."""
+    from telegram_mcp.tools import inspection
+
+    threaded = []
+
+    async def _to_thread(fn, *args):
+        threaded.append(fn.__name__)
+        return [{"width": 1}], ["image"]
+
+    photo = _photo_with([_MEDIUM])
+    msg = SimpleNamespace(id=5, document=None, sticker=None, photo=photo, media=object())
+
+    async def _get_message(chat_id, message_id, account=None):
+        return _CountingClient(total=512), SimpleNamespace(title="Chat"), msg
+
+    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(inspection, "_get_message", _get_message)
+    monkeypatch.setattr(
+        inspection, "describe_media", lambda m: {"kind": "photo", "has_thumbnail": True}
+    )
+    monkeypatch.setattr(inspection, "message_to_dict", lambda m: {})
+    monkeypatch.setattr(inspection, "deep_message_dict", lambda *a, **k: {})
+
+    await inspection.get_media_thumbnail(1, 5, account="a")
+    assert threaded == ["_encode_one"], f"get_media_thumbnail decoded inline: {threaded}"
+
+    threaded.clear()
+    await inspection.inspect_message(1, 5, include_thumbnail=True, account="a")
+    assert threaded == ["_encode_one"], f"inspect_message decoded inline: {threaded}"
+
+
+# --- a failing cleanup must not replace the failure that matters --------------
+
+
+@pytest.mark.asyncio
+async def test_a_failing_close_does_not_replace_the_real_error():
+    """close() reads _sender, which only exists once the lazy _init has run."""
+    from telegram_mcp.tools.inspection import _stream_capped
+
+    class _BrokenIter:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise RuntimeError("dc")
+
+        async def close(self):
+            raise AttributeError("_sender")
+
+    class _Client:
+        def iter_download(self, target):
+            return _BrokenIter()
+
+    with pytest.raises(RuntimeError, match="dc"):
+        await _stream_capped(_Client(), object(), 4096)

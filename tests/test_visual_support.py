@@ -7,13 +7,14 @@ to end with images built in memory by Pillow.
 
 import importlib.util
 import io
+import subprocess
 import sys
 import tempfile
 
 import pytest
 from PIL import Image
 
-from telegram_mcp.visual import capture
+from telegram_mcp.visual import capture, frames, images
 from telegram_mcp.visual.frames import (
     FrameExtractionError,
     extract_frames,
@@ -37,6 +38,16 @@ def _animated_gif(frame_count=3):
     ]
     buffer = io.BytesIO()
     frames[0].save(buffer, format="GIF", save_all=True, append_images=frames[1:], duration=40)
+    return buffer.getvalue()
+
+
+def _animated_webp(frame_count=3):
+    """Animated WebP rather than GIF: .gif falls through to ffmpeg on error."""
+    frames_ = [
+        Image.new("RGB", (32, 32), color) for color in ("red", "green", "blue")[:frame_count]
+    ]
+    buffer = io.BytesIO()
+    frames_[0].save(buffer, format="WEBP", save_all=True, append_images=frames_[1:], duration=40)
     return buffer.getvalue()
 
 
@@ -204,6 +215,94 @@ def test_ffmpeg_available_reports_a_bool():
     assert isinstance(ffmpeg_available(), bool)
 
 
+# --- Regressions for sender-controlled bytes and metadata --------------------
+
+
+def test_safe_stderr_redacts_a_temp_path_containing_spaces():
+    """The old regex stopped at the first space, leaking the surname and the
+    temp filename into the model's context."""
+    path = r"C:\Users\John Smith\AppData\Local\Temp\tmpab12.webm"
+    stderr = f"{path}: Invalid data found when processing input".encode()
+
+    text = frames._safe_stderr(stderr, path)
+
+    assert "Smith" not in text
+    assert "tmpab12" not in text
+    assert "AppData" not in text
+    assert "<temp-file>" in text
+    # The diagnostic itself must survive; redaction must not swallow it.
+    assert "Invalid data found" in text
+
+
+def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_path):
+    """`result` after the loop is the furthest-past-EOF seek, i.e. the least
+    informative message; and its stderr still carries our temp path."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    monkeypatch.setattr(frames, "ffmpeg_available", lambda: True)
+    monkeypatch.setattr(frames, "probe_duration", lambda path: None)
+    messages = iter(
+        [
+            b"first: moov atom not found",
+            b"second: Output file is empty",
+            b"third: Output file is empty",
+            b"fourth: Output file is empty",
+        ]
+    )
+
+    def _fake_run(command, timeout):
+        # The temp path ffmpeg was handed is the one that must not reach the model.
+        spooled = command[command.index("-i") + 1]
+        return subprocess.CompletedProcess(
+            command, 1, stdout=b"", stderr=next(messages) + b" " + spooled.encode()
+        )
+
+    monkeypatch.setattr(frames, "_run", _fake_run)
+
+    with pytest.raises(FrameExtractionError) as raised:
+        extract_frames(b"not really a video", ".mp4", count=4)
+
+    message = str(raised.value)
+    assert "moov atom not found" in message
+    assert "Output file is empty" not in message
+    assert str(tmp_path) not in message
+
+
+@pytest.mark.parametrize("hostile", [".webm:ads", ".hta", "." + "a" * 300])
+def test_extract_frames_refuses_a_suffix_it_cannot_decode(monkeypatch, hostile):
+    """The suffix comes from the sender's mime_type/filename and becomes both a
+    real temp filename and the decoder selector."""
+    seen = {}
+
+    def _fake_ffmpeg(path, count):
+        seen["path"] = path
+        return [(b"\x89PNG", {"frame_index": 0})]
+
+    monkeypatch.setattr(frames, "_frames_with_ffmpeg", _fake_ffmpeg)
+
+    extract_frames(b"whatever", hostile, count=1)
+
+    assert seen["path"].endswith(".bin")
+    assert "ads" not in seen["path"]
+
+
+def test_open_image_bytes_refuses_an_oversized_image(monkeypatch):
+    """Pillow only warns below 2x its own limit, so ~178M pixels would decode
+    and allocate roughly 700 MB in a worker thread."""
+    monkeypatch.setattr(images, "MAX_DECODED_PIXELS", 100)
+    buffer = io.BytesIO()
+    Image.new("RGB", (32, 32), "red").save(buffer, format="PNG")
+
+    with pytest.raises(ImageError, match="refusing to decode"):
+        open_image_bytes(buffer.getvalue())
+
+
+def test_extract_frames_refuses_an_animation_with_too_many_frames(monkeypatch):
+    monkeypatch.setattr(frames, "MAX_ANIMATION_FRAMES", 2)
+
+    with pytest.raises(FrameExtractionError, match="refusing to decode"):
+        extract_frames(_animated_webp(3), ".webp", count=2)
+
+
 def test_capture_methods_are_stable():
     assert capture.CAPTURE_METHODS == ("window", "screen")
 
@@ -243,6 +342,249 @@ def test_looks_blank_separates_a_flat_capture_from_a_rendered_one():
 
     assert capture._looks_blank(blank) is True
     assert capture._looks_blank(rendered) is False
+
+
+def _telegram_window(**overrides):
+    fields = {
+        "hwnd": 1,
+        "title": "Telegram",
+        "class_name": "Qt5",
+        "rect": (0, 0, 100, 100),
+        "is_foreground": False,
+        "is_minimized": False,
+    }
+    fields.update(overrides)
+    return capture.WindowInfo(**fields)
+
+
+def test_capture_window_refuses_a_blank_minimized_window(monkeypatch):
+    """PrintWindow has no client surface for a minimized window, so the black
+    frame it returns was being handed back as a successful capture."""
+    monkeypatch.setattr(capture, "_require_windows", lambda: None)
+    monkeypatch.setattr(capture, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(
+        capture, "find_target_window", lambda **kwargs: _telegram_window(is_minimized=True)
+    )
+    monkeypatch.setattr(
+        capture,
+        "_capture_print_window",
+        lambda w, client_only: Image.new("RGB", (64, 64), "black"),
+    )
+
+    with pytest.raises(capture.CaptureError, match="minimized"):
+        capture.capture_window()
+
+
+def test_capture_window_still_falls_back_to_the_screen_when_not_minimized(monkeypatch):
+    """The minimized guard must not swallow the pre-existing blank fallback."""
+    monkeypatch.setattr(capture, "_require_windows", lambda: None)
+    monkeypatch.setattr(capture, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(capture, "find_target_window", lambda **kwargs: _telegram_window())
+    monkeypatch.setattr(
+        capture,
+        "_capture_print_window",
+        lambda w, client_only: Image.new("RGB", (64, 64), "black"),
+    )
+    rendered = Image.new("RGB", (64, 64), "black")
+    rendered.paste(Image.new("RGB", (32, 64), "white"), (0, 0))
+    monkeypatch.setattr(capture, "_capture_screen_region", lambda w, client_only: rendered)
+
+    image, _window, meta = capture.capture_window()
+
+    assert image is rendered
+    assert meta["method"] == "screen"
+    assert "fallback" in meta
+
+
+class _FakeUser32:
+    """Enough of user32 for the enumeration tests.
+
+    The real ``EnumWindows`` stops as soon as the callback fails to return TRUE,
+    and ctypes turns an exception escaping the callback into exactly that. Calling
+    the thunk from Python leaves the return slot uninitialised rather than zeroing
+    it, so this watches ``sys.unraisablehook`` for the swallowed exception instead
+    of trusting the integer that comes back.
+    """
+
+    def __init__(self, hwnds, rect_ok=None, boom=()):
+        self.hwnds = hwnds
+        self.rect_ok = rect_ok or (lambda hwnd: True)
+        self.boom = boom
+
+    def EnumWindows(self, callback, _lparam):
+        for hwnd in self.hwnds:
+            swallowed = []
+            previous_hook = sys.unraisablehook
+            sys.unraisablehook = swallowed.append
+            try:
+                proceed = callback(hwnd, 0)
+            finally:
+                sys.unraisablehook = previous_hook
+            if swallowed or proceed != 1:
+                break
+        return 1
+
+    def IsWindowVisible(self, hwnd):
+        return 1
+
+    def IsIconic(self, hwnd):
+        return 0
+
+    def GetForegroundWindow(self):
+        return 0
+
+    def GetWindowThreadProcessId(self, hwnd, _pid_ref):
+        return 1
+
+    def GetWindowTextLengthW(self, hwnd):
+        if hwnd in self.boom:
+            raise OSError("window vanished")
+        return 3
+
+    def GetWindowTextW(self, hwnd, buffer, _size):
+        buffer.value = "chat"
+        return 4
+
+    def GetClassNameW(self, hwnd, buffer, _size):
+        buffer.value = "Qt5"
+        return 3
+
+    def GetWindowRect(self, hwnd, rect_ref):
+        if not self.rect_ok(hwnd):
+            return 0
+        rect = rect_ref._obj
+        rect.left, rect.top, rect.right, rect.bottom = 0, 0, 100, 100
+        return 1
+
+    def GetDpiForWindow(self, hwnd):
+        return 96
+
+
+def _fake_enumeration(monkeypatch, user32):
+    monkeypatch.setattr(capture, "_win32", lambda: (user32, None, None))
+    monkeypatch.setattr(capture, "_require_windows", lambda: None)
+    monkeypatch.setattr(capture, "_ensure_dpi_awareness", lambda: None)
+    monkeypatch.setattr(capture, "_process_image_path", lambda pid: r"C:\T\Telegram.exe")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_list_windows_skips_a_window_whose_rectangle_could_not_be_read(monkeypatch):
+    """A window destroyed mid-enumeration leaves rect zero-filled, and reporting
+    it surfaces a real-looking window with width/height 0."""
+    _fake_enumeration(monkeypatch, _FakeUser32([1, 2], rect_ok=lambda hwnd: hwnd != 2))
+
+    windows = capture.list_windows()
+
+    assert [window.hwnd for window in windows] == [1]
+    assert all(window.width > 0 for window in windows)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_list_windows_is_not_truncated_by_one_failing_window(monkeypatch):
+    """ctypes converts an exception escaping the callback into a 0 return, and a
+    0 return stops EnumWindows — so one bad window hid every window after it."""
+    _fake_enumeration(monkeypatch, _FakeUser32([1, 2, 3], boom=(2,)))
+
+    windows = capture.list_windows()
+
+    assert [window.hwnd for window in windows] == [1, 3]
+
+
+class _FakeGdi32:
+    """A gdi32 whose SelectObject declines to select the capture bitmap."""
+
+    def CreateCompatibleDC(self, _dc):
+        return 101
+
+    def CreateCompatibleBitmap(self, _dc, _width, _height):
+        return 202
+
+    def SelectObject(self, _dc, _object):
+        return None
+
+    def DeleteObject(self, _object):
+        return 1
+
+    def DeleteDC(self, _dc):
+        return 1
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_capture_print_window_reports_a_refused_select_object(monkeypatch):
+    """A NULL SelectObject leaves the DC holding its 1x1 default bitmap, so the
+    blank capture that follows was being blamed on PrintWindow."""
+
+    class _StubUser32:
+        def GetWindowDC(self, _hwnd):
+            return 303
+
+        def PrintWindow(self, _hwnd, _dc, _flags):
+            return 0
+
+        def ReleaseDC(self, _hwnd, _dc):
+            return 1
+
+    monkeypatch.setattr(capture, "_win32", lambda: (_StubUser32(), _FakeGdi32(), None))
+
+    with pytest.raises(capture.CaptureError, match="SelectObject"):
+        capture._capture_print_window(_telegram_window(), client_only=False)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def test_capture_print_window_deselects_the_bitmap_before_reading_it(monkeypatch):
+    """GetDIBits on a bitmap still selected into a DC is forbidden by the API; it
+    happens to work here and elsewhere returns 0 or stale scanlines. The lone
+    deselect also proves the finally-block does not restore a second time."""
+    calls = []
+
+    class _RecordingGdi32:
+        def CreateCompatibleDC(self, _dc):
+            return 101
+
+        def CreateCompatibleBitmap(self, _dc, _width, _height):
+            return 202
+
+        def SelectObject(self, _dc, handle):
+            calls.append("select" if handle == 202 else "deselect")
+            return 909
+
+        def GetDIBits(self, *_args):
+            calls.append("getdibits")
+            return 1
+
+        def DeleteObject(self, _handle):
+            calls.append("delete-bitmap")
+            return 1
+
+        def DeleteDC(self, _dc):
+            return 1
+
+    class _RecordingUser32:
+        def GetWindowDC(self, _hwnd):
+            return 303
+
+        def PrintWindow(self, _hwnd, _dc, _flags):
+            calls.append("printwindow")
+            return 1
+
+        def ReleaseDC(self, _hwnd, _dc):
+            return 1
+
+    monkeypatch.setattr(capture, "_win32", lambda: (_RecordingUser32(), _RecordingGdi32(), None))
+
+    image = capture._capture_print_window(_telegram_window(), client_only=False)
+
+    assert image.size == (100, 100)
+    assert calls == ["select", "printwindow", "deselect", "getdibits", "delete-bitmap"]
+
+
+def test_looks_blank_is_exact_rather_than_a_downscaled_approximation():
+    """The old 32x32 probe averaged a lone bright pixel away, so an almost-flat
+    frame read as blank and was replaced by a screen grab of whatever overlapped."""
+    almost_flat = Image.new("RGB", (1024, 1024), "black")
+    almost_flat.putpixel((0, 0), (255, 255, 255))
+
+    assert capture._looks_blank(almost_flat) is False
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")

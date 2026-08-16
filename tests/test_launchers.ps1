@@ -115,11 +115,58 @@ finally {
     [IO.Directory]::Delete($wrapperTestDirectory, $true)
 }
 
-if ($installer -notmatch "SetEnvironmentVariable\('Path',\s*\$[^,]+,\s*'Machine'\)") {
-    throw 'Installer does not persist the project directory in Machine PATH.'
+# [Environment]::GetEnvironmentVariable expands %VAR% before returning, and
+# SetEnvironmentVariable writes that expansion back - which turns the machine
+# Path from REG_EXPAND_SZ into a literal string and freezes every reference to
+# whatever it meant at install time. The damage is machine-wide and invisible in
+# the value the installer prints, so it is asserted on the API names.
+if ($installer -match "\[Environment\]::SetEnvironmentVariable\([^)]*'Machine'") {
+    throw 'Installer still writes the machine environment through the expanding API.'
 }
-if ($installer -notmatch "SetEnvironmentVariable\('PATHEXT',\s*\$[^,]+,\s*'Machine'\)") {
-    throw 'Installer does not persist .PS1 command discovery in Machine PATHEXT.'
+if ($installer -match "\[Environment\]::GetEnvironmentVariable\([^)]*'Machine'") {
+    throw 'Installer still reads the machine environment through the expanding API.'
+}
+if ($installer -notmatch 'DoNotExpandEnvironmentNames') {
+    throw 'Installer does not read the machine environment without expanding %VAR% references.'
+}
+if ($installer -notmatch '(?s)New-ItemProperty.*?-PropertyType') {
+    throw 'Installer does not persist the machine environment with an explicit registry type.'
+}
+
+# The registry type must come from the key rather than a literal: Path is
+# REG_EXPAND_SZ and PATHEXT is REG_SZ, and writing the wrong one re-creates the
+# flattening bug from the other direction.
+if ($installer -notmatch '-PropertyType \$\w*Kind\b') {
+    throw 'Installer hardcodes the registry type instead of preserving the one it read.'
+}
+if ($installer -notmatch 'ExpandString') {
+    throw 'Installer has no ExpandString fallback for a missing machine Path value.'
+}
+
+# Behavioural: run the installer's pure append helper in isolation. Executing the
+# installer itself is not an option - it elevates at load time and rewrites the
+# machine environment.
+$functionMatch = [regex]::Match(
+    $installer,
+    '(?ms)^function Get-UpdatedEnvironmentValue \{.*?^\}'
+)
+if (-not $functionMatch.Success) {
+    throw 'Could not extract Get-UpdatedEnvironmentValue from the installer.'
+}
+. ([ScriptBlock]::Create($functionMatch.Value))
+
+$current = '%SystemRoot%\system32;C:\Tools'
+$updated = Get-UpdatedEnvironmentValue -Current $current -Entry 'C:\Repo'
+if ($updated -notmatch [regex]::Escape('%SystemRoot%\system32')) {
+    throw 'The PATH update expanded or dropped a %VAR% entry.'
+}
+if ($updated -ne "$current;C:\Repo") {
+    throw "The PATH update rewrote existing entries: $updated"
+}
+
+$unchanged = Get-UpdatedEnvironmentValue -Current $current -Entry 'c:\tools'
+if ($unchanged -ne $current) {
+    throw "An already-present entry was not left untouched: $unchanged"
 }
 
 $logsDirectory = Join-Path $projectRoot 'logs'

@@ -62,6 +62,22 @@ _UNSAFE_INVISIBLES = frozenset(
 _LINE_SEPARATORS = ("\r\n", "\r", "\n", "\t", "\v", "\f", "\x85", " ", " ")
 
 
+# Multi-line fields need the opposite of _LINE_SEPARATORS: keep the break, do not
+# flatten it to a space. CR, NEL, VT and FF are all Cc, so the fidelity pass would
+# DELETE them and glue the words on either side together ("line one\rline two" ->
+# "line onelinetwo"). Map them onto the one break character that pass keeps. CRLF
+# first, so it collapses to one break rather than two. U+2028/U+2029 are Zl/Zp and
+# survive the pass untouched, so they need no mapping.
+_BREAK_SEPARATORS = ("\r\n", "\r", "\x85", "\v", "\f")
+
+
+def _normalize_breaks(raw: Optional[str]) -> str:
+    text = raw or ""
+    for separator in _BREAK_SEPARATORS:
+        text = text.replace(separator, "\n")
+    return text
+
+
 def _is_unsafe_char(char: str) -> bool:
     if char in _UNSAFE_INVISIBLES:
         return True
@@ -254,7 +270,7 @@ def display_text_status(raw: Optional[str], max_length: int = 4096) -> tuple[str
     genuinely ends in an ellipsis is indistinguishable from a truncated one by
     looking at the result.
     """
-    filtered, _offsets = fidelity_text(raw)
+    filtered, _offsets = fidelity_text(_normalize_breaks(raw))
     return _bounded(filtered, max_length)
 
 
@@ -302,7 +318,17 @@ def describe_entities(msg) -> list[dict[str, Any]]:
         item: dict[str, Any] = {"type": _entity_kind(entity)}
 
         start = end = None
-        if offset is not None and length is not None and 0 <= offset < len(offset_map):
+        # length is validated as well as offset: a negative one makes offset+length
+        # negative, and offset_map[negative] indexes from the END of the list, so the
+        # result is a confident slice of the wrong text rather than a refusal. Falling
+        # through to the branch below keeps Telegram's raw numbers, which is what this
+        # function already promises for an offset it cannot use.
+        if (
+            offset is not None
+            and length is not None
+            and length >= 0
+            and 0 <= offset < len(offset_map)
+        ):
             start = offset_map[offset]
             end = offset_map[min(offset + length, len(offset_map) - 1)]
         if start is not None:
@@ -435,7 +461,7 @@ def describe_reply_quote(msg) -> Optional[dict[str, Any]]:
 
     # Both facts are computed, never inferred from the result: a quote that
     # genuinely ends in an ellipsis looks exactly like a truncated one.
-    filtered, _offsets = fidelity_text(quote_text)
+    filtered, _offsets = fidelity_text(_normalize_breaks(quote_text))
     filtered_out = filtered != quote_text
     text, truncated = _bounded(filtered, 4096)
     modified = filtered_out or truncated
@@ -447,7 +473,7 @@ def describe_reply_quote(msg) -> Optional[dict[str, Any]]:
         quote["truncated"] = truncated
         reasons = []
         if filtered_out:
-            reasons.append("unsafe invisible characters were removed")
+            reasons.append("unsafe invisible characters were removed or line breaks normalised")
         if truncated:
             reasons.append("the text was truncated to fit")
         quote["note"] = (
@@ -806,15 +832,19 @@ def deep_message_dict(
     sender = fidelity_sender_name(msg)
     if sender:
         data["sender"] = sender
-    if getattr(msg, "buttons", None):
-        # Always replace, never only-when-non-empty: buttons whose labels are
-        # made entirely of rejected characters clean to nothing, and leaving the
-        # key alone would hand back upstream's raw list instead.
-        buttons = describe_buttons(msg)
-        if buttons:
-            data["buttons"] = buttons
-        else:
-            data.pop("buttons", None)
+    # describe_buttons owns the only safe read of msg.buttons: it is a Telethon
+    # property that builds MessageButton objects and touches input_chat, and
+    # getattr's default only swallows AttributeError. Calling it unconditionally
+    # keeps one guarded read instead of two, and it already returns [] on failure.
+    #
+    # Always replace, never only-when-non-empty: buttons whose labels are made
+    # entirely of rejected characters clean to nothing, and leaving the key alone
+    # would hand back upstream's raw list instead.
+    buttons = describe_buttons(msg)
+    if buttons:
+        data["buttons"] = buttons
+    else:
+        data.pop("buttons", None)
     label = describe_media_label(msg)
     if label:
         data["media"] = label

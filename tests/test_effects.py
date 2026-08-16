@@ -177,6 +177,34 @@ async def test_not_modified_against_an_unknown_hash_refetches_from_scratch():
     assert catalog.effects
 
 
+@pytest.mark.asyncio
+async def test_a_doubled_not_modified_answer_does_not_cache_an_empty_catalogue():
+    """Caching the empty fall-through would serve "0 effects" as authoritative for an hour."""
+
+    class _AlwaysNotModified:
+        def __init__(self):
+            self.calls = []
+
+        async def __call__(self, request):
+            self.calls.append(request.hash)
+
+            class NotModified:
+                pass
+
+            return NotModified()
+
+    cl = _AlwaysNotModified()
+    with pytest.raises(RuntimeError, match="not modified"):
+        await load_catalog(cl)
+
+    assert cl.calls == [0, 0], "the hash=0 retry never happened"
+    assert effect_catalog.cached_catalog(None) is None, "an empty catalogue was cached as fresh"
+
+    with pytest.raises(RuntimeError):
+        await load_catalog(cl)
+    assert cl.calls == [0, 0, 0, 0], "the next call served the empty catalogue instead of asking"
+
+
 # --- the bounded effect transfer -------------------------------------------
 
 
@@ -454,3 +482,40 @@ def test_account_key_mirrors_get_client(monkeypatch):
     # One account: get_client ignores the argument, so the cache must too.
     assert effect_catalog.account_key(None) == "alpha"
     assert effect_catalog.account_key("ALPHA") == "alpha"
+
+
+# --- one home for the format sniff -----------------------------------------
+
+
+def test_gzip_bytes_win_over_the_advertised_format():
+    """The premium effect was advertised as one thing and arrived as another;
+    that is why the bytes decide, not the mime table."""
+    from telegram_mcp.effect_catalog import sniff_asset_format
+
+    gzip_bytes = bytes((0x1F, 0x8B, 0x08, 0x00))
+    assert sniff_asset_format(gzip_bytes, "video") == (".tgs", "lottie_tgs")
+    assert sniff_asset_format(gzip_bytes, "static_image") == (".tgs", "lottie_tgs")
+
+
+def test_a_non_gzip_asset_falls_back_to_its_advertised_format():
+    from telegram_mcp.effect_catalog import sniff_asset_format
+
+    assert sniff_asset_format(b"RIFF....WEBP", "static_image") == (".webp", "static_image")
+    assert sniff_asset_format(bytes((0x1A, 0x45, 0xDF, 0xA3)), "video") == (".webm", "video")
+    # Unknown means "treat it as the container ffmpeg can probe", not "guess Lottie".
+    assert sniff_asset_format(b"\x00\x01\x02\x03") == (".webm", "video")
+
+
+def test_both_tool_modules_share_one_sniff():
+    """Two copies existed, each guarded by only one suite, so one could regress green."""
+    import inspect as _inspect
+
+    from telegram_mcp.tools import effects as effects_module
+    from telegram_mcp.tools import inspection as inspection_module
+
+    for module in (effects_module, inspection_module):
+        source = _inspect.getsource(module)
+        assert "sniff_asset_format" in source, f"{module.__name__} does not use the shared sniff"
+        assert "x1f" not in source.lower().replace(
+            "sniff_asset_format", ""
+        ), f"{module.__name__} still carries its own gzip magic check"

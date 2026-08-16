@@ -4,6 +4,8 @@ Every message here is a stub: the module reads plain attributes off the Telethon
 object and never calls the API, so no client and no network are involved.
 """
 
+import re
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +17,7 @@ from telegram_mcp.message_view import (
     describe_custom_emoji,
     describe_entities,
     describe_media,
+    describe_media_label,
     describe_reactions,
     describe_topic,
     _fidelity_forward,
@@ -236,6 +239,13 @@ def test_topic_only_for_forum_replies():
             SimpleNamespace(username=None, id=1234567890, broadcast=True),
             "https://t.me/c/1234567890/55",
         ),
+        # A marked channel ID: abs() strips the sign and % 10**10 cuts the -100
+        # prefix. Without this case both operations are dead code — every other id
+        # here is positive and 10 digits, so abs(id) % 10**10 == id.
+        (
+            SimpleNamespace(username=None, id=-1001234567890, broadcast=True),
+            "https://t.me/c/1234567890/55",
+        ),
         (SimpleNamespace(username=None, id=42), None),
         (None, None),
     ],
@@ -343,6 +353,21 @@ def test_out_of_range_entity_offsets_are_passed_through_untouched():
     entity = describe_entities(message)[0]
     assert entity["offset"] == 99
     assert "text" not in entity
+
+
+@pytest.mark.parametrize("offset, length", [(0, -5), (2, -5), (0, -1)])
+def test_a_negative_entity_length_is_passed_through_not_sliced(offset, length):
+    """offset_map[negative] indexes from the end, so an unchecked negative length
+    produced a confident slice of text the entity never covered."""
+    msg = SimpleNamespace(
+        message="abcdefghij", entities=[_entity("Bold", offset=offset, length=length)]
+    )
+
+    item = describe_entities(msg)[0]
+
+    assert item["offset"] == offset
+    assert item["length"] == length
+    assert "text" not in item
 
 
 def test_deep_message_dict_exposes_fidelity_text_when_it_differs():
@@ -572,6 +597,33 @@ def test_media_title_and_performer_keep_unicode_but_filenames_stay_strict():
     assert "\u200c" not in info["file_name"]
 
 
+def test_a_document_label_sanitizes_its_filename_strictly():
+    """A filename can reach a filesystem, so it keeps sanitize_name \u2014 including the
+    ZWNJ that display_name deliberately preserves, and the bidi override an attacker
+    would use to disguise an extension."""
+    name = "cl\u200cip\u202e.mp4"
+    msg = SimpleNamespace(document=object(), file=SimpleNamespace(name=name))
+
+    assert describe_media_label(msg) == "document: clip.mp4"
+    # Guard the premise: display_name is the wrong helper here and keeps the ZWNJ.
+    assert "\u200c" in display_name(name), "display_name no longer keeps the ZWNJ"
+
+
+def test_a_sticker_label_keeps_the_alt_glyph_intact():
+    """The alt is read by a human, so it keeps display_name: sanitize_name would
+    break this family emoji into three separate people."""
+    sticker = SimpleNamespace(attributes=[SimpleNamespace(alt=FAMILY)])
+    msg = SimpleNamespace(sticker=sticker)
+
+    assert describe_media_label(msg) == f"sticker {FAMILY}"
+    # Guard the premise: this is exactly what the generic helper gets wrong.
+    assert sanitize_name(FAMILY) != FAMILY, "sanitize_name no longer breaks this"
+
+
+def test_a_message_with_no_media_has_no_label():
+    assert describe_media_label(SimpleNamespace()) is None
+
+
 def test_poll_question_keeps_unicode():
     poll = SimpleNamespace(poll=SimpleNamespace(question=SimpleNamespace(text=PERSIAN + HOSTILE)))
     msg = SimpleNamespace(media=object(), poll=poll, file=None, document=None)
@@ -696,6 +748,25 @@ def test_partly_hostile_buttons_keep_only_the_readable_ones():
     assert _deep(msg)["buttons"] == [PERSIAN]
 
 
+def test_a_buttons_property_that_raises_does_not_sink_the_whole_message():
+    """Message.buttons is a Telethon property that builds MessageButton objects and
+    touches input_chat; getattr's default only swallows AttributeError."""
+
+    class _Exploding(SimpleNamespace):
+        @property
+        def buttons(self):
+            raise TypeError("input_chat is unavailable for this message")
+
+    # buttons is a data descriptor on the class, so it must not be passed to
+    # __init__ \u2014 SimpleNamespace would try to assign through the property.
+    fields = {k: v for k, v in vars(_plain_message()).items() if k != "buttons"}
+
+    data = _deep(_Exploding(**fields))
+
+    assert data["id"] == 1
+    assert "buttons" not in data
+
+
 def test_reply_quote_declares_when_it_was_modified():
     hostile = PERSIAN + "\u202e"
     msg = _plain_message(
@@ -721,6 +792,40 @@ def test_reply_quote_claims_no_change_when_nothing_changed():
     assert "modified" not in quote
     assert quote["text"] == PERSIAN
     assert "unchanged from what Telegram reported" in quote["note"]
+
+
+@pytest.mark.parametrize(
+    "label, raw, expected",
+    [
+        ("bare cr", "line one\rline two", "line one\nline two"),
+        ("crlf", "line one\r\nline two", "line one\nline two"),
+        ("next line", "line one\x85line two", "line one\nline two"),
+        ("vertical tab", "line one\vline two", "line one\nline two"),
+        ("form feed", "line one\fline two", "line one\nline two"),
+    ],
+)
+def test_a_poll_question_keeps_the_break_instead_of_gluing_the_words(label, raw, expected):
+    """CR, NEL, VT and FF are Cc: deleting them would join the words either side."""
+    poll = SimpleNamespace(poll=SimpleNamespace(question=SimpleNamespace(text=raw)))
+    msg = SimpleNamespace(media=object(), poll=poll, file=None, document=None)
+
+    assert describe_media(msg)["poll_question"] == expected, label
+
+
+@pytest.mark.parametrize(
+    "label, raw, expected",
+    [
+        ("bare cr", "line one\rline two", "line one\nline two"),
+        ("crlf", "line one\r\nline two", "line one\nline two"),
+    ],
+)
+def test_a_reply_quote_keeps_the_break_instead_of_gluing_the_words(label, raw, expected):
+    msg = SimpleNamespace(reply_to=SimpleNamespace(quote_text=raw, quote_offset=0))
+
+    quote = describe_reply_quote(msg)
+
+    assert quote["text"] == expected, label
+    assert quote["modified"] is True, "the quote is no longer what Telegram reported"
 
 
 def test_a_valid_emoji_tag_sequence_survives():
@@ -1029,3 +1134,41 @@ def test_a_message_level_effect_is_reported_separately_from_the_sticker_one():
 
 def test_no_message_effect_key_without_one():
     assert "message_effect" not in _deep(_plain_message())
+
+
+# --- The merge contract in the feature doc -----------------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+# Spelled out because the document states the count in words, not digits.
+_FORK_IMPORT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+
+
+def test_the_merge_contract_matches_the_fork_imports():
+    """The merge policy block is what someone reads before `git merge upstream/main`.
+    A fork module missing from it reads as upstream code, so it is derived from the
+    imports rather than trusted: both the module list and the count come from
+    tools/__init__.py, never from a number written into this test."""
+    init = (REPO / "telegram_mcp" / "tools" / "__init__.py").read_text(encoding="utf-8")
+    _, marker, fork_block = init.partition("# Fork additions")
+    assert marker, "the fork import block lost its '# Fork additions' marker"
+
+    modules = re.findall(r"^from telegram_mcp\.tools\.(\w+) import \*", fork_block, re.M)
+    assert modules, "no fork tool imports found below the marker"
+
+    doc = (REPO / "docs" / "visual-structured-access.md").read_text(encoding="utf-8")
+    for name in modules:
+        assert f"telegram_mcp/tools/{name}.py" in doc, f"merge policy omits tools/{name}.py"
+
+    # The two fork modules that are not tool imports, so they cannot be derived above.
+    for path in ("telegram_mcp/message_view.py", "telegram_mcp/effect_catalog.py"):
+        assert path in doc, f"merge policy omits {path}"
+
+    word = _FORK_IMPORT_WORDS.get(len(modules))
+    assert word, f"extend _FORK_IMPORT_WORDS: the fork now has {len(modules)} imports"
+    assert (
+        f"({word} import lines)" in doc
+    ), f"the doc does not say '{word} import lines' for {len(modules)} fork imports"
+
+    # Prove the check bites: this is exactly how tools/effects.py went missing.
+    assert "telegram_mcp/tools/nonexistent.py" not in doc

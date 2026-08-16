@@ -69,4 +69,138 @@ finally {
     }
 }
 
+# A failed test run and a test run that never started used to be reported with
+# the same sentence, and both pushed. The consolation message was also false:
+# GitHub Actions is not gating this push.
+if ($updaterText -match [regex]::Escape('GitHub Actions will run the Linux CI suite')) {
+    throw 'The updater still claims GitHub Actions gates the push.'
+}
+
+# Dot-sourcing the updater is not an option: it starts its menu loop at load
+# time. Extract just the functions under test and run them against stubs, so no
+# real git fetch/merge/push can ever happen.
+$wanted = 'Start-PythonTests', 'Invoke-PythonTests', 'Invoke-FullUpdate'
+$definitions = foreach ($name in $wanted) {
+    $definitionMatch = [regex]::Match($updaterText, "(?ms)^function $name \{.*?^\}")
+    if (-not $definitionMatch.Success) {
+        throw "Could not extract $name from the updater."
+    }
+    $definitionMatch.Value
+}
+
+$fullUpdateHarness = {
+    param($Definitions)
+
+    foreach ($definition in $Definitions) {
+        . ([ScriptBlock]::Create($definition))
+    }
+
+    function Assert-CleanWorkingTree { }
+    function Fetch-Upstream { }
+    function Show-AvailableUpdates { }
+    function Merge-Upstream { }
+    function Invoke-LauncherTests { }
+    function Show-Actions { }
+    function Push-Origin { $script:pushed = $true }
+
+    try {
+        Invoke-FullUpdate
+    }
+    catch {
+        $script:failure = $_.Exception.Message
+    }
+}
+
+$originalPath = $env:PATH
+$originalPathExt = $env:PATHEXT
+$fixtures = Join-Path $PSScriptRoot 'fixtures'
+
+# Case 1: uv is missing, so the suite never ran. The push must not happen.
+$script:pushed = $false
+$script:failure = $null
+$emptyPathDirectory = Join-Path ([IO.Path]::GetTempPath()) ("telegram-mcp-nouv-" + [guid]::NewGuid())
+[void] (New-Item -ItemType Directory -Path $emptyPathDirectory)
+try {
+    $env:PATH = $emptyPathDirectory
+    & $fullUpdateHarness $definitions
+}
+finally {
+    $env:PATH = $originalPath
+    $env:PATHEXT = $originalPathExt
+    Remove-Item -LiteralPath $emptyPathDirectory -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($script:pushed) {
+    throw 'Invoke-FullUpdate pushed even though the Python tests never ran.'
+}
+if (-not $script:failure) {
+    throw 'Invoke-FullUpdate did not report that the Python tests could not be started.'
+}
+if ($script:failure -notmatch 'uv') {
+    throw "Invoke-FullUpdate did not name uv as the reason the tests could not start: $($script:failure)"
+}
+
+# Case 2: pytest actually ran and reported failures. That still pushes, loudly.
+$script:pushed = $false
+$script:failure = $null
+try {
+    $env:PATH = "$fixtures;$originalPath"
+    $env:PATHEXT = ".PS1;$originalPathExt"
+    $env:TELEGRAM_MCP_FAKE_PYTEST_EXIT = '1'
+    & $fullUpdateHarness $definitions
+}
+finally {
+    $env:PATH = $originalPath
+    $env:PATHEXT = $originalPathExt
+    Remove-Item -LiteralPath 'Env:\TELEGRAM_MCP_FAKE_PYTEST_EXIT' -ErrorAction SilentlyContinue
+}
+if ($script:failure) {
+    throw "Invoke-FullUpdate aborted on a completed but failing test run: $($script:failure)"
+}
+if (-not $script:pushed) {
+    throw 'Invoke-FullUpdate did not push after a completed but failing test run.'
+}
+
+# Case 3: menu option 6 must still fail loudly - the menu's own catch is what
+# turns a failing test run into a non-zero exit code.
+$menuOptionHarness = {
+    param($Definitions)
+
+    foreach ($definition in $Definitions) {
+        . ([ScriptBlock]::Create($definition))
+    }
+
+    try {
+        Invoke-PythonTests
+        $script:failure = $null
+    }
+    catch {
+        $script:failure = $_.Exception.Message
+    }
+}
+
+foreach ($case in @(
+    @{ Exit = '1'; ShouldThrow = $true },
+    @{ Exit = '0'; ShouldThrow = $false }
+)) {
+    $script:failure = $null
+    try {
+        $env:PATH = "$fixtures;$originalPath"
+        $env:PATHEXT = ".PS1;$originalPathExt"
+        $env:TELEGRAM_MCP_FAKE_PYTEST_EXIT = $case.Exit
+        & $menuOptionHarness $definitions
+    }
+    finally {
+        $env:PATH = $originalPath
+        $env:PATHEXT = $originalPathExt
+        Remove-Item -LiteralPath 'Env:\TELEGRAM_MCP_FAKE_PYTEST_EXIT' -ErrorAction SilentlyContinue
+    }
+
+    if ($case.ShouldThrow -and -not $script:failure) {
+        throw "Invoke-PythonTests stayed silent for pytest exit $($case.Exit); menu option 6 would report success."
+    }
+    if (-not $case.ShouldThrow -and $script:failure) {
+        throw "Invoke-PythonTests threw for a passing test run: $($script:failure)"
+    }
+}
+
 Write-Output 'Update menu checks passed.'

@@ -70,7 +70,7 @@ download is worth it.
 
 ### Previews (return text + image blocks)
 
-**`get_media_thumbnail(chat_id, message_id, thumb_index=-1, max_dimension=1568, account=None) -> list`**
+**`get_media_thumbnail(chat_id, message_id, thumb_index=-1, max_bytes=1048576, max_dimension=1568, account=None) -> list`**
 Downloads one server-side thumbnail and returns it as an image block. Cheapest way to see
 what a photo, video, document or sticker contains — the original file is never transferred,
 so a 200 MB video costs a few kilobytes. `thumb_index` picks a size from the `thumbnails`
@@ -84,17 +84,33 @@ does spill it to a temporary file that is deleted immediately after — and extr
 Pillow; video, video notes and WebM video stickers go through ffmpeg, which samples inside the
 clip because the first and last frames of a video are frequently black. Media larger than
 `max_bytes` (50 MB default) is refused rather than downloaded; `max_bytes` itself is clamped to
-200 MB because the whole file is held in memory. When Telegram does not advertise the size up
-front, the check runs after the transfer instead. Use `download_media` for anything bigger.
+200 MB because the whole file is held in memory. The transfer itself is bounded as well:
+`iter_download` streams the media and stops at the first chunk past the cap, so the advertised
+size stays a free early refusal — it can be absent or wrong, and then only the transfer limit is
+real. The one exception is a Telethon build without `iter_download`, which has no partial fetch:
+there the file is downloaded first and measured afterwards. Use `download_media` for anything
+bigger.
 `get_media_frames(-1001234567890, 5533, count=6)`
 
-**`get_custom_emoji(document_ids, count=1, max_dimension=1568, account=None) -> list`**
+**`get_custom_emoji(document_ids, count=1, max_bytes=5242880, max_dimension=1568, account=None) -> list`**
 Resolve custom/premium emoji IDs — the ones `inspect_message` reports under `custom_emoji` — into
 metadata plus a preview image each. Static emoji return the document itself; animated WebM emoji
-return `count` extracted frames; `.tgs` Lottie emoji are not rasterised and return Telegram's
-static thumbnail instead, with `get_telegram_frames` named as the way to see them actually
-animate. Accepts one ID or a list.
+return `count` extracted frames; `.tgs` Lottie emoji are rendered into real frames when the
+optional renderer is installed (`pip install 'telegram-mcp[lottie]'`, reported as
+`preview_source: "rlottie"`), and fall back to Telegram's static thumbnail without it
+(`preview_source: "thumbnail"`), with `get_telegram_frames` named as the way to see the animation
+as Telegram Desktop plays it. Accepts one ID or a list.
 `get_custom_emoji(5350305806051571134)`
+
+**`get_message_effect(effect_id, asset="metadata", count=3, max_bytes=5242880, max_dimension=512, account=None) -> list`**
+Turn the `effect_id` that `inspect_message` reports under `message_effect` into the real assets.
+`asset` picks a rung on a cost ladder: `metadata` (default) downloads nothing and returns the
+emoticon, the Premium requirement and every asset's id/format/size, then `icon`, `sticker` and
+`animation` each fetch one. Telegram only resolves effects in bulk, so the whole catalogue is
+fetched once and cached per account. Frames are the effect on its own and are marked
+`"composite_fidelity": "asset-only"` — see [Message-level effects](#message-level-effects) for
+the refresh cadence, the fallback rules and the full cost ladder.
+`get_message_effect(5104841245755180586, asset="icon")`
 
 ### Visual (Windows only)
 
@@ -325,6 +341,61 @@ described above, and the response says which route it took under `animation_sour
 marked `"composite_fidelity": "asset-only"`: a message can play a message effect and a premium
 sticker effect at once, so only `get_telegram_frames`, captured while it plays, shows the composite.
 
+## Glass buttons: reading one, and pressing one
+
+`inspect_buttons(chat_id, message_id)` lists a message's inline keyboard; `click_button(chat_id,
+message_id, button_index, expect_text=None)` presses one. Everything about the pair follows from
+two facts about the data.
+
+**A label is written by the sender.** It is also the thing an agent reads to decide which button
+to press, which makes it a security surface rather than a display string: a bidi override can
+make a label read as a different button entirely. Every label goes through `display_name` —
+hidden and direction-overriding characters removed, emoji and Persian ZWNJ preserved — and a
+button whose raw text differed from the cleaned one is flagged `text_altered`. That flag is
+worth treating as a reason not to press.
+
+**An index is a position, not an identity.** Pressing by label would mean selecting by the
+attacker-controlled string, so `click_button` takes the index `inspect_buttons` published. But a
+bot can edit its own keyboard between the two calls, and the index would still resolve —
+silently, to a different button. `expect_text` closes that: supply the label you saw and a
+mismatch becomes a refusal instead of a press.
+
+Not every button can be pressed, and the tool says which rather than pretending:
+
+| `kind` | Pressable | What it is |
+|---|---|---|
+| `callback` | yes | The only kind that answers a callback. |
+| `url`, `url_auth` | no | Opens a link; the URL is reported, never followed. |
+| `webview` | no | A Mini App. There is no callback to answer — capture it with `get_telegram_frames`. |
+| `copy`, `buy`, `game`, `switch_inline`, `user_profile`, `request_*` | no | Actions Telegram performs in the client. |
+| `plain` | no | A reply-keyboard button: it sends its own text as a message. |
+
+A callback Telegram gates behind the account's 2FA password is refused too — this server does not
+supply that password.
+
+**Reply keyboards are not glass keyboards.** Both arrive in `reply_markup.rows`, which is a trap:
+the first version of this module listed a reply keyboard's buttons as glass ones while its own
+docstring said it did not. The kind now comes from the markup class and is reported as
+`keyboard_type` / `is_glass`; `click_button` refuses a reply keyboard and points at `send_message`,
+because tapping one of those sends its text rather than answering anything.
+
+### Premium emoji on a button
+
+Two different things, and only one of them resolves:
+
+* **Inside the label text — not resolvable.** No `KeyboardButton*` type carries an `entities`
+  field, so a custom emoji in a label arrives as its fallback glyph with no `document_id`. That is
+  a property of the schema, not a gap in this tool. `get_telegram_frames` is the only way to see it
+  rendered.
+* **The button's own icon — resolvable.** Every button type carries `style`, whose `icon` is
+  serialised as a 64-bit integer, the shape Telegram uses for document IDs rather than for a fixed
+  icon set. It is reported as `icon_document_id`, and `get_custom_emoji` resolves it. The response
+  says so in `icon_note`, including that an id which resolves to nothing was not a custom emoji
+  after all — the interpretation is read off the wire format and has not been confirmed against a
+  live styled button.
+
+`style` also reports the background as `primary`, `danger` or `success` when the sender set one.
+
 ## Screenshots are never attributed to a message
 
 `inspect_message(include_screen=True)` captures the Telegram Desktop window as it looks right
@@ -349,10 +420,11 @@ have checked the title yourself.
   thumbnail (`preview_source: "thumbnail"`), and the error names `get_telegram_frames` as the
   way to see the animation as Telegram Desktop plays it.
 * A **minimized window cannot be screen-captured**. Use `method="window"`.
-* In **multi-account mode**, `inspect_message`, `get_media_thumbnail` and `get_media_frames`
-  require an explicit `account`. The server's read-only fan-out concatenates each account's
-  result as text, which would stringify the image blocks and lose them, so these three refuse
-  the fan-out with a message naming the configured accounts instead. `inspect_messages` and
+* In **multi-account mode**, `inspect_message`, `get_media_thumbnail`, `get_media_frames`,
+  `get_custom_emoji` and `get_message_effect` require an explicit `account`. The server's
+  read-only fan-out concatenates each account's result as text, which would stringify the image
+  blocks and lose them, so every tool that returns image blocks refuses the fan-out with a
+  message naming the configured accounts instead. `inspect_messages` and
   `get_media_details` return text only and fan out normally. The capture tools never touch
   Telegram, so `account` does not apply to them at all.
 * **`native_resolution=True` opts out of the size cap** on the three capture tools when you
@@ -385,11 +457,14 @@ This feature is deliberately additive. Every module it introduces is a **new fil
 ```
 telegram_mcp/visual/__init__.py, capture.py, images.py, frames.py
 telegram_mcp/message_view.py
+telegram_mcp/button_view.py
+telegram_mcp/effect_catalog.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
+telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
 docs/visual-structured-access.md
 ```
 
-The only upstream files touched are `telegram_mcp/tools/__init__.py` (two import lines),
+The only upstream files touched are `telegram_mcp/tools/__init__.py` (four import lines),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py`
 layers on top of the upstream `message_to_dict` instead of replacing it, so upstream
 improvements keep flowing through.

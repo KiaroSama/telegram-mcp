@@ -27,8 +27,22 @@ FFPROBE_TIMEOUT_SECONDS = 15
 FFMPEG_FRAME_TIMEOUT_SECONDS = 30
 MAX_FRAMES = 10
 
+# n_frames is a header value (declared outright for APNG/WebP). The sample set
+# always includes total - 1, and ImageSequence.Iterator decodes every frame in
+# between before the loop can break, so an animation declaring a huge count pins
+# a worker thread with no timeout — unlike the ffmpeg path, which _run bounds.
+MAX_ANIMATION_FRAMES = 3000
+
 PILLOW_ANIMATED_SUFFIXES = {".gif", ".webp", ".png", ".apng"}
 FFMPEG_SUFFIXES = {".webm", ".mp4", ".mov", ".mkv", ".avi", ".m4v", ".gif"}
+
+# The suffix arrives from Telethon's File.ext, i.e. from the sender's mime_type or
+# filename. It is concatenated into a real temp filename AND selects the decoder
+# below, so anything outside the decodable set is replaced rather than trusted:
+# ".webm:ads" would create an NTFS alternate data stream whose base file os.unlink
+# then leaves behind, and a registry-derived ".hta" would put a shell-interpreted
+# file in %TEMP% for the duration of the call.
+DECODABLE_SUFFIXES = PILLOW_ANIMATED_SUFFIXES | FFMPEG_SUFFIXES | {".tgs"}
 
 
 class FrameExtractionError(RuntimeError):
@@ -46,9 +60,16 @@ def ffmpeg_available() -> bool:
 _ABSOLUTE_PATH_RE = re.compile(r"(?:[A-Za-z]:[\\/]|/)[^\s\"']+")
 
 
-def _safe_stderr(stderr: Optional[bytes], limit: int = 300) -> str:
+def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> str:
     """ffmpeg's message with filesystem paths redacted and length bounded."""
     text = (stderr or b"").decode("utf-8", errors="replace").strip()
+    # The regex below stops at the first whitespace, so on a Windows profile like
+    # "C:\Users\John Smith\..." it redacts only "C:\Users\John" and leaks the
+    # surname, the temp layout and the temp filename into the model's context.
+    # We know the exact path we passed to ffmpeg, so remove that literally first.
+    if path:
+        text = text.replace(path, "<temp-file>")
+    text = text.replace(tempfile.gettempdir(), "<temp-dir>")
     text = _ABSOLUTE_PATH_RE.sub("<temp-file>", text)
     return text if len(text) <= limit else text[:limit] + "…"
 
@@ -114,6 +135,11 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
 
     with source:
         total = getattr(source, "n_frames", 1)
+        if total > MAX_ANIMATION_FRAMES:
+            raise FrameExtractionError(
+                f"Animation declares {total} frames, above the {MAX_ANIMATION_FRAMES} limit; "
+                "refusing to decode it. Use get_media_thumbnail for a static preview."
+            )
         if total <= 1:
             raise FrameExtractionError("File is not animated; a single frame is all there is.")
         wanted = min(count, total)
@@ -209,9 +235,13 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
         # Sample inside the clip: the very first and last frames are often black.
         timestamps = [round(duration * (i + 0.5) / count, 3) for i in range(count)]
     else:
-        timestamps = [round(i * 0.5, 3) for i in range(count)]
+        # Without ffprobe the duration is unknown. A 0.5s ladder assumes the clip
+        # is at least count/2 seconds long, so every seek past EOF is dropped and
+        # a 0.4s video note yields only the t=0 frame.
+        timestamps = [round(i * 0.1, 3) for i in range(count)]
 
     frames: list[tuple[bytes, dict[str, Any]]] = []
+    first_error: Optional[bytes] = None
     for index, timestamp in enumerate(timestamps):
         result = _run(
             [
@@ -234,6 +264,10 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
             timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
         )
         if result.returncode != 0 or not result.stdout:
+            # The last iteration is the furthest-past-EOF seek and therefore the
+            # least informative; keep the diagnostic from the first real attempt.
+            if first_error is None:
+                first_error = result.stderr
             continue
         frames.append(
             (
@@ -250,7 +284,8 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
 
     if not frames:
         raise FrameExtractionError(
-            f"ffmpeg produced no frames for this media. {_safe_stderr(result.stderr)}".strip()
+            f"ffmpeg produced no frames for this media. "
+            f"{_safe_stderr(first_error, path)}".strip()
         )
     return frames
 
@@ -268,6 +303,8 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
     """
     count = max(1, min(int(count), MAX_FRAMES))
     suffix = (suffix or "").lower()
+    if suffix not in DECODABLE_SUFFIXES:
+        suffix = ".bin"
 
     if suffix == ".tgs" and not lottie_available():
         raise FrameExtractionError(
@@ -277,7 +314,7 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
             "sticker as Telegram Desktop actually plays it."
         )
 
-    with tempfile.NamedTemporaryFile(suffix=suffix or ".bin", delete=False) as handle:
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
         handle.write(data)
         path = handle.name
     try:
