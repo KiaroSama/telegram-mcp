@@ -48,16 +48,22 @@ through Telethon's high-level methods, so a `0` does not always mean untouched.
 
 ## Named features: reachable today
 
-Probed by looking for the TL verbs that implement each one.
+First probed by searching for the TL verbs that implement each one, then **verified
+per feature** — because that probe is wrong in both directions. A substring match
+over-reports (`WebView` matches the button-*description* code; `Search` matches
+`contacts.SearchRequest`), and counting only raw `functions.*` calls under-reports,
+because Telethon's high-level methods reach TL without ever naming it. Every row
+below was confirmed against a real tool or call site.
 
-- Dialog folders / chat lists
-- Drafts
-- Forum topics (create / list / edit)
-- Message search, global and filtered
-- Read receipts and view counts
-- Reading who reacted
-- Sending a reaction
-- Web App / Mini App launch
+| Feature | How it is reached |
+|---|---|
+| Dialog folders / chat lists | `messages.GetDialogFilters`, `UpdateDialogFilter` |
+| Drafts | `messages.SaveDraft`, `GetAllDrafts` |
+| Forum topics (create / list / edit) | `channels.CreateForumTopic`, `GetForumTopics` |
+| Message search, in-chat and global | `search_messages` / `search_global`, through Telethon's `get_messages(search=…)` — no raw call, which is exactly why a raw-only count misses it |
+| Read receipts — *who* read a message | `get_message_read_by` → `messages.GetMessageReadParticipants` |
+| Reading who reacted | `messages.GetMessageReactionsList` |
+| Sending a reaction | `messages.SendReaction` |
 
 Plus everything this fork added: deep structured message access, entity offsets,
 custom-emoji and effect resolution, glass-button inspection and pressing, Telegram
@@ -65,7 +71,10 @@ Desktop capture, the scheduled queue, and self-destructing media.
 
 ## Named features NOT reachable
 
-Twenty-one, ranked by what they are worth to an agent rather than by TL size.
+Twenty-three, ranked by what they are worth to an agent rather than by TL size. Two
+of them — Mini App launch and message view counts — were mis-reported as reachable
+by the first probe and belong here, which is why every row in the table above was
+verified individually.
 
 ### Worth building
 
@@ -81,8 +90,11 @@ Twenty-one, ranked by what they are worth to an agent rather than by TL size.
 
 ### Lower value, build on demand
 
-Pinned-dialog ordering, channel statistics, business hours and greetings, fact-check,
-todo lists, history import/export, message-level bot inline queries.
+Pinned-dialog ordering, channel statistics, fact-check, todo lists, history
+import/export, message-level bot inline queries, message **view counts**
+(`messages.GetMessagesViews`, distinct from the read receipts that already work),
+and **Mini App launch** (`messages.RequestWebView` — `inspect_buttons` describes such
+a button and says plainly that no callback can press it, but nothing launches one).
 
 ### Deliberately not building
 
@@ -94,6 +106,98 @@ todo lists, history import/export, message-level bot inline queries.
 | Login / QR / auth flow | Session creation already belongs to the operator's setup, and putting it behind a tool widens what a compromised agent can do. |
 | Group and video calls | Needs WebRTC and a media stack, not just TL. Out of proportion to any agent benefit. |
 | Secret chats | Telethon has no E2E implementation; see `.ai/DECISIONS.md`. |
+
+## Planned work
+
+Requested explicitly, in the order that keeps each step verifiable. Counts come
+from the same measurement as the tables above.
+
+### Phase 0 — detach, then fix at source
+
+Prerequisite for the rest, because three of the four items below want changes in
+upstream files. Stop treating them as untouchable, keep upstream as a reference
+remote, and review its changes by hand.
+
+1. `get_media_label`: check `gif` before `video`, and delete the correction layered
+   over it in `message_view.py`.
+2. `sanitize_name`: stop destroying ZWNJ, ZWJ and emoji tag sequences. Much of
+   `text_fidelity` exists only to work around this and can then shrink.
+3. The seven POSIX-only test failures: gate them on platform instead of leaving the
+   suite permanently red on Windows.
+4. Split `tools/messages.py` (2041 lines) and `runtime.py` (1812 lines).
+
+### Phase 1 — full channel and group settings
+
+**45 of 59 `channels.*` requests are unreached.** What exists today is title, photo,
+admin rights, bans, slow mode, forum toggle, invite, join/leave and the admin log.
+The settings an operator actually reaches for are all missing:
+
+| Group | Requests |
+|---|---|
+| Usernames | `UpdateUsername`, `CheckUsername`, `ToggleUsername`, `ReorderUsernames`, `DeactivateAllUsernames` |
+| Join gates | `ToggleJoinToSend`, `ToggleJoinRequest` |
+| Visibility | `TogglePreHistoryHidden`, `ToggleParticipantsHidden`, `ToggleSignatures`, `ToggleViewForumAsMessages` |
+| Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
+| Moderation | `ToggleAntiSpam`, `ReportAntiSpamFalsePositive`, `SetBoostsToUnblockRestrictions` |
+| Appearance | `UpdateColor`, `UpdateEmojiStatus`, `SetStickers`, `SetEmojiStickers` |
+| Structural | `ConvertToGigagroup`, `EditLocation`, `DeleteChannel`, `UpdatePaidMessagesPrice`, `ToggleAutotranslation` |
+
+Self-contained, no new dependency, and every one is a single request. `DeleteChannel`
+and `ConvertToGigagroup` are irreversible and must be annotated `destructiveHint`
+and require explicit confirmation in their own docstrings.
+
+### Phase 2 — files and chat transfer, made usable
+
+`download_media` and `upload_file` already exist but are **disabled until allowed
+roots are configured** — which is why saving a disappearing message needed its own
+path. The work is not new TL, it is making the existing gate usable:
+
+1. A tool that reports the current roots status and says exactly what to configure,
+   so an agent hitting the gate can explain the fix instead of failing.
+2. Bulk chat export: iterate a chat's history and write messages plus media to a
+   directory under the roots. No TL beyond what is already used.
+3. History **import** is genuinely absent — `messages.InitHistoryImport`,
+   `StartHistoryImport`, `CheckHistoryImportPeer` — for pulling an exported archive
+   from another app into Telegram.
+
+### Phase 3 — Telegram Business
+
+**11 unreached requests, all in `account`**, and a clean self-contained group:
+
+`UpdateBusinessWorkHours`, `UpdateBusinessAwayMessage`, `UpdateBusinessGreetingMessage`,
+`UpdateBusinessIntro`, `UpdateBusinessLocation`, plus business chat links
+(`Create/Edit/Delete/Get/ResolveBusinessChatLink`) and `GetBotBusinessConnection`.
+
+Expect a subscription gate exactly like `schedule_repeat_period`: the value is
+accepted and the account is refused. Whatever that error turns out to be, report it
+as a plain sentence rather than a raw RPC name — and **measure the gate rather than
+assuming it**, the way the repeat periods were measured.
+
+### Phase 4 — secret chats, if still wanted
+
+Kept in the plan at your request. The position has not changed, and one new fact
+makes it sharper: the only third-party layer for Telethon,
+`telethon-secret-chat`, last released **2020-11-29** — roughly six years and many TL
+layers behind the 227 this project runs on. An unmaintained crypto plugin is worse
+than none, because it looks like a solution.
+
+So there is no "add a library and expose a tool" route. The two honest options:
+
+- **Audit and update that library** against layer 227 — read it fully, fix the
+  message-layer wrapping, and re-verify the DH exchange, key fingerprints, sequence
+  numbering and rekeying.
+- **Implement the E2E layer here**, with the same work plus ownership of it.
+
+Either way this is its own project with its own review, not a phase of this one, and
+it needs three things decided first: where per-device keys live (not the shared
+session file), what happens when a key is lost, and who reviews the crypto. Until
+those exist, `start_secret_chat` would be a tool that promises encryption this
+codebase cannot vouch for.
+
+### Not in the plan
+
+Unchanged from the table above: payments and Stars, password and two-step settings,
+terminating sessions, the login flow, and group/video calls.
 
 ## What this implies for detaching from upstream
 
