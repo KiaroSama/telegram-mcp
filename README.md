@@ -624,15 +624,30 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 This fork adds tools that let an agent see Telegram the way a person does — the full Telegram
 API view of a message (entities, custom emoji, reactions, media metadata) and the real Telegram
-Desktop rendering as an image. All of them are read-only except `click_button`, which sends a
-real callback and is the one addition with an effect.
+Desktop rendering as an image — plus control over the two kinds of message that are not simply
+"sent now": the scheduled queue, and media that destroys itself. Everything in the first three
+rows below is read-only; the Actions row is not, and each entry there has a real effect.
 
 | | Tools |
 |---|---|
-| Structured | `inspect_message`, `inspect_messages`, `get_media_details`, `inspect_buttons` |
-| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect` |
+| Structured | `inspect_message`, `inspect_messages`, `get_media_details`, `inspect_buttons`, `list_scheduled_messages`, `list_disappearing_media` |
+| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect`, `save_disappearing_media` |
 | Visual (Windows) | `list_telegram_windows`, `get_telegram_screen`, `get_telegram_region`, `get_telegram_frames` |
-| Actions | `click_button` |
+| Actions | `click_button`, `schedule_message`, `edit_scheduled_message`, `cancel_scheduled_message`, `send_disappearing_media` |
+
+The scheduled queue is a separate history with its own message IDs, so upstream's
+`send_scheduled_message` could queue something an agent then had no way to see, correct or stop.
+`schedule_message` adds Telegram's recurring period — `repeat="daily"` or `"weekly"`, which the
+server accepts only from a Premium account — and the other three read, edit and cancel the queue.
+
+`list_disappearing_media` finds media the sender set to self-destruct, and finds it *before* it is
+opened: a read starts the countdown and Telegram then drops the file, after which nothing can
+fetch it. `save_disappearing_media` returns the picture or video frames through MCP rather than to
+disk, because the file-path route is gated behind configured allowed roots and a view-once message
+cannot wait for that. Saving one keeps a copy the sender did not agree to leave behind — the
+protocol permits it because the bytes already arrived, which is not the same as consent, so every
+result says so. `send_disappearing_media` sends with a timer (`seconds=0` means view-once) through
+that same roots gate.
 
 `inspect_buttons` and `click_button` cover the inline ("glass") keyboard. The pairing matters:
 a button label is written by whoever sent the message and can carry a bidi override that makes

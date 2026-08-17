@@ -123,6 +123,57 @@ fetched once and cached per account. Frames are the effect on its own and are ma
 the refresh cadence, the fallback rules and the full cost ladder.
 `get_message_effect(5104841245755180586, asset="icon")`
 
+### Timed messages
+
+**`list_scheduled_messages(chat_id, account=None) -> str`**
+The chat's scheduled queue — a separate history whose messages never appear in `get_messages` and
+carry their own IDs. Each entry reports when it fires and, when Telegram's recurring feature is in
+use, the period as a name (`daily` / `weekly`) beside its raw seconds.
+`list_scheduled_messages("me")`
+
+**`schedule_message(chat_id, message, when, repeat=None, account=None) -> str`**
+Queue a message for later, optionally repeating. `when` is an ISO-8601 string or a Unix timestamp;
+a naive datetime is read as UTC, and a past time is refused before any request goes out. `repeat`
+is `"daily"`, `"weekly"`, or omitted. The two periods are the only ones Telegram accepts, and it
+requires Premium of the sender — a non-Premium account gets that stated rather than a raw RPC
+error. Returns the scheduled ID so the message can be listed, edited or cancelled.
+`schedule_message("me", "standup", "2026-09-01T08:00:00Z", repeat="daily")`
+
+**`edit_scheduled_message(chat_id, message_id, message=None, when=None, repeat=None, account=None) -> str`**
+Change the text, the time, or the repeat of something already queued. Editing resends
+`schedule_date`, so omitting `when` reads the current time back from the queue rather than silently
+rescheduling to now; omitting `message` keeps the current text. `repeat="off"` stops a recurrence.
+`edit_scheduled_message("me", 12, when="2026-09-02T08:00:00Z")`
+
+**`cancel_scheduled_message(chat_id, message_id, account=None) -> str`**
+Remove it from the queue so it never sends. Nothing already delivered is touched.
+`cancel_scheduled_message("me", 12)`
+
+### Self-destructing media
+
+**`list_disappearing_media(chat_id, limit=50, account=None) -> str`**
+Find the media in a chat that carries `ttl_seconds`, before it is opened — a read starts the
+countdown and Telegram then drops the file server-side, so finding them is a separate step from
+fetching them. `view_once: true` means destroyed after a single view rather than after a timer.
+Already-viewed media cannot be listed, because it no longer exists to list.
+`list_disappearing_media(5899781975)`
+
+**`save_disappearing_media(chat_id, message_id, count=4, max_bytes=20971520, max_dimension=1568, account=None) -> list`**
+Fetch one before it expires and return it here: the picture for a photo, evenly spaced frames for
+a video, as MCP image blocks rather than a file on disk. That is deliberate — the file-path route
+is gated behind configured allowed roots and a view-once message cannot wait for configuration.
+Voice and audio cannot be an image block, so they report that limit and point at `download_media`.
+Saving what a sender set to disappear keeps a copy they did not agree to leave behind; the protocol
+permits it because the bytes already arrived at this account, which is not consent, and every
+result says so.
+`save_disappearing_media(5899781975, 327)`
+
+**`send_disappearing_media(chat_id, file_path, seconds=0, caption=None, as_voice=False, as_video_note=False, account=None) -> str`**
+Send a photo, video or voice that destroys itself. `seconds=0` is Telegram's view-once sentinel,
+not "no timer". `file_path` resolves under the same allowed roots as upstream's `upload_file`, so
+this widens no filesystem surface. A caption is not covered by the timer and stays in the chat.
+`send_disappearing_media("me", "photo.jpg", 30)`
+
 ### Visual (Windows only)
 
 **`list_telegram_windows(process_name=None) -> str`**
