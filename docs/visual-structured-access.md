@@ -92,6 +92,14 @@ requires (`telethon>=1.44.0`), so the download-then-measure fallback that used t
 been removed rather than kept as untestable dead code. Use `download_media` for anything bigger.
 `get_media_frames(-1001234567890, 5533, count=6)`
 
+A `.tgs` frame that renders fully transparent carries **`blank: true`** and a note saying so. That
+is normally the animation's own content rather than a failed render: measured on Telegram's own 🔥
+message effect (181 frames), frame 0 has zero visible pixels and frame 180 has eight, while the
+middle frames have 19–45% — an effect begins and ends on an empty canvas, so an evenly spaced
+ladder lands on blank frames at both ends. Without the flag a caller sees one blank image beside
+full ones and concludes the renderer broke. It is a different condition from an unparseable `.tgs`,
+which is refused outright because rlottie reports zero frames and *every* frame would be blank.
+
 **`get_custom_emoji(document_ids, count=1, max_bytes=5242880, max_dimension=1568, account=None) -> list`**
 Resolve custom/premium emoji IDs — the ones `inspect_message` reports under `custom_emoji` — into
 metadata plus a preview image each. A batch resolves its documents concurrently, so the peak held
