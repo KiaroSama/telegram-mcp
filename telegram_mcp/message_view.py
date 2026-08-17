@@ -13,13 +13,9 @@ Layering rather than reimplementing keeps upstream improvements to
 
 from __future__ import annotations
 
-import re
-import unicodedata
-
-import regex
 from typing import Any, Optional
 
-from sanitize import sanitize_name, sanitize_user_content
+from sanitize import sanitize_name
 
 # The string rules live next door so they can be tested without a message; they
 # are re-exported here because every existing caller imports them from this
@@ -50,10 +46,6 @@ _DOWNLOADABLE_KINDS = {
 }
 
 
-# Invisible characters that are removed even from the fidelity text, because they
-# carry no linguistic meaning and are the standard tools for spoofing and for
-# breaking up keywords: the bidi overrides/isolates that let text render in an
-# order it is not written in, plus zero-width padding.
 def _entity_kind(entity: Any) -> str:
     """``MessageEntityBoldItalic`` -> ``bold_italic``."""
     name = type(entity).__name__

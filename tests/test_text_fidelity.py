@@ -7,9 +7,8 @@ object. The Telegram-shaped tests stayed behind.
 
 import pytest
 
-FAMILY = "👨‍👩‍👧"  # one emoji, held by ZWJ
-PERSIAN = "\u0645\u06cc\u200c\u06a9\u0646\u062f"  # mi-konad, needs its ZWNJ
-
+from helpers_unicode import FAMILY, FLAG, PERSIAN
+from sanitize import sanitize_name
 from telegram_mcp.text_fidelity import (
     _bounded,
     _is_valid_tag_sequence,
@@ -234,3 +233,182 @@ def test_segmentation_uses_the_unicode_algorithm():
     assert _sequence_starts(DEVANAGARI) == [0]
     # The one documented addition on top of UAX #29.
     assert _sequence_starts(ZWNJ_PAIR) == [0], "the ZWNJ bond was split"
+
+
+# --- The public surface: fidelity_text and display_name ----------------------
+#
+# These moved from test_message_view.py, which reached the same two functions
+# through message_view's re-export.
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
+        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        ("rlm bidi mark", "abc\u200f\u062f\u0065f"),
+        ("lrm bidi mark", "abc\u200e def"),
+        ("repeated newlines", "a\n\n\n\nb"),
+        ("tabs", "a\tb"),
+    ],
+)
+def test_fidelity_text_preserves_legitimate_unicode(label, text):
+    """The generic sanitizer strips these; doing so corrupts real messages."""
+    clean, _offsets = fidelity_text(text)
+    assert clean == text, label
+
+
+@pytest.mark.parametrize(
+    "label, text, expected",
+    [
+        ("zero width space", "a\u200bb", "ab"),
+        ("word joiner", "a\u2060b", "ab"),
+        ("bom", "a\ufeffb", "ab"),
+        ("rlo override", "a\u202eb", "ab"),
+        ("lri isolate", "a\u2066b", "ab"),
+        ("null control", "a\x00b", "ab"),
+    ],
+)
+def test_fidelity_text_drops_unsafe_invisibles(label, text, expected):
+    clean, _offsets = fidelity_text(text)
+    assert clean == expected, label
+
+
+# --- display_name: single-line, bounded, but Unicode-faithful ----------------
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
+        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
+        (
+            "regional flag tag sequence",
+            "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
+        ),
+    ],
+)
+def test_display_name_keeps_compound_sequences_sanitize_name_destroys(label, text):
+    assert display_name(text) == text, label
+    # Guard the premise: this is exactly what the generic helper gets wrong.
+    assert sanitize_name(text) != text, f"{label}: sanitize_name no longer breaks this"
+
+
+@pytest.mark.parametrize(
+    "label, text, expected",
+    [
+        ("rlo override", "a\u202eb", "ab"),
+        ("zero width space", "a\u200bb", "ab"),
+        ("newline", "a\nb", "a b"),
+        ("carriage return", "a\rb", "a b"),
+        ("tab", "a\tb", "a b"),
+        ("collapsed spaces", "a     b", "a b"),
+        ("surrounding space", "  a b  ", "a b"),
+        ("control char", "a\x07b", "ab"),
+    ],
+)
+def test_display_name_still_removes_unsafe_and_forces_one_line(label, text, expected):
+    assert display_name(text) == expected, label
+
+
+def test_display_name_bounds_its_length():
+    """The ellipsis is part of the budget, so the result is exactly max_length."""
+    result = display_name("x" * 400)
+
+    assert result == "x" * 255 + "…"
+    assert len(result) == 256
+
+
+def test_display_name_handles_none():
+    assert display_name(None) == ""
+
+
+def test_display_name_preserves_a_keycap_sequence():
+    """Not a sanitize_name bug - VS16 is Mn and the keycap mark is Me, not Cf - but
+    the sequence still has to survive display_name intact."""
+    keycap = "1️⃣"
+    assert display_name(keycap) == keycap
+
+
+@pytest.mark.parametrize(
+    "label, separator",
+    [
+        ("carriage return", "\r"),
+        ("line feed", "\n"),
+        ("crlf", "\r\n"),
+        ("tab", "\t"),
+        ("vertical tab", "\v"),
+        ("form feed", "\f"),
+        ("next line U+0085", "\u0085"),
+        ("line separator U+2028", "\u2028"),
+        ("paragraph separator U+2029", "\u2029"),
+    ],
+)
+def test_display_name_is_single_line_for_every_unicode_break(label, separator):
+    """U+2028/U+2029 are Zl/Zp, so they survive the fidelity pass untouched."""
+    result = display_name(f"a{separator}b")
+
+    assert result == "a b", label
+    assert separator not in result
+
+
+@pytest.mark.parametrize("max_length", [1, 2, 10, 256])
+def test_display_name_never_exceeds_max_length(max_length):
+    """The ellipsis counts towards the bound the caller asked for."""
+    assert len(display_name("x" * 500, max_length=max_length)) <= max_length
+
+
+def test_display_name_leaves_text_at_the_bound_untruncated():
+    exact = "x" * 256
+    assert display_name(exact) == exact
+
+
+@pytest.mark.parametrize("bound", [0, -1, -50])
+def test_display_name_with_a_non_positive_bound_returns_nothing(bound):
+    """A zero budget has no room for text or for the ellipsis."""
+    assert display_name("x" * 50, max_length=bound) == ""
+
+
+@pytest.mark.parametrize(
+    "label, codepoint",
+    [
+        ("function application", 0x2061),
+        ("invisible times", 0x2062),
+        ("invisible separator", 0x2063),
+        ("invisible plus", 0x2064),
+        ("interlinear anchor", 0xFFF9),
+        ("interlinear separator", 0xFFFA),
+        ("interlinear terminator", 0xFFFB),
+        ("mongolian vowel separator", 0x180E),
+    ],
+)
+def test_fidelity_text_strips_the_remaining_hidden_characters(label, codepoint):
+    """These render as nothing, so they hide text from a reader."""
+    clean, _offsets = fidelity_text(f"a{chr(codepoint)}b")
+    assert clean == "ab", label
+
+
+@pytest.mark.parametrize("codepoint", [0x200C, 0x200D, 0x200E, 0x200F])
+def test_fidelity_text_still_keeps_the_legitimate_joiners_and_marks(codepoint):
+    character = chr(codepoint)
+    clean, _offsets = fidelity_text(f"a{character}b")
+    assert clean == f"a{character}b"
+
+
+def test_a_valid_emoji_tag_sequence_survives():
+    clean, _offsets = fidelity_text(f"Team {FLAG}!")
+    assert clean == f"Team {FLAG}!"
+
+
+@pytest.mark.parametrize(
+    "label, text",
+    [
+        ("lone tag letter", "a\U000e0067b"),
+        ("tag run with no emoji base", "ab\U000e0067\U000e007f"),
+        ("tag run with no cancel", "\U0001f3f4\U000e0067\U000e0062"),
+        ("cancel on its own", "a\U000e007fb"),
+    ],
+)
+def test_stray_tag_characters_are_removed(label, text):
+    clean, _offsets = fidelity_text(text)
+    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label

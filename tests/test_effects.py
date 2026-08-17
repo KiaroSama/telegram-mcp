@@ -494,19 +494,31 @@ def test_a_non_gzip_asset_falls_back_to_its_advertised_format():
     assert sniff_asset_format(b"\x00\x01\x02\x03") == (".webm", "video")
 
 
-def test_both_tool_modules_share_one_sniff():
-    """Two copies existed, each guarded by only one suite, so one could regress green."""
+def test_one_gzip_sniff_serves_every_asset_decoder():
+    """Two copies existed, each guarded by only one suite, so one could regress green.
+
+    The consumers moved when the asset-preview layer was split out of
+    `tools/inspection.py` into `media_preview.py`, so this checks the modules that
+    actually decide an asset's format today rather than a fixed pair — and, more
+    importantly, that the magic bytes still live in exactly one place.
+    """
     import inspect as _inspect
 
+    from telegram_mcp import effect_catalog, media_preview
     from telegram_mcp.tools import effects as effects_module
     from telegram_mcp.tools import inspection as inspection_module
+    from telegram_mcp.visual import frames as frames_module
 
-    for module in (effects_module, inspection_module):
+    for module in (effects_module, media_preview):
         source = _inspect.getsource(module)
         assert "sniff_asset_format" in source, f"{module.__name__} does not use the shared sniff"
-        assert "x1f" not in source.lower().replace(
-            "sniff_asset_format", ""
-        ), f"{module.__name__} still carries its own gzip magic check"
+
+    # Every module that touches an asset's bytes, whether or not it sniffs today.
+    for module in (effects_module, media_preview, inspection_module, frames_module):
+        source = _inspect.getsource(module).lower().replace("sniff_asset_format", "")
+        assert "x1f" not in source, f"{module.__name__} carries its own gzip magic check"
+
+    assert "0x1f" in _inspect.getsource(effect_catalog).lower(), "the shared sniff lost its magic"
 
 
 # --- the negative cache must outlive the check that validates it -------------

@@ -40,9 +40,17 @@ jobs:
   # The job above installs the base package, where the .tgs tests skip - which is
   # also the proof that the base install works without the optional renderer. This
   # job installs the extra so that code path is actually exercised somewhere.
+  # Run on Windows as well as Linux: rlottie-python is a NATIVE optional
+  # dependency, so "it installs and renders" is a per-platform fact, not a
+  # per-project one — and the visual half of this fork is Windows-first, which is
+  # exactly where an rlottie wheel failing to build would go unnoticed otherwise.
   lottie:
-    name: Pytest With Lottie Renderer
-    runs-on: ubuntu-latest
+    name: Pytest With Lottie Renderer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
 
     steps:
       - name: Check out repository code

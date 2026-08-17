@@ -1,15 +1,19 @@
-"""Unit tests for the deep structured message view.
+"""The description layer, one Telethon field at a time.
 
 Every message here is a stub: the module reads plain attributes off the Telethon
 object and never calls the API, so no client and no network are involved.
+
+Split off from this file: the end-to-end route through upstream's
+``message_to_dict`` (``test_message_view_pipeline.py``), the string rules these
+descriptions lean on (``test_text_fidelity.py``), and the fork's merge policy
+(``test_merge_contract.py``).
 """
 
-import re
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from helpers_unicode import FAMILY, HOSTILE, PERSIAN
 from sanitize import sanitize_name, sanitize_user_content
 from telegram_mcp.message_view import (
     deep_message_dict,
@@ -23,7 +27,6 @@ from telegram_mcp.message_view import (
     _fidelity_forward,
     describe_buttons,
     describe_reply_quote,
-    fidelity_sender_name,
     display_name,
     message_permalink,
 )
@@ -281,39 +284,6 @@ def _utf16_slice(text, offset, length):
     return text.encode("utf-16-le")[offset * 2 : (offset + length) * 2].decode("utf-16-le")
 
 
-@pytest.mark.parametrize(
-    "label, text",
-    [
-        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
-        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
-        ("rlm bidi mark", "abc\u200f\u062f\u0065f"),
-        ("lrm bidi mark", "abc\u200e def"),
-        ("repeated newlines", "a\n\n\n\nb"),
-        ("tabs", "a\tb"),
-    ],
-)
-def test_fidelity_text_preserves_legitimate_unicode(label, text):
-    """The generic sanitizer strips these; doing so corrupts real messages."""
-    clean, _offsets = fidelity_text(text)
-    assert clean == text, label
-
-
-@pytest.mark.parametrize(
-    "label, text, expected",
-    [
-        ("zero width space", "a\u200bb", "ab"),
-        ("word joiner", "a\u2060b", "ab"),
-        ("bom", "a\ufeffb", "ab"),
-        ("rlo override", "a\u202eb", "ab"),
-        ("lri isolate", "a\u2066b", "ab"),
-        ("null control", "a\x00b", "ab"),
-    ],
-)
-def test_fidelity_text_drops_unsafe_invisibles(label, text, expected):
-    clean, _offsets = fidelity_text(text)
-    assert clean == expected, label
-
-
 def test_entity_offsets_index_the_exposed_text():
     """The bug: offsets were computed on raw text while sanitized text was shown."""
     raw = "\u0645\u06cc\u200c\u06a9\u0646\u062f"  # mi + ZWNJ + konad
@@ -380,95 +350,6 @@ def test_deep_message_dict_exposes_fidelity_text_when_it_differs():
     assert "ntity offsets index into this field" in data["text_fidelity_note"]
 
 
-# --- display_name: single-line, bounded, but Unicode-faithful ----------------
-
-
-@pytest.mark.parametrize(
-    "label, text",
-    [
-        ("emoji zwj family", "\U0001f468\u200d\U0001f469\u200d\U0001f467"),
-        ("persian zwnj", "\u0645\u06cc\u200c\u06a9\u0646\u062f"),
-        (
-            "regional flag tag sequence",
-            "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f",
-        ),
-    ],
-)
-def test_display_name_keeps_compound_sequences_sanitize_name_destroys(label, text):
-    assert display_name(text) == text, label
-    # Guard the premise: this is exactly what the generic helper gets wrong.
-    assert sanitize_name(text) != text, f"{label}: sanitize_name no longer breaks this"
-
-
-@pytest.mark.parametrize(
-    "label, text, expected",
-    [
-        ("rlo override", "a\u202eb", "ab"),
-        ("zero width space", "a\u200bb", "ab"),
-        ("newline", "a\nb", "a b"),
-        ("carriage return", "a\rb", "a b"),
-        ("tab", "a\tb", "a b"),
-        ("collapsed spaces", "a     b", "a b"),
-        ("surrounding space", "  a b  ", "a b"),
-        ("control char", "a\x07b", "ab"),
-    ],
-)
-def test_display_name_still_removes_unsafe_and_forces_one_line(label, text, expected):
-    assert display_name(text) == expected, label
-
-
-def test_display_name_bounds_its_length():
-    """The ellipsis is part of the budget, so the result is exactly max_length."""
-    result = display_name("x" * 400)
-
-    assert result == "x" * 255 + "…"
-    assert len(result) == 256
-
-
-def test_display_name_handles_none():
-    assert display_name(None) == ""
-
-
-def test_display_name_preserves_a_keycap_sequence():
-    """Not a sanitize_name bug - VS16 is Mn and the keycap mark is Me, not Cf - but
-    the sequence still has to survive display_name intact."""
-    keycap = "1️⃣"
-    assert display_name(keycap) == keycap
-
-
-@pytest.mark.parametrize(
-    "label, separator",
-    [
-        ("carriage return", "\r"),
-        ("line feed", "\n"),
-        ("crlf", "\r\n"),
-        ("tab", "\t"),
-        ("vertical tab", "\v"),
-        ("form feed", "\f"),
-        ("next line U+0085", "\u0085"),
-        ("line separator U+2028", "\u2028"),
-        ("paragraph separator U+2029", "\u2029"),
-    ],
-)
-def test_display_name_is_single_line_for_every_unicode_break(label, separator):
-    """U+2028/U+2029 are Zl/Zp, so they survive the fidelity pass untouched."""
-    result = display_name(f"a{separator}b")
-
-    assert result == "a b", label
-    assert separator not in result
-
-
-@pytest.mark.parametrize("max_length", [1, 2, 10, 256])
-def test_display_name_never_exceeds_max_length(max_length):
-    """The ellipsis counts towards the bound the caller asked for."""
-    assert len(display_name("x" * 500, max_length=max_length)) <= max_length
-
-
-def test_display_name_leaves_text_at_the_bound_untruncated():
-    exact = "x" * 256
-    assert display_name(exact) == exact
-
-
 def test_premium_sticker_effect_is_reported_when_present():
     """A VideoSize of type "f" — get_media_frames(premium_effect=True) samples it."""
     document = SimpleNamespace(
@@ -496,45 +377,6 @@ def test_no_premium_effect_key_for_an_ordinary_sticker():
     msg = SimpleNamespace(media=object(), document=document, sticker=document, file=None)
 
     assert "premium_effect" not in describe_media(msg)
-
-
-# --- Fidelity across every human-readable field -------------------------------
-
-PERSIAN = "\u0645\u06cc\u200c\u06a9\u0646\u062f"  # mi-konad, needs its ZWNJ
-FAMILY = "\U0001f468\u200d\U0001f469\u200d\U0001f467"  # one emoji, held by ZWJ
-HOSTILE = "\u202eevil\u200b\u2062\ufff9"  # RLO + hidden padding
-
-
-@pytest.mark.parametrize("bound", [0, -1, -50])
-def test_display_name_with_a_non_positive_bound_returns_nothing(bound):
-    """A zero budget has no room for text or for the ellipsis."""
-    assert display_name("x" * 50, max_length=bound) == ""
-
-
-@pytest.mark.parametrize(
-    "label, codepoint",
-    [
-        ("function application", 0x2061),
-        ("invisible times", 0x2062),
-        ("invisible separator", 0x2063),
-        ("invisible plus", 0x2064),
-        ("interlinear anchor", 0xFFF9),
-        ("interlinear separator", 0xFFFA),
-        ("interlinear terminator", 0xFFFB),
-        ("mongolian vowel separator", 0x180E),
-    ],
-)
-def test_fidelity_text_strips_the_remaining_hidden_characters(label, codepoint):
-    """These render as nothing, so they hide text from a reader."""
-    clean, _offsets = fidelity_text(f"a{chr(codepoint)}b")
-    assert clean == "ab", label
-
-
-@pytest.mark.parametrize("codepoint", [0x200C, 0x200D, 0x200E, 0x200F])
-def test_fidelity_text_still_keeps_the_legitimate_joiners_and_marks(codepoint):
-    character = chr(codepoint)
-    clean, _offsets = fidelity_text(f"a{character}b")
-    assert clean == f"a{character}b"
 
 
 def test_reply_quote_keeps_the_readable_fragment_and_documents_its_offset():
@@ -651,166 +493,6 @@ def test_poll_question_keeps_unicode():
     assert "\u202e" not in info["poll_question"]
 
 
-# --- End-to-end: message_to_dict() -> deep_message_dict() ---------------------
-
-FLAG = "\U0001f3f4\U000e0067\U000e0062\U000e0073\U000e0063\U000e0074\U000e007f"
-
-
-def _plain_message(**overrides):
-    """A stub carrying every attribute the upstream message_to_dict touches."""
-    fields = dict(
-        id=1,
-        date=None,
-        sender_id=5,
-        out=False,
-        message="hi",
-        media=None,
-        grouped_id=None,
-        reply_to=None,
-        fwd_from=None,
-        forward=None,
-        via_bot_id=None,
-        edit_date=None,
-        pinned=False,
-        views=None,
-        forwards=None,
-        reactions=None,
-        replies=None,
-        buttons=None,
-        entities=None,
-        action=None,
-        ttl_period=None,
-        sender=None,
-        web_preview=None,
-        photo=None,
-        sticker=None,
-        voice=None,
-        video_note=None,
-        video=None,
-        audio=None,
-        gif=None,
-        document=None,
-        contact=None,
-        geo=None,
-        poll=None,
-        file=None,
-        chat=None,
-    )
-    fields.update(overrides)
-    return SimpleNamespace(**fields)
-
-
-def _deep(msg):
-    """The real path: upstream's compact view, then the fork's deep view."""
-    from telegram_mcp.tools.messages import message_to_dict
-
-    return deep_message_dict(msg, message_to_dict(msg))
-
-
-@pytest.mark.parametrize("label, name", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
-def test_forward_names_survive_the_full_pipeline(label, name):
-    """message_to_dict already stripped these; re-cleaning cannot bring them back."""
-    msg = _plain_message(
-        fwd_from=SimpleNamespace(date=None, from_name=name, channel_post=None, post_author=name),
-        forward=SimpleNamespace(
-            chat=SimpleNamespace(title=name, username="chan", first_name=None, last_name=None),
-            chat_id=-100123,
-            sender=SimpleNamespace(first_name=name, last_name=None),
-        ),
-    )
-
-    forwarded = _deep(msg)["forwarded"]
-
-    for key in ("from_name", "from_chat", "from_user", "post_author"):
-        assert forwarded[key] == name, f"{label}: {key} lost its joiner"
-    # Fields upstream computed must survive untouched.
-    assert forwarded["from_username"] == "chan"
-    assert forwarded["from_chat_id"] == -100123
-
-
-@pytest.mark.parametrize("label, name", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
-def test_user_sender_name_survives_the_full_pipeline(label, name):
-    msg = _plain_message(
-        sender=SimpleNamespace(first_name=name, last_name=None, username=None, title=None)
-    )
-    assert _deep(msg)["sender"] == name, label
-
-
-@pytest.mark.parametrize("label, title", [("persian zwnj", PERSIAN), ("emoji zwj", FAMILY)])
-def test_channel_sender_title_survives_the_full_pipeline(label, title):
-    msg = _plain_message(
-        sender=SimpleNamespace(title=title, username=None, first_name=None, last_name=None)
-    )
-    assert _deep(msg)["sender"] == title, label
-
-
-def test_buttons_made_entirely_of_hostile_characters_never_leak():
-    """Cleaning them yields an empty list, which must not fall back to the raw one."""
-    msg = _plain_message(
-        buttons=[
-            [SimpleNamespace(text="\u202e\u200b"), SimpleNamespace(text="\u2062\ufff9")],
-            [SimpleNamespace(text="\u180e")],
-        ]
-    )
-
-    result = _deep(msg)
-
-    assert "buttons" not in result, f"raw labels leaked: {result.get('buttons')!r}"
-
-
-def test_partly_hostile_buttons_keep_only_the_readable_ones():
-    msg = _plain_message(
-        buttons=[[SimpleNamespace(text="\u202e\u200b"), SimpleNamespace(text=PERSIAN)]]
-    )
-    assert _deep(msg)["buttons"] == [PERSIAN]
-
-
-def test_a_buttons_property_that_raises_does_not_sink_the_whole_message():
-    """Message.buttons is a Telethon property that builds MessageButton objects and
-    touches input_chat; getattr's default only swallows AttributeError."""
-
-    class _Exploding(SimpleNamespace):
-        @property
-        def buttons(self):
-            raise TypeError("input_chat is unavailable for this message")
-
-    # buttons is a data descriptor on the class, so it must not be passed to
-    # __init__ \u2014 SimpleNamespace would try to assign through the property.
-    fields = {k: v for k, v in vars(_plain_message()).items() if k != "buttons"}
-
-    data = _deep(_Exploding(**fields))
-
-    assert data["id"] == 1
-    assert "buttons" not in data
-
-
-def test_reply_quote_declares_when_it_was_modified():
-    hostile = PERSIAN + "\u202e"
-    msg = _plain_message(
-        reply_to=SimpleNamespace(quote_text=hostile, quote_offset=12, forum_topic=False)
-    )
-
-    quote = _deep(msg)["reply_quote"]
-
-    assert quote["modified"] is True
-    assert quote["truncated"] is False
-    assert "NOT character-for-character exact" in quote["note"]
-    assert quote["offset"] == 12
-    assert "UTF-16" in quote["note"]
-
-
-def test_reply_quote_claims_no_change_when_nothing_changed():
-    msg = _plain_message(
-        reply_to=SimpleNamespace(quote_text=PERSIAN, quote_offset=3, forum_topic=False)
-    )
-
-    quote = _deep(msg)["reply_quote"]
-
-    assert "modified" not in quote
-    assert quote["text"] == PERSIAN
-    assert "unchanged from what Telegram reported" in quote["note"]
-
-
 @pytest.mark.parametrize(
     "label, raw, expected",
     [
@@ -845,25 +527,6 @@ def test_a_reply_quote_keeps_the_break_instead_of_gluing_the_words(label, raw, e
     assert quote["modified"] is True, "the quote is no longer what Telegram reported"
 
 
-def test_a_valid_emoji_tag_sequence_survives():
-    clean, _offsets = fidelity_text(f"Team {FLAG}!")
-    assert clean == f"Team {FLAG}!"
-
-
-@pytest.mark.parametrize(
-    "label, text",
-    [
-        ("lone tag letter", "a\U000e0067b"),
-        ("tag run with no emoji base", "ab\U000e0067\U000e007f"),
-        ("tag run with no cancel", "\U0001f3f4\U000e0067\U000e0062"),
-        ("cancel on its own", "a\U000e007fb"),
-    ],
-)
-def test_stray_tag_characters_are_removed(label, text):
-    clean, _offsets = fidelity_text(text)
-    assert not any(0xE0020 <= ord(ch) <= 0xE007F for ch in clean), label
-
-
 # --- Quote and text_fidelity must not overstate ------------------------------
 
 
@@ -890,117 +553,6 @@ def test_a_genuinely_truncated_quote_reports_both_facts():
     assert quote["filtered"] is True
     assert quote["truncated"] is True
     assert "truncated" in quote["note"]
-
-
-def test_text_fidelity_does_not_claim_byte_exactness():
-    raw = PERSIAN + "\u200b"
-    msg = _plain_message(message=raw)
-
-    data = _deep(msg)
-
-    assert "Character-accurate" not in data["text_fidelity_note"]
-    assert "Fidelity-safe" in data["text_fidelity_note"]
-    assert data["text_fidelity_modified"] is True
-
-
-def test_text_fidelity_reports_an_untouched_message_as_unmodified():
-    msg = _plain_message(
-        message=PERSIAN,
-        sender=SimpleNamespace(first_name="x", last_name=None, username=None, title=None),
-    )
-
-    data = _deep(msg)
-
-    assert data["text_fidelity_modified"] is False
-
-
-# --- Message-level effects ---------------------------------------------------
-
-
-def test_a_message_level_effect_is_reported_separately_from_the_sticker_one():
-    """Telegram can play both at once; the structured view must show both."""
-    msg = _plain_message(effect=5104841245755180586)
-
-    effect = _deep(msg)["message_effect"]
-
-    assert effect["effect_id"] == 5104841245755180586
-    assert effect["kind"] == "message_effect"
-    assert "distinct from a premium sticker" in effect["note"]
-    # The ID used to be a dead end pointing at a raw API call; it now names the
-    # tool that resolves it, and still defers the composite to the capture route.
-    assert "get_message_effect" in effect["note"]
-    assert "get_telegram_frames" in effect["note"]
-
-
-def test_no_message_effect_key_without_one():
-    assert "message_effect" not in _deep(_plain_message())
-
-
-# --- The merge contract in the feature doc -----------------------------------
-
-REPO = Path(__file__).resolve().parents[1]
-
-# Spelled out because the document states the count in words, not digits.
-_FORK_IMPORT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
-
-
-def _fork_owned_paths():
-    """Fork-authored modules under telegram_mcp/, straight from git.
-
-    A fork file is one upstream does not have, so upstream is the authority
-    rather than a list in this test. Skips where that cannot be established —
-    a shallow clone, no upstream remote — instead of asserting against a guess.
-    """
-    import subprocess
-
-    def _tracked(ref):
-        result = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", ref, "telegram_mcp/"],
-            cwd=REPO,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode != 0:
-            pytest.skip(f"cannot resolve {ref}: {result.stderr.strip()[:120]}")
-        return {line for line in result.stdout.splitlines() if line.endswith(".py")}
-
-    fork_only = _tracked("HEAD") - _tracked("upstream/main")
-    # tools/*.py are covered by the derived import block above.
-    return sorted(p for p in fork_only if not p.startswith("telegram_mcp/tools/"))
-
-
-def test_the_merge_contract_matches_the_fork_imports():
-    """The merge policy block is what someone reads before `git merge upstream/main`.
-    A fork module missing from it reads as upstream code, so it is derived from the
-    imports rather than trusted: both the module list and the count come from
-    tools/__init__.py, never from a number written into this test."""
-    init = (REPO / "telegram_mcp" / "tools" / "__init__.py").read_text(encoding="utf-8")
-    _, marker, fork_block = init.partition("# Fork additions")
-    assert marker, "the fork import block lost its '# Fork additions' marker"
-
-    modules = re.findall(r"^from telegram_mcp\.tools\.(\w+) import \*", fork_block, re.M)
-    assert modules, "no fork tool imports found below the marker"
-
-    doc = (REPO / "docs" / "visual-structured-access.md").read_text(encoding="utf-8")
-    for name in modules:
-        assert f"telegram_mcp/tools/{name}.py" in doc, f"merge policy omits tools/{name}.py"
-
-    # Fork modules that are not tool imports cannot be derived from the block
-    # above. Listing them by hand is what let text_fidelity.py and
-    # media_transfer.py go missing when message_view.py and tools/inspection.py
-    # were split, so ask git which files upstream does not have.
-    for path in _fork_owned_paths():
-        assert path in doc, f"merge policy omits {path}"
-
-    word = _FORK_IMPORT_WORDS.get(len(modules))
-    assert word, f"extend _FORK_IMPORT_WORDS: the fork now has {len(modules)} imports"
-    assert (
-        f"({word} import lines)" in doc
-    ), f"the doc does not say '{word} import lines' for {len(modules)} fork imports"
-
-    # Prove the check bites: this is exactly how tools/effects.py went missing.
-    assert "telegram_mcp/tools/nonexistent.py" not in doc
 
 
 def test_an_offset_that_could_not_be_rebased_says_so():

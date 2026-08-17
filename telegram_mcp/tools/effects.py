@@ -22,11 +22,8 @@ from telegram_mcp.media_transfer import (
     _download_thumb_capped,
     _stream_capped,
 )
-from telegram_mcp.tools.inspection import (
-    _encode_frames,
-    _encode_one,
-    require_explicit_account,
-)
+from telegram_mcp.media_preview import _encode_frames, _encode_one
+from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
 
