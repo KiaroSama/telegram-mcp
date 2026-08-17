@@ -285,18 +285,6 @@ async def test_one_byte_over_the_limit_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_old_telethon_without_iter_download_still_works():
-    class Legacy:
-        iter_download = None
-
-        async def download_media(self, document, file=None, thumb=None):
-            return b"y" * 100
-
-    raw, over_cap = await _download_thumb_capped(Legacy(), _Doc(30), _VideoSize(), 4096)
-    assert (raw, over_cap) == (b"y" * 100, False)
-
-
-@pytest.mark.asyncio
 async def test_plain_document_stream_is_capped_too():
     cl = _CappedClient(total_bytes=8192)
     _, over_cap = await _stream_capped(cl, _Doc(21), 2048)

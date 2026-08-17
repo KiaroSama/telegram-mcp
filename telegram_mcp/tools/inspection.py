@@ -18,6 +18,7 @@ from telegram_mcp.media_transfer import (  # noqa: F401  (re-exported for tests 
     _size_bytes,
     _stream_capped,
     _thumb_owner,
+    batch_width,
     with_reference_retry,
 )
 from telegram_mcp.message_view import deep_message_dict, describe_media, display_name
@@ -930,11 +931,18 @@ async def get_custom_emoji(
         # bare gather abandons the other nine coroutines at that moment rather than
         # cancelling them: measured, they went on downloading and finished after
         # the tool had already returned its error.
+        # Concurrency multiplies the peak by the batch size: ten documents at the
+        # 200 MB ceiling would hold 2 GB at once where the sequential version held
+        # one buffer. The width comes from the byte budget so that product stays
+        # under MAX_BATCH_BYTES whatever the caller passes.
+        gate = asyncio.Semaphore(batch_width(len(documents), max_bytes))
+
+        async def _preview_within_budget(document):
+            async with gate:
+                return await _custom_emoji_preview(cl, document, count, max_dimension, max_bytes)
+
         resolved = await asyncio.gather(
-            *(
-                _custom_emoji_preview(cl, document, count, max_dimension, max_bytes)
-                for document in documents
-            ),
+            *(_preview_within_budget(document) for document in documents),
             return_exceptions=True,
         )
         records, images = [], []

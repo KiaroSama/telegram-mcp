@@ -87,14 +87,17 @@ clip because the first and last frames of a video are frequently black. Media la
 200 MB because the whole file is held in memory. The transfer itself is bounded as well:
 `iter_download` streams the media and stops at the first chunk past the cap, so the advertised
 size stays a free early refusal — it can be absent or wrong, and then only the transfer limit is
-real. The one exception is a Telethon build without `iter_download`, which has no partial fetch:
-there the file is downloaded first and measured afterwards. Use `download_media` for anything
-bigger.
+real. There is no unbounded path left: `iter_download` is part of the Telethon floor this project
+requires (`telethon>=1.44.0`), so the download-then-measure fallback that used to sit behind it has
+been removed rather than kept as untestable dead code. Use `download_media` for anything bigger.
 `get_media_frames(-1001234567890, 5533, count=6)`
 
 **`get_custom_emoji(document_ids, count=1, max_bytes=5242880, max_dimension=1568, account=None) -> list`**
 Resolve custom/premium emoji IDs — the ones `inspect_message` reports under `custom_emoji` — into
-metadata plus a preview image each. Static emoji return the document itself; animated WebM emoji
+metadata plus a preview image each. A batch resolves its documents concurrently, so the peak held
+in memory is the number in flight times `max_bytes`; the width is derived from that budget so the
+peak stays under `MAX_BATCH_BYTES` (2 GB) whatever the caller asks for.
+Static emoji return the document itself; animated WebM emoji
 return `count` extracted frames; `.tgs` Lottie emoji are rendered into real frames when the
 optional renderer is installed (`pip install 'telegram-mcp[lottie]'`, reported as
 `preview_source: "rlottie"`), and fall back to Telegram's static thumbnail without it

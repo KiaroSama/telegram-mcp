@@ -39,16 +39,6 @@ class _Client:
         return _Iter(self.chunks, self.log)
 
 
-class _LegacyClient:
-    """Telethon old enough to have no iter_download."""
-
-    def __init__(self, blob):
-        self.blob = blob
-
-    async def download_media(self, msg, file=None):
-        return self.blob
-
-
 class _Msg:
     def __init__(self, media, document=None, photo=None):
         self.media, self.document, self.photo = media, document, photo
@@ -89,12 +79,6 @@ async def test_download_capped_allows_media_of_exactly_the_cap():
     client = _Client([b"a" * 20])
     data, over_cap = await _download_capped(client, _Msg(object()), 20)
     assert (len(data), over_cap) == (20, False)
-
-
-@pytest.mark.asyncio
-async def test_download_capped_falls_back_without_iter_download():
-    data, over_cap = await _download_capped(_LegacyClient(b"x" * 50), _Msg(object()), 10)
-    assert (data, over_cap) == (b"x" * 50, True)
 
 
 @pytest.mark.asyncio
@@ -249,8 +233,8 @@ async def test_custom_emoji_metadata_exposes_text_color_and_free():
     document = _emoji_document(text_color=True, free=True)
 
     class _Client:
-        async def download_media(self, *args, **kwargs):
-            return None  # the preview is irrelevant here; the flags are not
+        def iter_download(self, location):
+            return _Iter([], [])  # the preview is irrelevant here; the flags are not
 
     record, _images = await _custom_emoji_preview(_Client(), document, count=1, max_dimension=64)
 
@@ -264,8 +248,8 @@ async def test_adaptive_custom_emoji_preview_is_never_called_exact():
     from telegram_mcp.tools.inspection import _custom_emoji_preview
 
     class _Client:
-        async def download_media(self, *args, **kwargs):
-            return None
+        def iter_download(self, location):
+            return _Iter([], [])
 
     adaptive, _ = await _custom_emoji_preview(
         _Client(), _emoji_document(text_color=True), count=1, max_dimension=64
@@ -320,9 +304,11 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
     msg = _effect_message()
 
     class _Client:
-        async def download_media(self, document, file=None, thumb=None):
-            assert thumb is not None and thumb.type == "f", "the effect asset was not requested"
-            return bytes([0x1F, 0x8B]) + b"lottie-payload"
+        def iter_download(self, location):
+            assert (
+                getattr(location, "thumb_size", None) == "f"
+            ), "the effect asset was not requested"
+            return _Iter([bytes([0x1F, 0x8B]) + b"lottie-payload"], [])
 
     async def _fake_frames(fn, raw, suffix, count, max_dimension):
         # Verified against live Telegram data: the type="f" asset is a gzipped
@@ -380,10 +366,12 @@ class _EffectClient:
     def __init__(self, payload=b"webm"):
         self.payload = payload
         self.called = False
+        self.requested_thumb = None
 
-    async def download_media(self, document, file=None, thumb=None):
+    def iter_download(self, location):
         self.called = True
-        return self.payload
+        self.requested_thumb = getattr(location, "thumb_size", None)
+        return _Iter([self.payload], [])
 
 
 @pytest.mark.asyncio
@@ -448,25 +436,6 @@ async def test_an_unadvertised_oversized_effect_is_stopped_mid_transfer():
     assert "larger than the 1000-byte limit" in result
     assert "advertised size was absent" in result
     assert delivered <= 1500, f"{delivered} bytes were pulled past a 1000-byte cap"
-
-
-@pytest.mark.asyncio
-async def test_legacy_telethon_still_re_checks_the_delivered_effect_bytes():
-    """Without iter_download there is no way to abort, so the result is measured."""
-    from telegram_mcp.tools.inspection import _premium_effect_frames
-
-    client = _EffectClient(payload=b"x" * 5000)  # no iter_download attribute
-
-    result = await _premium_effect_frames(
-        client,
-        _effect_message(effect_size=None),
-        _EFFECT_DETAILS,
-        count=2,
-        max_dimension=64,
-        max_bytes=1000,
-    )
-
-    assert isinstance(result, str) and "larger than the 1000-byte limit" in result
 
 
 @pytest.mark.asyncio
@@ -1040,3 +1009,98 @@ async def test_one_unresolvable_emoji_does_not_sink_the_other_nine(monkeypatch):
     assert [r["document_id"] for r in records] == [1, 2]
     assert "RuntimeError" in records[0]["preview_error"]
     assert records[1]["preview_source"] == "document"
+
+
+# --- concurrency must not multiply the memory peak without a ceiling ----------
+
+
+def test_batch_width_keeps_the_peak_under_the_budget():
+    """Peak held in memory is width x max_bytes, so the width comes from the budget.
+
+    Ten documents at the 200 MB per-document ceiling would otherwise hold ~2 GB
+    at once, where the sequential version held one buffer.
+    """
+    from telegram_mcp.media_transfer import (
+        MAX_BATCH_BYTES,
+        MAX_FRAME_SOURCE_BYTES,
+        batch_width,
+    )
+
+    for max_bytes in (1, 4096, 5 * 1024 * 1024, MAX_FRAME_SOURCE_BYTES):
+        for items in (1, 3, 10, 64):
+            width = batch_width(items, max_bytes)
+            assert 1 <= width <= items
+            assert width * max_bytes <= MAX_BATCH_BYTES, (
+                f"{items} items of {max_bytes} bytes would peak at "
+                f"{width * max_bytes}, above {MAX_BATCH_BYTES}"
+            )
+
+    # The ceiling must actually bite, not just happen to hold at today's values.
+    assert batch_width(64, MAX_BATCH_BYTES // 4) == 4
+    assert batch_width(64, MAX_BATCH_BYTES) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_custom_emoji_never_exceeds_the_batch_budget(monkeypatch):
+    """The gate is real: concurrent previews never outnumber the derived width."""
+    import asyncio as _asyncio
+
+    from telegram_mcp.media_transfer import MAX_BATCH_BYTES
+    from telegram_mcp.tools import inspection
+
+    documents = [
+        SimpleNamespace(id=i, mime_type="image/webp", size=10, attributes=[]) for i in range(6)
+    ]
+    # The per-document ceiling would otherwise clamp max_bytes below the point
+    # where the gate does anything, and a gate that cannot bite proves nothing.
+    monkeypatch.setattr(inspection, "MAX_FRAME_SOURCE_BYTES", MAX_BATCH_BYTES)
+    per_document = MAX_BATCH_BYTES // 3  # so at most 3 may be in flight
+
+    class _BatchClient:
+        async def __call__(self, request):
+            return documents
+
+    async def _ensure(client):
+        return None
+
+    live, peak = 0, 0
+
+    async def _preview(client, document, count, max_dimension, max_bytes):
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        await _asyncio.sleep(0.01)
+        live -= 1
+        return {"document_id": document.id}, []
+
+    monkeypatch.setattr(inspection, "get_client", lambda account=None: _BatchClient())
+    monkeypatch.setattr(inspection, "ensure_connected", _ensure)
+    monkeypatch.setattr(inspection, "_custom_emoji_preview", _preview)
+
+    result = await inspection.get_custom_emoji(
+        [d.id for d in documents], max_bytes=per_document, account="a"
+    )
+
+    assert isinstance(result, list), f"the batch failed outright: {result!r}"
+    assert peak <= 3, f"{peak} previews ran at once, above the derived width"
+    assert peak > 1, "the batch ran sequentially; concurrency was lost, not bounded"
+
+
+def test_a_stripped_thumbnail_is_measured_as_it_will_arrive():
+    """Telegram strips the JPEG header/footer; every client re-attaches them.
+
+    Reporting the 61 wire bytes made the byte budget compare against a number
+    nobody ever receives, and produced a diagnostic blaming Telegram for a
+    transfer that never happened.
+    """
+    from telethon.tl.types import PhotoStrippedSize
+
+    from telegram_mcp.media_transfer import _size_bytes
+
+    wire = bytes([0x01, 40, 40]) + bytes(58)
+    stripped = PhotoStrippedSize(type="i", bytes=wire)
+
+    measured = _size_bytes(stripped)
+
+    assert measured > len(wire), "the header Telethon re-attaches was not counted"
+    assert measured == len(utils.stripped_photo_to_jpg(wire))

@@ -106,17 +106,23 @@ def _run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
         ) from error
 
 
-def probe_duration(path: str) -> Optional[float]:
-    """Media duration in seconds via ffprobe, or ``None`` when unavailable."""
+def _probe(path: str) -> tuple[Optional[float], Optional[float]]:
+    """``(duration_seconds, frame_rate)`` from one ffprobe call, ``None`` where unknown.
+
+    The frame rate comes from the same subprocess the duration already costs, and
+    it is what makes the sampling ladder in :func:`_frames_with_ffmpeg` land on
+    frames that exist: a container's duration includes the last frame's display
+    time, so "just under the duration" can still be past the last real frame.
+    """
     if shutil.which("ffprobe") is None:
-        return None
+        return None, None
     result = _run(
         [
             "ffprobe",
             "-v",
             "error",
             "-show_entries",
-            "format=duration",
+            "format=duration:stream=avg_frame_rate",
             "-of",
             "json",
             path,
@@ -124,12 +130,32 @@ def probe_duration(path: str) -> Optional[float]:
         timeout=FFPROBE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        return None
+        return None, None
     try:
-        duration = json.loads(result.stdout or b"{}").get("format", {}).get("duration")
-        return float(duration) if duration is not None else None
-    except (ValueError, AttributeError, json.JSONDecodeError):
-        return None
+        payload = json.loads(result.stdout or b"{}")
+        raw_duration = payload.get("format", {}).get("duration")
+        duration = float(raw_duration) if raw_duration is not None else None
+    except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return None, None
+
+    rate = None
+    for stream in payload.get("streams") or []:
+        # ffprobe reports a rational, e.g. "30000/1001". A still image reports
+        # "0/0", which must not become a division by zero.
+        numerator, _, denominator = str(stream.get("avg_frame_rate") or "").partition("/")
+        try:
+            top, bottom = float(numerator), float(denominator or 1)
+        except ValueError:
+            continue
+        if top > 0 and bottom > 0:
+            rate = top / bottom
+            break
+    return duration, rate
+
+
+def probe_duration(path: str) -> Optional[float]:
+    """Media duration in seconds via ffprobe, or ``None`` when unavailable."""
+    return _probe(path)[0]
 
 
 def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
@@ -268,10 +294,19 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
             "Install ffmpeg, or use get_media_thumbnail for a static preview."
         )
 
-    duration = probe_duration(path)
+    duration, frame_rate = _probe(path)
     if duration and duration > 0:
         # Sample inside the clip: the very first and last frames are often black.
-        timestamps = [round(duration * (i + 0.5) / count, 3) for i in range(count)]
+        #
+        # The ladder is spread over the last frame's start, not over the whole
+        # duration. A container's duration includes how long the final frame is
+        # DISPLAYED, so `duration * (count - 0.5) / count` can sit past the last
+        # frame's PTS; that seek returns nothing, and the shortfall was silent —
+        # 8 frames requested, 7 delivered, with no metadata saying which sample
+        # was lost. Measured: a 1.2s 10fps clip lost its last sample every time.
+        last_frame_start = duration - (1.0 / frame_rate) if frame_rate else duration
+        span = max(0.0, last_frame_start)
+        timestamps = [round(span * (i + 0.5) / count, 3) for i in range(count)]
     else:
         # Without ffprobe the duration is unknown. A 0.5s ladder assumes the clip
         # is at least count/2 seconds long, so every seek past EOF is dropped and

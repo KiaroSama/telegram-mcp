@@ -20,6 +20,7 @@ from typing import Optional
 
 from telegram_mcp.runtime import logger
 
+from telethon import utils
 from telethon.errors import (
     FileReferenceEmptyError,
     FileReferenceExpiredError,
@@ -36,6 +37,21 @@ _UNRENDERABLE_SIZES = ("PhotoPathSize", "PhotoSizeEmpty")
 # before a single frame comes out; max_bytes is clamped to this no matter what
 # the caller asks for, and the transfer is aborted once it is exceeded.
 MAX_FRAME_SOURCE_BYTES = 200 * 1024 * 1024
+
+# A batch tool downloads its items concurrently, so the peak held in memory is
+# `width * max_bytes`, not one buffer. This is the ceiling on that product.
+MAX_BATCH_BYTES = 2 * 1024 * 1024 * 1024
+
+
+def batch_width(item_count: int, max_bytes: int) -> int:
+    """How many items may be in flight at once without crossing MAX_BATCH_BYTES.
+
+    Concurrency bought real latency, but it multiplied the peak by the batch
+    size. Deriving the width from the budget keeps that peak bounded no matter
+    what the caller asks for, and keeps it bounded if either constant grows
+    later — which is the part a fixed number would silently get wrong.
+    """
+    return max(1, min(item_count, MAX_BATCH_BYTES // max(1, max_bytes)))
 
 
 async def _stream_capped(cl, target, max_bytes: int) -> tuple:
@@ -75,10 +91,6 @@ async def _stream_capped(cl, target, max_bytes: int) -> tuple:
 
 async def _download_capped(cl, msg, max_bytes: int) -> tuple:
     """A message's media, with the transfer itself bounded by ``max_bytes``."""
-    if getattr(cl, "iter_download", None) is None:  # older Telethon: no partial fetch
-        data = await cl.download_media(msg, file=bytes)
-        return data, bool(data) and len(data) > max_bytes
-
     # download_media() unwraps a link preview to the photo/document inside it;
     # iter_download() does not, and get_input_location cannot cast a
     # MessageMediaWebPage. Message.document/.photo already do that unwrapping,
@@ -97,10 +109,6 @@ async def _download_thumb_capped(cl, document, video_size, max_bytes: int) -> tu
     exactly what ``download_media`` builds internally before handing it to the
     same downloader. Building it here bounds the transfer instead of the result.
     """
-    if getattr(cl, "iter_download", None) is None:  # older Telethon: no partial fetch
-        data = await cl.download_media(document, file=bytes, thumb=video_size)
-        return data, bool(data) and len(data) > max_bytes
-
     location = InputDocumentFileLocation(
         id=document.id,
         access_hash=document.access_hash,
@@ -111,10 +119,7 @@ async def _download_thumb_capped(cl, document, video_size, max_bytes: int) -> tu
 
 
 async def _download_whole_capped(cl, target, max_bytes: int) -> tuple:
-    """A whole file, bounded even on a Telethon too old to stream part of one."""
-    if getattr(cl, "iter_download", None) is None:  # older Telethon: no partial fetch
-        data = await cl.download_media(target, file=bytes)
-        return data, bool(data) and len(data) > max_bytes
+    """A whole file, with the transfer bounded."""
     return await _stream_capped(cl, target, max_bytes)
 
 
@@ -170,12 +175,23 @@ def _declared_sizes(owner) -> list:
 
 
 def _size_bytes(owner_size) -> Optional[int]:
-    """A declared size's byte count, whichever field its type carries."""
+    """A declared size's byte count, as the caller will actually receive it."""
     passes = getattr(owner_size, "sizes", None)  # PhotoSizeProgressive: one per pass
     if passes:
         return max(passes)
     inline = getattr(owner_size, "bytes", None)  # PhotoStrippedSize / PhotoCachedSize
     if inline is not None:
+        if type(owner_size).__name__ == "PhotoStrippedSize":
+            # Telegram strips the JPEG header and footer from this one and every
+            # client re-attaches them, so 61 bytes on the wire materialise as 683.
+            # Reporting the wire figure made the byte budget compare against a
+            # number nobody ever receives, and produced a diagnostic blaming
+            # Telegram for a transfer that never happened.
+            try:
+                return len(utils.stripped_photo_to_jpg(bytes(inline)))
+            except Exception:
+                # A fake or a malformed payload: the wire length is still a fact.
+                return len(inline)
         return len(inline)
     return getattr(owner_size, "size", None)
 
@@ -241,7 +257,7 @@ async def _download_size_capped(cl, owner, size, max_bytes: int) -> tuple:
     they keep going through download_media — with the size OBJECT, which
     _get_thumb accepts directly, never an index.
     """
-    if getattr(size, "bytes", None) is not None or getattr(cl, "iter_download", None) is None:
+    if getattr(size, "bytes", None) is not None:
         data = await cl.download_media(owner, file=bytes, thumb=size)
         return data, bool(data) and len(data) > max_bytes
 

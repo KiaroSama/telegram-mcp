@@ -8,6 +8,7 @@ to end with images built in memory by Pillow.
 import gzip
 import importlib.util
 import io
+import os
 import subprocess
 import sys
 import tempfile
@@ -240,7 +241,7 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
     informative message; and its stderr still carries our temp path."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(frames, "ffmpeg_available", lambda: True)
-    monkeypatch.setattr(frames, "probe_duration", lambda path: None)
+    monkeypatch.setattr(frames, "_probe", lambda path: (None, None))
     messages = iter(
         [
             b"first: moov atom not found",
@@ -782,3 +783,69 @@ def test_an_unparseable_tgs_is_refused_rather_than_rendered_blank():
     for payload in (b"nonsense", b"{}"):
         with pytest.raises(frames.FrameExtractionError, match="zero frames"):
             frames.extract_frames(gzip.compress(payload), ".tgs", 3)
+
+
+# --- the sampling ladder must land on frames that exist ----------------------
+
+
+@pytest.mark.skipif(not ffmpeg_available(), reason="ffmpeg is not installed")
+def test_every_requested_frame_is_delivered_for_a_short_clip(tmp_path):
+    """A container's duration includes the last frame's DISPLAY time.
+
+    Spreading the ladder over the whole duration put the final sample past the
+    last frame's PTS, so that seek returned nothing and the caller silently got
+    one frame fewer than it asked for, with no metadata naming the loss.
+
+    This must be a real video: a valid .gif is decoded by Pillow and never
+    reaches the ffmpeg ladder at all.
+    """
+    clip = tmp_path / "clip.mp4"
+    made = subprocess.run(
+        [
+            "ffmpeg",
+            "-nostdin",
+            "-loglevel",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=1.2:size=32x32:rate=10",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        capture_output=True,
+        timeout=60,
+    )
+    if made.returncode != 0 or not clip.exists():
+        pytest.skip("this ffmpeg build cannot synthesise a test clip")
+
+    data = clip.read_bytes()
+    for wanted in (4, 8):
+        got = frames.extract_frames(data, ".mp4", wanted)
+        assert len(got) == wanted, f"asked for {wanted} frames, got {len(got)}"
+
+
+def test_probe_reports_no_duration_for_the_suffixes_extract_frames_can_produce():
+    """The bogus-duration case is unreachable, and this is what keeps it so.
+
+    ffprobe invents a duration for text through demuxers it reaches by extension
+    alone - `tty` for `.txt`, and an image demuxer for `.png`. Neither can reach
+    the ffmpeg ladder: extract_frames rewrites any unknown suffix to `.bin`, and
+    only FFMPEG_SUFFIXES route to _frames_with_ffmpeg at all (`.png` is
+    Pillow-only and re-raises rather than falling through). This pins that, so
+    widening either set fails here instead of feeding the ladder a guess.
+    """
+    if not frames.ffmpeg_available():
+        pytest.skip("ffprobe ships with ffmpeg")
+
+    text = b"this is not media at all. " * 44
+    for suffix in sorted(frames.FFMPEG_SUFFIXES | {".bin"}):
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(text)
+            path = handle.name
+        try:
+            assert frames.probe_duration(path) is None, f"{suffix} produced a guessed duration"
+        finally:
+            os.unlink(path)
