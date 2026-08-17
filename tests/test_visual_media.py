@@ -199,6 +199,78 @@ def test_extract_frames_reports_an_undecodable_tgs_clearly():
 
 
 @pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_a_transparent_lottie_frame_says_it_is_the_content_not_a_failure():
+    """A message effect begins and ends on an empty canvas.
+
+    Measured on Telegram's own fire effect: frame 0 of 181 had zero visible
+    pixels while the middle frames had 19-45%. Handed a blank image beside full
+    ones with nothing to explain it, a caller concludes the render failed - the
+    wrong conclusion about a correct render.
+    """
+    import gzip
+    import json as _json
+
+    # A one-layer animation whose opacity is 0 at the first keyframe.
+    lottie = {
+        "v": "5.5.7",
+        "fr": 30,
+        "ip": 0,
+        "op": 30,
+        "w": 64,
+        "h": 64,
+        "nm": "t",
+        "ddd": 0,
+        "assets": [],
+        "layers": [
+            {
+                "ddd": 0,
+                "ind": 1,
+                "ty": 1,
+                "nm": "solid",
+                "sr": 1,
+                "sc": "#ff0000",
+                "sw": 64,
+                "sh": 64,
+                "ao": 0,
+                "ip": 0,
+                "op": 30,
+                "st": 0,
+                "bm": 0,
+                "ks": {
+                    "o": {
+                        "a": 1,
+                        "k": [
+                            {
+                                "t": 0,
+                                "s": [0],
+                                "i": {"x": [1], "y": [1]},
+                                "o": {"x": [0], "y": [0]},
+                            },
+                            {"t": 29, "s": [100]},
+                        ],
+                    },
+                    "r": {"a": 0, "k": 0},
+                    "p": {"a": 0, "k": [32, 32, 0]},
+                    "a": {"a": 0, "k": [32, 32, 0]},
+                    "s": {"a": 0, "k": [100, 100, 100]},
+                },
+            }
+        ],
+    }
+    payload = gzip.compress(_json.dumps(lottie).encode())
+
+    got = extract_frames(payload, ".tgs", count=3)
+
+    first = got[0][1]
+    assert first["blank"] is True, "an empty first frame was reported as ordinary content"
+    assert "not a failed render" in first["blank_note"]
+    # The frames that do carry content must NOT be flagged.
+    assert not any(
+        meta.get("blank") for _data, meta in got[1:]
+    ), "a visible frame was flagged blank"
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
 def test_extract_frames_renders_distinct_frames_from_a_real_lottie():
     """A moving shape must produce different frames, not the same image N times."""
     frames = extract_frames(_animated_tgs(), ".tgs", count=3)

@@ -268,7 +268,17 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
         image = animation.render_pillow_frame(
             frame_num=index, width=LOTTIE_RENDER_SIZE, height=LOTTIE_RENDER_SIZE
         )
-        data, meta = encode_image(image.convert("RGBA"), image_format="png")
+        rendered = image.convert("RGBA")
+        # An empty frame is normal here and needs saying so. A message effect
+        # BEGINS and ENDS transparent — measured on Telegram's own 🔥 effect, frame
+        # 0 of 181 has zero visible pixels and frame 180 has eight — so an evenly
+        # spaced ladder legitimately lands on blank canvases at both ends. Without
+        # this flag a caller sees a blank image next to full ones and concludes the
+        # render failed, which is the wrong conclusion about a correct render.
+        # getbbox() on the alpha channel is a C-level scan and returns None only
+        # when every pixel is fully transparent.
+        blank = rendered.getchannel("A").getbbox() is None
+        data, meta = encode_image(rendered, image_format="png")
         meta.update(
             {
                 "frame_index": index,
@@ -277,6 +287,13 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
                 "animation_format": "lottie_tgs",
             }
         )
+        if blank:
+            meta["blank"] = True
+            meta["blank_note"] = (
+                "This frame is fully transparent, and that is the animation's own content at "
+                "frame {index} of {total} — not a failed render. Effects and stickers commonly "
+                "start and end on an empty canvas.".format(index=index, total=total)
+            )
         if frame_rate:
             meta["timestamp_seconds"] = round(index / frame_rate, 3)
         frames.append((data, meta))
