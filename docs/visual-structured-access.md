@@ -481,6 +481,7 @@ telegram_mcp/effect_catalog.py, telegram_mcp/media_transfer.py
 telegram_mcp/media_preview.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
 telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
+telegram_mcp/tools/scheduled.py, telegram_mcp/tools/ephemeral.py
 conftest.py
 docs/visual-structured-access.md
 ```
@@ -488,6 +489,18 @@ docs/visual-structured-access.md
 `text_fidelity.py` holds the string rules split out of `message_view.py`, `media_transfer.py`
 the bounded-download layer and `media_preview.py` the asset-preview layer — both split out of
 `tools/inspection.py`. All three are re-exported from their original modules, so no import moved.
+`scheduled.py` and `ephemeral.py` are the timed-message pair. Upstream can only *create* a
+plain scheduled message, so `scheduled.py` adds reading the queue back, editing it, cancelling
+it, and `schedule_repeat_period` — the field behind Telegram's recurring messages, whose two
+valid periods (86400 and 604800) were established by probing the live server rather than inferred:
+both fail only on `PREMIUM_ACCOUNT_REQUIRED`, while 5 seconds is rejected as
+`SCHEDULE_REPEAT_PERIOD_INVALID`. `ephemeral.py` covers `ttl_seconds`, which nothing read or set
+before: finding disappearing media before it is opened, sending it with a timer through the SAME
+allowed-roots gate upstream's `upload_file` uses, and returning a copy through MCP rather than to
+disk — because the file-path route is gated behind configured roots and a message that dies on
+first view cannot wait for configuration. Saving what a sender set to disappear defeats their
+choice, so every result says so.
+
 `media_preview.py` is where an asset becomes a picture *and* the label saying what the picture is
 not (`composite_fidelity`, `color_fidelity`, `preview_source`); `tools/effects.py` takes its
 encoders from there rather than reaching into `tools/inspection.py`.
@@ -498,7 +511,7 @@ for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralis
 `load_dotenv()` otherwise lets the operator's own `.env` decide test results — two
 `test_file_path_security.py` assertions failed on exactly that.
 
-The only upstream files touched are `telegram_mcp/tools/__init__.py` (four import lines),
+The only upstream files touched are `telegram_mcp/tools/__init__.py` (six import lines),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py`
 layers on top of the upstream `message_to_dict` instead of replacing it, so upstream
 improvements keep flowing through.
