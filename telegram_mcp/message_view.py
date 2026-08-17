@@ -347,6 +347,16 @@ def describe_media_label(msg) -> Optional[str]:
     if not label:
         return None
 
+    # Upstream checks `video` before `gif`, and Telethon sets BOTH for an
+    # animation: a Telegram GIF is an mp4 carrying DocumentAttributeAnimated. So
+    # the label a caller reads first said "video" for a GIF while describe_media,
+    # in this same module and the same payload, reported kind="gif" — one question
+    # with two answers, and the vaguer one on top. Confirmed live on a real
+    # animation (msg.gif and msg.video both set, attributes carrying
+    # DocumentAttributeAnimated). The specific answer is the true one.
+    if label == "video" and getattr(msg, "gif", None) is not None:
+        return "gif"
+
     # Branch on the KIND, never on the payload. Splitting at the first ": " asked
     # the attacker-controlled value which format it was in: a sticker whose alt
     # contains ": " — a pack creator picks that text — took the "document: <name>"

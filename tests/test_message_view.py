@@ -479,6 +479,57 @@ def test_a_sticker_alt_containing_a_colon_is_still_cleaned():
     assert label.startswith("sticker ")
 
 
+def test_an_animation_is_labelled_gif_not_video():
+    """Telethon sets .gif AND .video for an animation; upstream checks video first.
+
+    So the label a caller reads first said "video" for a GIF while describe_media,
+    in the same payload, reported kind="gif". Confirmed against a real animation
+    in a live chat: attributes carried DocumentAttributeAnimated and
+    media_details.kind was already "gif" while media said "video".
+    """
+    document = SimpleNamespace(id=1, mime_type="video/mp4", size=47979, attributes=[], thumbs=[])
+    msg = SimpleNamespace(
+        web_preview=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video_note=None,
+        video=document,
+        audio=None,
+        gif=document,
+        document=document,
+        contact=None,
+        geo=None,
+        poll=None,
+        media=document,
+    )
+
+    assert describe_media_label(msg) == "gif"
+    assert describe_media(msg)["kind"] == "gif", "the two answers must not diverge again"
+
+
+def test_a_plain_video_is_still_a_video():
+    """The correction above must not relabel every video."""
+    document = SimpleNamespace(id=1, mime_type="video/mp4", size=100, attributes=[], thumbs=[])
+    msg = SimpleNamespace(
+        web_preview=None,
+        sticker=None,
+        photo=None,
+        voice=None,
+        video_note=None,
+        video=document,
+        audio=None,
+        gif=None,
+        document=document,
+        contact=None,
+        geo=None,
+        poll=None,
+        media=document,
+    )
+
+    assert describe_media_label(msg) == "video"
+
+
 def test_a_message_with_no_media_has_no_label():
     assert describe_media_label(SimpleNamespace()) is None
 
