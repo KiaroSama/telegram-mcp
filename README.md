@@ -642,12 +642,15 @@ server accepts only from a Premium account — and the other three read, edit an
 
 `list_disappearing_media` finds media the sender set to self-destruct, and finds it *before* it is
 opened: a read starts the countdown and Telegram then drops the file, after which nothing can
-fetch it. `save_disappearing_media` returns the picture or video frames through MCP rather than to
-disk, because the file-path route is gated behind configured allowed roots and a view-once message
-cannot wait for that. Saving one keeps a copy the sender did not agree to leave behind — the
-protocol permits it because the bytes already arrived, which is not the same as consent, so every
-result says so. `send_disappearing_media` sends with a timer (`seconds=0` means view-once) through
-that same roots gate.
+fetch it. `save_disappearing_media` **writes the file to disk** — photo, video, voice, audio or document —
+under the same allowed roots as `download_media`. It fetches the bytes exactly once and writes
+those, because a second fetch after the countdown has started returns nothing. With roots
+unconfigured nothing can be written and it says so, still returning a photo/video preview so the
+content is at least visible meanwhile. Saving one keeps a copy the sender did not agree to leave
+behind — the protocol permits it because the bytes already arrived, which is not the same as
+consent, so every result says so. `send_disappearing_media` sends with a timer through that same
+gate; `seconds` is 1-60 or 0 for view-once, and anything longer is refused because Telegram
+silently drops an out-of-range timer and would send permanent media instead.
 
 `inspect_buttons` and `click_button` cover the inline ("glass") keyboard. The pairing matters:
 a button label is written by whoever sent the message and can carry a bidi override that makes

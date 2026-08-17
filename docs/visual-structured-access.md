@@ -158,19 +158,26 @@ fetching them. `view_once: true` means destroyed after a single view rather than
 Already-viewed media cannot be listed, because it no longer exists to list.
 `list_disappearing_media(5899781975)`
 
-**`save_disappearing_media(chat_id, message_id, count=4, max_bytes=20971520, max_dimension=1568, account=None) -> list`**
-Fetch one before it expires and return it here: the picture for a photo, evenly spaced frames for
-a video, as MCP image blocks rather than a file on disk. That is deliberate — the file-path route
-is gated behind configured allowed roots and a view-once message cannot wait for configuration.
-Voice and audio cannot be an image block, so they report that limit and point at `download_media`.
-Saving what a sender set to disappear keeps a copy they did not agree to leave behind; the protocol
-permits it because the bytes already arrived at this account, which is not consent, and every
-result says so.
-`save_disappearing_media(5899781975, 327)`
+**`save_disappearing_media(chat_id, message_id, file_path=None, preview=True, count=4, max_bytes=20971520, max_dimension=1568, account=None) -> list`**
+Write it to disk before it expires: photo, video, voice, audio or document, under the same allowed
+roots as `download_media` and through the same gate. What differs from `download_media` is the
+race — the media is fetched **once** and those bytes are written straight out, because a second
+fetch after the countdown has begun returns nothing at all. `file_path` omitted saves into
+`<first_root>/downloads/`; the extension always comes from the media, never from the argument, so a
+voice note cannot land as a `.jpg`. `preview=True` also returns the picture or frames here, which
+costs nothing extra since the bytes are already in memory. With roots unconfigured nothing is
+written and the result says so, while still returning the preview. Saving what a sender set to
+disappear keeps a copy they did not agree to leave behind; the protocol permits it because the
+bytes already arrived at this account, which is not consent, and every result says so.
+`save_disappearing_media(5899781975, 327, file_path="evidence.jpg")`
 
 **`send_disappearing_media(chat_id, file_path, seconds=0, caption=None, as_voice=False, as_video_note=False, account=None) -> str`**
-Send a photo, video or voice that destroys itself. `seconds=0` is Telegram's view-once sentinel,
-not "no timer". `file_path` resolves under the same allowed roots as upstream's `upload_file`, so
+Send a photo, video or voice that destroys itself. `seconds` is 1-60; `0` is Telegram's view-once
+sentinel, not "no timer", and the only way to outlast a minute. Anything above 60 is refused here,
+because the server does not reject it — measured one value at a time, 1-60 come back applied while
+61, 90, 300 and 3600 all come back with **no timer at all**, so the media would be permanent and
+the caller would never know. The applied timer is compared with the requested one either way, and a
+mismatch is reported as `timer_dropped` with a warning rather than a success. `file_path` resolves under the same allowed roots as upstream's `upload_file`, so
 this widens no filesystem surface. A caption is not covered by the timer and stays in the chat.
 `send_disappearing_media("me", "photo.jpg", 30)`
 

@@ -6,6 +6,7 @@ a viewed message is gone from the server, and audio cannot come back as a pictur
 """
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -87,7 +88,33 @@ def _wire(monkeypatch):
             return encoded if encoded is not None else ([{"width": 10}], ["<image>"])
 
         monkeypatch.setattr(mod.asyncio, "to_thread", _to_thread)
+
+        # Saving writes a real file, so the path gate is part of the unit under
+        # test. Default here: no roots configured.
+        async def _no_roots(*, raw_path, default_filename, ctx, tool_name):
+            return None, f"{tool_name} is disabled until allowed roots are configured."
+
+        monkeypatch.setattr(mod, "_resolve_writable_file_path", _no_roots)
         return client
+
+    return wire
+
+
+@pytest.fixture
+def _with_roots(monkeypatch, tmp_path):
+    """Point the writable-path gate at a real temp directory."""
+
+    def wire():
+        async def _resolve(*, raw_path, default_filename, ctx, tool_name):
+            return (tmp_path / (raw_path or default_filename)), None
+
+        async def _roots(ctx, tool_name):
+            return [tmp_path], None
+
+        monkeypatch.setattr(mod, "_resolve_writable_file_path", _resolve)
+        monkeypatch.setattr(mod, "_ensure_allowed_roots", _roots)
+        monkeypatch.setattr(mod, "_path_is_within_any_root", lambda path, roots: True)
+        return tmp_path
 
     return wire
 
@@ -154,18 +181,53 @@ async def test_nothing_found_explains_that_viewed_media_is_already_gone(_wire):
 
 
 @pytest.mark.asyncio
-async def test_saving_returns_the_picture_and_the_byte_count(_wire):
+async def test_saving_writes_a_real_file_and_fetches_only_once(_wire, _with_roots):
+    """A disappearing message cannot be downloaded twice, so one fetch has to
+    serve both the file on disk and the preview."""
+    # _wire patches the path gate too, so roots must be wired AFTER it.
     client = _wire(_Client(messages=[_msg(5, ttl=30, caption="hi")]))
+    root = _with_roots()
 
     result = await save_disappearing_media(1, 5, account="a")
 
-    assert isinstance(result, list), f"the media was not returned: {result!r}"
     payload = json.loads(result[0])
     record = payload["results"][0]
-    assert record["saved_bytes"] > 0
-    assert record["ttl_seconds"] == 30
+    saved = Path(record["saved_path"])
+    assert saved.is_file(), "nothing was written to disk"
+    assert saved.read_bytes() == client.payload, "the saved file is not the media"
+    assert record["saved_bytes"] == len(client.payload)
+    assert root in saved.parents
+    assert client.downloads == 1, "the media was fetched more than once"
     assert "did not agree" in payload["note"]
-    assert client.downloads == 1
+
+
+@pytest.mark.asyncio
+async def test_voice_is_saved_even_though_it_cannot_be_previewed(_wire, _with_roots):
+    """The first version refused audio outright; the file is the whole point."""
+    _wire(_Client(messages=[_msg(5, ttl=30)]), kind="voice")
+    _with_roots()
+
+    payload = json.loads((await save_disappearing_media(1, 5, account="a"))[0])
+    record = payload["results"][0]
+
+    assert Path(record["saved_path"]).is_file()
+    assert "cannot be returned as an image" in record["preview_error"]
+
+
+@pytest.mark.asyncio
+async def test_without_roots_nothing_is_written_but_the_preview_still_arrives(_wire):
+    """The gate is upstream's and stays shut; losing the content too would be worse."""
+    _wire(_Client(messages=[_msg(5, ttl=30)]))
+
+    result = await save_disappearing_media(1, 5, account="a")
+
+    payload = json.loads(result[0])
+    record = payload["results"][0]
+    assert "allowed roots" in record["save_error"]
+    assert "Nothing was written to disk" in record["save_error"]
+    assert "saved_path" not in record
+    assert record["fetched_bytes"] > 0
+    assert len(result) > 1, "the preview was dropped as well"
 
 
 @pytest.mark.asyncio
@@ -176,18 +238,6 @@ async def test_a_message_without_a_timer_is_refused_with_the_right_alternative(_
 
     assert "no self-destruct timer" in result
     assert "get_media_frames" in result
-
-
-@pytest.mark.asyncio
-async def test_voice_says_audio_cannot_come_back_as_an_image(_wire):
-    """A wrong promise here would look like a bug in the renderer instead of a limit."""
-    _wire(_Client(messages=[_msg(5, ttl=30)]), kind="voice")
-
-    payload = json.loads(await save_disappearing_media(1, 5, account="a"))
-
-    error = payload["results"][0]["save_error"]
-    assert "Audio cannot be returned as an image" in error
-    assert "download_media" in error
 
 
 @pytest.mark.asyncio
@@ -258,3 +308,72 @@ async def test_zero_seconds_means_view_once_not_no_timer(monkeypatch):
 
     assert sent["ttl"] == VIEW_ONCE
     assert payload["results"][0]["view_once"] is True
+
+
+def test_the_ttl_ceiling_is_the_measured_one():
+    """1-60 come back set; 61, 90, 300 and 3600 come back with no timer at all."""
+    from telegram_mcp.tools.ephemeral import MAX_TTL_SECONDS
+
+    assert MAX_TTL_SECONDS == 60
+
+
+def _sender(monkeypatch, media_ttl):
+    """A client whose send_file reports whatever timer Telegram applied."""
+    sent = {}
+
+    async def _resolve_path(*, raw_path, ctx, tool_name):
+        return "/tmp/x.jpg", None
+
+    class _SendClient:
+        async def send_file(self, entity, path, ttl=None, caption=None, **kw):
+            sent["ttl"] = ttl
+            applied = ttl if media_ttl == "echo" else media_ttl
+            return SimpleNamespace(id=9, media=SimpleNamespace(ttl_seconds=applied))
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "get_client", lambda account=None: _SendClient())
+    monkeypatch.setattr(mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+    return sent
+
+
+@pytest.mark.asyncio
+async def test_a_timer_over_the_ceiling_is_refused_rather_than_sent_wrong(monkeypatch):
+    """Telegram drops an out-of-range timer silently, so sending it would produce
+    permanent media while the caller believed it was disappearing."""
+    sent = _sender(monkeypatch, "echo")
+
+    result = await send_disappearing_media(1, "x.jpg", 90, account="a")
+
+    assert "must be 1-60" in result
+    assert "silently drops it" in result
+    assert "ttl" not in sent, "a message with a doomed timer was sent anyway"
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_timer_is_reported_loudly(monkeypatch):
+    """Defence in depth: the accepted range is Telegram's to change."""
+    _sender(monkeypatch, None)
+
+    payload = json.loads(await send_disappearing_media(1, "x.jpg", 30, account="a"))
+    record = payload["results"][0]
+
+    assert record["timer_dropped"] is True
+    assert "NOT disappearing" in record["warning"]
+    assert payload["timer_applied"] is False
+
+
+@pytest.mark.asyncio
+async def test_an_applied_timer_is_not_flagged(monkeypatch):
+    _sender(monkeypatch, "echo")
+
+    payload = json.loads(await send_disappearing_media(1, "x.jpg", 30, account="a"))
+
+    assert "timer_dropped" not in payload["results"][0]
+    assert payload["timer_applied"] is True
