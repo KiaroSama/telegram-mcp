@@ -49,11 +49,17 @@ through Telethon's high-level methods, so a `0` does not always mean untouched.
 ## Named features: reachable today
 
 First probed by searching for the TL verbs that implement each one, then **verified
-per feature** — because that probe is wrong in both directions. A substring match
+per feature** — because that probe was wrong three separate times, in both
+directions. A substring match
 over-reports (`WebView` matches the button-*description* code; `Search` matches
 `contacts.SearchRequest`), and counting only raw `functions.*` calls under-reports,
 because Telethon's high-level methods reach TL without ever naming it. Every row
 below was confirmed against a real tool or call site.
+
+Every claim in this document was checked that way in the end, and it kept mattering:
+Mini App launch and view counts were wrongly listed as present, poll *creation* was
+wrongly listed as absent, and message search is present through a path no raw count
+can see. Treat a TL-verb grep as a starting point, never as the answer.
 
 | Feature | How it is reached |
 |---|---|
@@ -80,7 +86,7 @@ verified individually.
 
 | Feature | Why | Cost |
 |---|---|---|
-| **Polls: create, vote, read results** | Common in every group. The poll question is already visible but the agent cannot vote or tally. | Small — 3 requests |
+| **Polls: vote and read results** | `create_poll` already ships (via `InputMediaPoll`), and the question is visible in a message — but `messages.SendVote`, `GetPollResults` and `GetPollVotes` have no call sites, so an agent can ask a question and never learn the answer. | Small — 3 requests |
 | **Stories: read, react, post** | An entire content type that is invisible today. Reading is the valuable half. | Medium — 34 requests, a new media shape |
 | **Saved messages: tags and saved dialogs** | The account's own scratch space; the natural place for an agent to keep notes. | Small |
 | **Translation** | One request, immediate utility on foreign-language chats. | Trivial |
@@ -106,6 +112,36 @@ a button and says plainly that no callback can press it, but nothing launches on
 | Login / QR / auth flow | Session creation already belongs to the operator's setup, and putting it behind a tool widens what a compromised agent can do. |
 | Group and video calls | Needs WebRTC and a media stack, not just TL. Out of proportion to any agent benefit. |
 | Secret chats | Telethon has no E2E implementation; see `.ai/DECISIONS.md`. |
+
+## Administering a channel or group: what already ships
+
+Checked by tool name against the 148 registered tools, because most of this was
+assumed missing and is not. Nothing below needs building.
+
+| Operation | Tool |
+|---|---|
+| Create a channel | `create_channel` |
+| Create a group / community | `create_group`, then `enable_forum_topics` for topic mode |
+| Ban, unban, list bans | `ban_user`, `unban_user`, `get_banned_users` |
+| Block / unblock a user | `block_user`, `unblock_user`, `get_blocked_users` |
+| Promote, demote, set rights | `promote_admin`, `demote_admin`, `edit_admin_rights`, `get_admins` |
+| Default member permissions | `set_default_chat_permissions` |
+| Add members, invite links | `invite_to_group`, `export_chat_invite`, `get_invite_link`, `import_chat_invite` |
+| Rename a channel or group | `edit_chat_title` |
+| Set its description / bio | `edit_chat_about` |
+| Its photo | `edit_chat_photo`, `delete_chat_photo` |
+| Own name and bio | `update_profile` |
+| Own profile photo | `set_profile_photo`, `delete_profile_photo` |
+| Slow mode, forum mode | `toggle_slow_mode`, `enable_forum_topics` |
+| Admin log (recent actions) | `get_recent_actions` |
+| Participants | `get_participants` |
+| Archive, mute, pin | `archive_chat`, `mute_chat`, `pin_message`, `unpin_all_messages` |
+| Leave, clear history | `leave_chat`, `delete_chat_history` |
+
+**Only two things from that whole area are genuinely missing**, and both are now
+phases below: channel/group **statistics** (`stats.*`, 9 requests, none called) and
+changing a channel's **public username** (`channels.UpdateUsername` — zero call
+sites, so the ID a channel is reached by cannot be changed).
 
 ## Planned work
 
@@ -145,6 +181,23 @@ The settings an operator actually reaches for are all missing:
 Self-contained, no new dependency, and every one is a single request. `DeleteChannel`
 and `ConvertToGigagroup` are irreversible and must be annotated `destructiveHint`
 and require explicit confirmation in their own docstrings.
+
+**Not in this phase because it already ships:** creating a channel or group, banning
+and unbanning, admin rights, adding members and invite links, renaming, the
+description, the photo, slow mode, forum mode, the admin log and participants — see
+the table above. The highest-value single item here is `UpdateUsername`, because a
+channel's public ID is the one identity-level setting with no route at all today;
+pair it with `CheckUsername` so a taken name is reported before the attempt.
+
+### Phase 1b — statistics
+
+`stats.*` is **9 requests, none of them called**: `GetBroadcastStats`,
+`GetMegagroupStats`, `GetMessageStats`, `GetStoryStats`, plus the public-forward
+listings and the graph loaders. Telegram returns most of this as *graph tokens* that
+need a second `LoadAsyncGraph` call, so the shape is not a flat dict and the tool
+has to resolve or clearly label what it did not resolve. Available only to admins of
+channels above Telegram's member threshold, which is a refusal to report plainly
+rather than an error to leak.
 
 ### Phase 2 — files and chat transfer, made usable
 
