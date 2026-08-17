@@ -470,15 +470,19 @@ telegram_mcp/visual/images.py, telegram_mcp/visual/frames.py
 telegram_mcp/message_view.py, telegram_mcp/text_fidelity.py
 telegram_mcp/button_view.py
 telegram_mcp/effect_catalog.py, telegram_mcp/media_transfer.py
+telegram_mcp/media_preview.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
 telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
 conftest.py
 docs/visual-structured-access.md
 ```
 
-`text_fidelity.py` holds the string rules split out of `message_view.py`, and
-`media_transfer.py` the bounded-download layer split out of `tools/inspection.py`; both
-are re-exported from their original modules, so no import moved.
+`text_fidelity.py` holds the string rules split out of `message_view.py`, `media_transfer.py`
+the bounded-download layer and `media_preview.py` the asset-preview layer — both split out of
+`tools/inspection.py`. All three are re-exported from their original modules, so no import moved.
+`media_preview.py` is where an asset becomes a picture *and* the label saying what the picture is
+not (`composite_fidelity`, `color_fidelity`, `preview_source`); `tools/effects.py` takes its
+encoders from there rather than reaching into `tools/inspection.py`.
 
 The root `conftest.py` is a test-only file, and it is at the root rather than in `tests/`
 for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralises the
