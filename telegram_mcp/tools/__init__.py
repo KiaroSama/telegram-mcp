@@ -3,15 +3,23 @@
 from telegram_mcp.tools.accounts import *
 from telegram_mcp.tools.contacts import *
 from telegram_mcp.tools.chats import *
+from telegram_mcp.tools.topics import *
+from telegram_mcp.tools.chat_state import *
 from telegram_mcp.tools.messages import *
+from telegram_mcp.tools.messages_read import *
+from telegram_mcp.tools.messages_state import *
+from telegram_mcp.tools.messages_queue import *
 from telegram_mcp.tools.groups import *
+from telegram_mcp.tools.moderation import *
+from telegram_mcp.tools.invites import *
 from telegram_mcp.tools.media import *
 from telegram_mcp.tools.profile import *
 from telegram_mcp.tools.folders import *
 from telegram_mcp.tools.events import *
 
-# Fork additions (visual + deep structured access). Kept last and in their own
-# modules so upstream merges touch only this block.
+# Visual and deep structured access. Kept last because these layer on top of the
+# modules above; the grouping is historic (they were once the only fork-authored
+# files) but the ordering still reflects the dependency direction.
 from telegram_mcp.tools.inspection import *
 from telegram_mcp.tools.visual import *
 from telegram_mcp.tools.effects import *

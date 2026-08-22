@@ -1,6 +1,6 @@
 import pytest
 
-from telegram_mcp import runtime
+from telegram_mcp import file_roots, runtime
 from telegram_mcp.tools import media
 
 
@@ -30,7 +30,7 @@ async def test_album_mode_sends_multiple_files_as_one_media_group(
     second.write_bytes(b"png-two")
 
     client = _DummyClient()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -68,7 +68,7 @@ async def test_album_mode_passes_topic_id_as_reply_to(tmp_path, monkeypatch, too
     second.write_bytes(b"png-two")
 
     client = _DummyClient()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -97,7 +97,7 @@ async def test_send_file_passes_topic_id_as_reply_to(tmp_path, monkeypatch):
     path.write_bytes(b"%PDF")
 
     client = _DummyClient()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -144,7 +144,7 @@ async def test_send_album_reuses_readable_path_security(tmp_path, monkeypatch):
     outside_file = outside / "two.png"
     outside_file.write_bytes(b"png-two")
 
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
     monkeypatch.setattr(media, "clients", {"default": _DummyClient()})
 
     result = await media.send_album("AgenticAIChat", ["one.png", str(outside_file)])

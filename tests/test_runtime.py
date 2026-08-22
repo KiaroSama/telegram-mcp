@@ -11,7 +11,7 @@ from mcp.types import ErrorData, ToolAnnotations
 from telethon.tl.types import Channel, Chat, PeerUser, User
 
 import main
-from telegram_mcp import runtime
+from telegram_mcp import file_roots, runtime
 
 
 def _clear_session_env(monkeypatch):
@@ -754,7 +754,7 @@ async def test_more_file_resolution_edges(tmp_path, monkeypatch):
     nested.mkdir()
     file_path = nested / "file.txt"
     file_path.write_text("ok", encoding="utf-8")
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
     resolved, error = await runtime._resolve_readable_file_path(
         raw_path="missing.txt", ctx=None, tool_name="send_file"
@@ -855,7 +855,7 @@ def test_server_roots_fallback_enabled_parsing(monkeypatch):
 async def test_empty_client_roots_denies_by_default(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
     monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
 
     roots, status = await runtime._get_effective_allowed_roots_with_status(_ctx_with_roots([]))
@@ -867,7 +867,7 @@ async def test_empty_client_roots_denies_by_default(tmp_path, monkeypatch):
 async def test_empty_client_roots_falls_back_to_server_when_enabled(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
     monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
 
     roots, status = await runtime._get_effective_allowed_roots_with_status(_ctx_with_roots([]))
@@ -882,7 +882,7 @@ async def test_empty_client_roots_falls_back_to_server_when_enabled(tmp_path, mo
 
 @pytest.mark.asyncio
 async def test_empty_client_roots_fallback_noop_without_server_roots(monkeypatch):
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [])
     monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
 
     roots, status = await runtime._get_effective_allowed_roots_with_status(_ctx_with_roots([]))
@@ -957,7 +957,7 @@ async def test_list_roots_validation_error_recovers_client_paths(tmp_path, monke
 
     root = tmp_path / "workspace"
     root.mkdir()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [])
     monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
 
     with pytest.raises(ValidationError) as exc_info:
@@ -980,7 +980,7 @@ async def test_list_roots_validation_error_recovers_client_paths(tmp_path, monke
 async def test_list_roots_unexpected_error_falls_back_when_opt_in(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
     monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
 
     roots, status = await runtime._get_effective_allowed_roots_with_status(
@@ -994,7 +994,7 @@ async def test_list_roots_unexpected_error_falls_back_when_opt_in(tmp_path, monk
 async def test_list_roots_unexpected_error_denies_without_opt_in(tmp_path, monkeypatch):
     root = tmp_path / "root"
     root.mkdir()
-    monkeypatch.setattr(runtime, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
     monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
 
     roots, status = await runtime._get_effective_allowed_roots_with_status(

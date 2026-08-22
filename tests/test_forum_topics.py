@@ -5,7 +5,7 @@ import pytest
 from telethon.tl import functions
 from telethon.tl.types import Channel
 
-from telegram_mcp.tools import chats
+from telegram_mcp.tools import topics
 
 
 def _supergroup(*, forum=False):
@@ -59,10 +59,10 @@ async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch):
     async def fake_resolve(chat_id, cl):
         return entity
 
-    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
-    monkeypatch.setattr(chats, "resolve_entity", fake_resolve)
+    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
+    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
 
-    result = await chats.enable_forum_topics(chat_id=12345)
+    result = await topics.enable_forum_topics(chat_id=12345)
 
     assert result == "Forum topics enabled for Hermes Topics."
     assert len(client.requests) == 1
@@ -82,16 +82,16 @@ async def test_create_forum_topic_sends_raw_create_forum_topic_request(monkeypat
     async def fake_resolve(chat_id, cl):
         return entity
 
-    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
-    monkeypatch.setattr(chats, "resolve_entity", fake_resolve)
+    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
+    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
 
-    result = await chats.create_forum_topic(chat_id=12345, title="Dev", icon_color=0x6FB9F0)
+    result = await topics.create_forum_topic(chat_id=12345, title="Dev", icon_color=0x6FB9F0)
 
     payload = json.loads(result)
     assert payload["results"] == [{"chat_id": -1000000012345, "topic_id": 777, "title": "Dev"}]
     assert len(client.requests) == 1
     request = client.requests[0]
-    assert isinstance(request, chats.CreateForumTopicRequest)
+    assert isinstance(request, topics.CreateForumTopicRequest)
     assert request.peer is entity
     assert request.title == "Dev"
     assert request.icon_color == 0x6FB9F0
@@ -106,10 +106,10 @@ async def test_create_forum_topic_requires_forum_enabled(monkeypatch):
     async def fake_resolve(chat_id, cl):
         return entity
 
-    monkeypatch.setattr(chats, "get_client", lambda account=None: client)
-    monkeypatch.setattr(chats, "resolve_entity", fake_resolve)
+    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
+    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
 
-    result = await chats.create_forum_topic(chat_id=12345, title="Dev")
+    result = await topics.create_forum_topic(chat_id=12345, title="Dev")
 
     assert (
         result
