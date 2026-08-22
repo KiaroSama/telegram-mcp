@@ -530,17 +530,28 @@ For multiple accounts, pass variables such as `TELEGRAM_SESSION_STRING_WORK` and
 
 ## Development
 
-The implementation is split into a small compatibility entrypoint and modular package code:
+The implementation is split into a small compatibility entrypoint and modular package code.
+`settings.py` is deliberately the lowest layer - everything above needs some of it and none
+of it needs them - and `runtime.py` re-exports the layers below so that
+`from telegram_mcp.runtime import *` keeps working for every tool module.
+
+**Patch a module at its source, not through `runtime`.** The star imports mean a name
+exists in two places at once; rebinding the re-exported one leaves the code reading its
+own. That is what `tests/test_tool_registry.py` guards.
 
 ```text
-main.py                    # historical entrypoint and compatibility exports
-telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file safety
-telegram_mcp/runner.py     # application startup
-telegram_mcp/tools/        # tool modules grouped by domain
+main.py                       # historical entrypoint and compatibility exports
+telegram_mcp/settings.py      # environment configuration; the bottom of the import graph
+telegram_mcp/runtime.py       # shared MCP setup, validation, entity resolution, formatting
+telegram_mcp/connection.py    # proxies, the session pool, account routing, reconnection
+telegram_mcp/file_roots.py    # allowed roots, and resolving a caller's path inside one
+telegram_mcp/aliases.py       # calling a contact what the operator calls them
+telegram_mcp/runner.py        # application startup
+telegram_mcp/tools/           # tool modules grouped by domain
 telegram_mcp/message_view.py  # deep structured message view
-telegram_mcp/visual/       # Telegram Desktop capture and image/frame helpers
-sanitize.py                # output sanitization helpers
-tests/                     # pytest suite
+telegram_mcp/visual/          # Telegram Desktop capture and image/frame helpers
+sanitize.py                   # output sanitization helpers
+tests/                        # pytest suite
 ```
 
 Run tests:

@@ -577,12 +577,14 @@ for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralis
 `load_dotenv()` otherwise lets the operator's own `.env` decide test results — two
 `test_file_path_security.py` assertions failed on exactly that.
 
-The inherited files this touches are `telegram_mcp/tools/__init__.py` (twelve import lines),
+The inherited files this touches are `telegram_mcp/tools/__init__.py` (28 import lines
+now: 12 for the modules described here, and 16 above them — up from 9, because splitting
+`messages.py`, `groups.py` and `chats.py` gave each of them siblings to register),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py` layers
 on top of the inherited `message_to_dict` rather than replacing it - originally so upstream
 improvements kept flowing through, now simply because the layering is the cleaner shape.
 
-**On the twelve import lines.** `import *` in `tools/__init__.py` binds every tool name into the
+**On those import lines.** `import *` in `tools/__init__.py` binds every tool name into the
 package namespace, which means a module whose own name matches one of its tools stops being
 reachable as an attribute: `telegram_mcp.tools.translate` resolved to the *function*, not the
 module, and nothing failed loudly - the server started, the tool registered, and only code

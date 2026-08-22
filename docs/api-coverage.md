@@ -185,8 +185,12 @@ the tree, which is the cost of having deferred them.
    a file made "unreadable" stays readable and `st_mode` never reports `0o600`. They now
    skip on non-POSIX, which keeps the security check where it holds and stops a
    permanently-red suite from hiding the next real regression.
-4. Split `tools/messages.py` and `runtime.py`, both well past the size where a file
-   stops being reviewable.
+4. ~~Split `tools/messages.py` and `runtime.py`~~ **done**, along with `tools/groups.py`,
+   `tools/chats.py` and `tests/test_runtime.py`. Nothing in the tree is over 800 lines
+   except `tools/contacts.py` at 802, which is one cohesive module and was left alone.
+   Splitting surfaced three instances of the same trap - a star import creates a second
+   name for one object, and the two drift the moment either is rebound - so
+   `tests/test_tool_registry.py` now guards it across the whole package.
 
 ### Phase 1 — full channel and group settings
 
@@ -302,7 +306,8 @@ with no conflicts — but it was paid for in workarounds:
   reason the `text_fidelity` layer exists.
 - Five POSIX-only test failures lived in inherited test files and were left red
   (now fixed — the first thing detaching actually bought).
-- `tools/messages.py` and `runtime.py` could not be split.
+- `tools/messages.py` and `runtime.py` could not be split (now done - the second
+  thing detaching bought).
 
 What detaching does **not** buy is any part of the feature list — the gaps measured
 above were never caused by the constraint, they were simply unbuilt, and the whole
