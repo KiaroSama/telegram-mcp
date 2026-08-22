@@ -356,11 +356,13 @@ function Invoke-SessionGenerator {
 
     Push-Location -LiteralPath $PSScriptRoot
     try {
+        $script:GeneratorExitCode = $null
         if (Test-Path -LiteralPath $python -PathType Leaf) {
             # Straight to the interpreter. `uv run` would rebuild and reinstall the
             # project first whenever a source file has changed, printing build and
             # wheel-install progress on top of the login prompt.
             & $python $script
+            $script:GeneratorExitCode = $LASTEXITCODE
         }
         else {
             $uv = Get-Command uv -ErrorAction SilentlyContinue
@@ -372,12 +374,59 @@ function Invoke-SessionGenerator {
             # the cache and the target sit on different filesystems.
             $previousLinkMode = $env:UV_LINK_MODE
             $env:UV_LINK_MODE = 'copy'
-            try { & $uv.Path run --quiet $script }
+            try {
+                & $uv.Path run --quiet $script
+                $script:GeneratorExitCode = $LASTEXITCODE
+            }
             finally { $env:UV_LINK_MODE = $previousLinkMode }
         }
     }
     finally { Pop-Location }
+
+    if ($script:GeneratorExitCode -ne 0) {
+        Write-Host ''
+        Write-Failure 'The generator did not finish, so it produced no session string.'
+        Write-Host 'Nothing was saved. Run it again once the problem above is resolved.'
+    }
 }
+
+function Test-SessionString {
+    <#
+      Ask Telethon whether this parses as a session, rather than guessing from its
+      length. A 42-character paste sailed past the old `length -lt 40` check and
+      was written to .env as a working account; `StringSession` rejects it outright.
+
+      The value goes in on STDIN, never as an argument: a command line is visible
+      to anything that can list processes.
+    #>
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Value)
+
+    # An empty value is a session with no auth key; say so rather than throwing on
+    # the parameter binding, which is what a Mandatory [string] does to ''.
+    if ([string]::IsNullOrWhiteSpace($Value)) { return 'empty' }
+
+    $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return 'unchecked' }
+
+    $probe = @'
+import sys
+from telethon.sessions import StringSession
+raw = sys.stdin.read().strip()
+try:
+    session = StringSession(raw)
+except Exception:
+    print("invalid")
+else:
+    print("valid" if session.auth_key and session.dc_id else "empty")
+'@
+    try {
+        $verdict = ($Value | & $python -c $probe 2>$null | Select-Object -Last 1)
+        if ($LASTEXITCODE -ne 0) { return 'unchecked' }
+        return "$verdict".Trim()
+    }
+    catch { return 'unchecked' }
+}
+
 
 function Add-Account {
     $accounts = Get-Accounts
@@ -399,9 +448,22 @@ function Add-Account {
         Write-Host 'Nothing was pasted; no change made.' -ForegroundColor Yellow
         return
     }
-    if ($sessionString.Length -lt 40) {
-        Write-Host 'That does not look like a session string - they are far longer.' -ForegroundColor Yellow
-        if (-not (Read-Confirmation 'Save it anyway?')) { Write-Host 'Cancelled.'; return }
+    switch (Test-SessionString -Value $sessionString) {
+        'valid' { }
+        'empty' {
+            Write-Failure 'That parses as a session but carries no auth key - it is an empty session.'
+            Write-Host 'Nothing was saved.'
+            return
+        }
+        'invalid' {
+            Write-Failure 'Telethon cannot read that as a session string, so it would never load.'
+            Write-Host 'Check you copied the whole line the generator printed. Nothing was saved.'
+            return
+        }
+        default {
+            Write-Note 'Could not verify the session string (no .venv to check it with).'
+            if (-not (Read-Confirmation 'Save it unverified?')) { Write-Host 'Cancelled.'; return }
+        }
     }
 
     $backup = Backup-EnvFile

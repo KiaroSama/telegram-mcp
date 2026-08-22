@@ -108,19 +108,33 @@ def _qr_login(client: TelegramClient) -> None:
             print("\nQR code expired, here is a fresh one.")
             _render_qr(qr)
         except errors.SessionPasswordNeededError:
-            while True:
-                pw = getpass.getpass(
-                    "\nTwo-factor authentication enabled. Please enter your password: "
-                )
-                try:
-                    client.sign_in(password=pw)
-                    return
-                except errors.PasswordHashInvalidError:
-                    print("Invalid password, please try again.")
+            _sign_in_with_password(client)
+            return
 
     print("\nQR code expired too many times. Please run the generator again.")
     client.disconnect()
     sys.exit(1)
+
+
+def _sign_in_with_password(client: TelegramClient) -> None:
+    """Ask for the 2FA password until it is accepted, or the user gives up.
+
+    Shared by BOTH login paths on purpose. This loop used to exist only in the QR
+    branch; the phone branch called sign_in once, so a single mistyped password
+    raised PasswordHashInvalidError, escaped to the outer handler and killed the
+    whole run with "Failed to generate session string" - after the code had
+    already been used, which is the expensive part to redo.
+    """
+    while True:
+        pw = getpass.getpass("\nTwo-factor authentication enabled. Please enter your password: ")
+        if not pw:
+            print("No password entered. Press Ctrl+C to give up, or try again.")
+            continue
+        try:
+            client.sign_in(password=pw)
+            return
+        except errors.PasswordHashInvalidError:
+            print("That password was not accepted. Try again.")
 
 
 def _phone_login(client: TelegramClient) -> None:
@@ -145,8 +159,7 @@ def _phone_login(client: TelegramClient) -> None:
     try:
         client.sign_in(phone, code)
     except errors.SessionPasswordNeededError:
-        pw = getpass.getpass("Two-factor authentication enabled. Please enter your password: ")
-        client.sign_in(password=pw)
+        _sign_in_with_password(client)
 
 
 def main() -> None:

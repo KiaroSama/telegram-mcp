@@ -321,7 +321,13 @@ require `account=<label>` and read-only tools fan out across every account when 
 omitted. The menu says so at the moment it happens.
 
 Choosing *Generate a session string* hands over to `session_string_generator.py` without
-forcing a login method, so it offers both QR and phone code. It runs through the existing
+forcing a login method, so it offers both QR and phone code. A rejected two-factor
+password is asked for again rather than ending the run — losing the login there means
+spending a fresh SMS code to start over.
+
+What you paste back is checked by Telethon's own parser, not by its length, and an
+account is not written unless that parses as a session carrying an auth key. If the
+generator exits without producing one, the menu says so and saves nothing. It runs through the existing
 `.venv` rather than `uv run`, which would rebuild and reinstall the project first and
 print build progress over the login prompt; `uv` is the fallback for when no venv exists.
 The generator asks for a label of its own — leave it blank, since the menu writes the

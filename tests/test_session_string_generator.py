@@ -158,7 +158,12 @@ def test_phone_login_uses_hidden_password_prompt_for_2fa(monkeypatch):
     session_string_generator._phone_login(client)
 
     assert client.phone == "+10000000000"
-    assert prompted == ["Two-factor authentication enabled. Please enter your password: "]
+    # Compared stripped: the wording is what this pins, not the spacing. Both login
+    # paths share one prompt now, and the QR one leads with a newline because it
+    # follows the QR art - matching the literal string would fail on that alone.
+    assert [text.strip() for text in prompted] == [
+        "Two-factor authentication enabled. Please enter your password:"
+    ]
     assert client.sign_in_calls == ["secret"]
 
 
