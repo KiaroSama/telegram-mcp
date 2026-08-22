@@ -108,7 +108,7 @@ Phase 1b. Two things learned while building them are worth more than the count:
 - A tool named the same as its own module is silently unreachable. `import *` in
   `tools/__init__.py` binds the tool name over the submodule attribute, so
   `telegram_mcp.tools.translate` resolved to the *function*. The module is
-  `translation.py` for that reason, and `test_merge_contract.py` now fails on any
+  `translation.py` for that reason, and `test_tool_registry.py` now fails on any
   future collision.
 - `stats.*` returns most of its numbers as **graph tokens**, not values. A tool that
   reports them as data would be reporting a token as a statistic, so
@@ -158,39 +158,46 @@ assumed missing and is not. Nothing below needs building.
 | Archive, mute, pin | `archive_chat`, `mute_chat`, `pin_message`, `unpin_all_messages` |
 | Leave, clear history | `leave_chat`, `delete_chat_history` |
 
-**Only two things from that whole area are genuinely missing**, and both are now
-phases below: channel/group **statistics** (`stats.*`, 9 requests, none called) and
-changing a channel's **public username** (`channels.UpdateUsername` — zero call
-sites, so the ID a channel is reached by cannot be changed).
+**Only two things from that whole area were genuinely missing, and both are now
+built**: channel/group **statistics** (`get_channel_statistics`) and changing a
+channel's **public username** (`set_channel_username`, with `check_channel_username`
+to test a name first). Until those landed, the ID a channel is reached by could not be
+changed at all — the one identity-level setting with no route.
 
 ## Planned work
 
 Requested explicitly, in the order that keeps each step verifiable. Counts come
 from the same measurement as the tables above.
 
-### Phase 0 — detach, then fix at source
+### Phase 0 — fix at source (now unblocked)
 
-Prerequisite for the rest, because three of the four items below want changes in
-upstream files. Stop treating them as untouchable, keep upstream as a reference
-remote, and review its changes by hand.
+The project has detached: it no longer tracks an upstream, and inherited files are no
+longer treated as untouchable. That was the prerequisite for all four items here, and
+none of them is started. Each one currently exists as a workaround somewhere else in
+the tree, which is the cost of having deferred them.
 
 1. `get_media_label`: check `gif` before `video`, and delete the correction layered
    over it in `message_view.py`.
 2. `sanitize_name`: stop destroying ZWNJ, ZWJ and emoji tag sequences. Much of
    `text_fidelity` exists only to work around this and can then shrink.
-3. The seven POSIX-only test failures: gate them on platform instead of leaving the
-   suite permanently red on Windows.
-4. Split `tools/messages.py` (2041 lines) and `runtime.py` (1812 lines).
+3. ~~The five POSIX-only test failures~~ **done.** They asserted `os.chmod` mode bits,
+   which Windows does not implement — `chmod` there toggles only the read-only flag, so
+   a file made "unreadable" stays readable and `st_mode` never reports `0o600`. They now
+   skip on non-POSIX, which keeps the security check where it holds and stops a
+   permanently-red suite from hiding the next real regression.
+4. Split `tools/messages.py` and `runtime.py`, both well past the size where a file
+   stops being reviewable.
 
 ### Phase 1 — full channel and group settings
 
-**45 of 59 `channels.*` requests are unreached.** What exists today is title, photo,
+**42 of 59 `channels.*` requests are unreached** (17 raw-called, remeasured after the
+username work). What exists today is title, photo,
 admin rights, bans, slow mode, forum toggle, invite, join/leave and the admin log.
 The settings an operator actually reaches for are all missing:
 
 | Group | Requests |
 |---|---|
-| Usernames | `UpdateUsername`, `CheckUsername`, `ToggleUsername`, `ReorderUsernames`, `DeactivateAllUsernames` |
+| Usernames | ~~`UpdateUsername`, `CheckUsername`~~ **built**; still open: `ToggleUsername`, `ReorderUsernames`, `DeactivateAllUsernames` |
 | Join gates | `ToggleJoinToSend`, `ToggleJoinRequest` |
 | Visibility | `TogglePreHistoryHidden`, `ToggleParticipantsHidden`, `ToggleSignatures`, `ToggleViewForumAsMessages` |
 | Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
@@ -205,19 +212,26 @@ and require explicit confirmation in their own docstrings.
 **Not in this phase because it already ships:** creating a channel or group, banning
 and unbanning, admin rights, adding members and invite links, renaming, the
 description, the photo, slow mode, forum mode, the admin log and participants — see
-the table above. The highest-value single item here is `UpdateUsername`, because a
-channel's public ID is the one identity-level setting with no route at all today;
-pair it with `CheckUsername` so a taken name is reported before the attempt.
+the table above.
 
-### Phase 1b — statistics
+The highest-value single item was `UpdateUsername`, because a channel's public ID was
+the one identity-level setting with no route at all. It is now `set_channel_username`,
+paired with `check_channel_username` so a taken name is reported *before* the attempt
+rather than as an error afterwards. The rest of this phase is unbuilt.
 
-`stats.*` is **9 requests, none of them called**: `GetBroadcastStats`,
-`GetMegagroupStats`, `GetMessageStats`, `GetStoryStats`, plus the public-forward
-listings and the graph loaders. Telegram returns most of this as *graph tokens* that
-need a second `LoadAsyncGraph` call, so the shape is not a flat dict and the tool
-has to resolve or clearly label what it did not resolve. Available only to admins of
-channels above Telegram's member threshold, which is a refusal to report plainly
-rather than an error to leak.
+### Phase 1b — statistics — **done**
+
+Shipped as `get_channel_statistics`. What the plan predicted turned out to be the
+whole difficulty: Telegram returns most of `stats.*` as **graph tokens**, not values,
+and a token needs a second `LoadAsyncGraph` that can itself answer `StatsGraphError`.
+So the tool resolves what it can and labels what it could not — presenting a token as
+if it were the graph would be the one genuinely dishonest outcome.
+
+Two constraints found while building it, both reported as plain sentences rather than
+leaked as raw RPC errors: statistics are available only to admins of channels above
+Telegram's member threshold, and a graph token is only loadable from the DC that
+issued it. Broadcast and megagroup take *different* requests, so the tool picks by
+what the chat actually is instead of guessing.
 
 ### Phase 2 — files and chat transfer, made usable
 
@@ -272,19 +286,25 @@ codebase cannot vouch for.
 Unchanged from the table above: payments and Stars, password and two-step settings,
 terminating sessions, the login flow, and group/video calls.
 
-## What this implies for detaching from upstream
+## Detaching: what it changed
 
-The gaps above are **not** caused by the fork constraint — they are simply
-unbuilt. What the constraint does cost is visible elsewhere:
+Decided and done. This section is kept as the record of what the constraint cost,
+because the four items it lists are the work that decision unlocked and none of them
+is finished yet.
 
-- `get_media_label` checks `video` before `gif`, so an animation had to be
-  corrected in a layer above instead of at the source.
-- `sanitize_name` destroys ZWNJ, ZWJ and emoji tag sequences, which is why the
-  whole `text_fidelity` layer exists.
-- Seven POSIX-only test failures live in upstream test files and cannot be fixed.
-- `tools/messages.py` (2041 lines) and `runtime.py` (1812 lines) cannot be split.
+While the project tracked an upstream, every change had to live in a **new file** so
+that a merge stayed conflict-free. That discipline held — the final merge was clean,
+with no conflicts — but it was paid for in workarounds:
 
-So detaching buys the ability to fix those four things at source. It buys nothing
-towards the feature list, and it transfers every upstream defect to us. The
-sequence that follows from this data: **detach, fix the four, then add features
-from the "worth building" table in order** — not detach in order to rewrite.
+- `get_media_label` checks `video` before `gif`, so an animation has to be corrected
+  in a layer above instead of at the source.
+- `sanitize_name` destroys ZWNJ, ZWJ and emoji tag sequences, which is the entire
+  reason the `text_fidelity` layer exists.
+- Five POSIX-only test failures lived in inherited test files and were left red
+  (now fixed — the first thing detaching actually bought).
+- `tools/messages.py` and `runtime.py` could not be split.
+
+What detaching does **not** buy is any part of the feature list — the gaps measured
+above were never caused by the constraint, they were simply unbuilt, and the whole
+"worth building" table was in fact delivered *while still merging cleanly*. What it
+buys is Phase 0, and what it costs is that every inherited defect is now ours to fix.

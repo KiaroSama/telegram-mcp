@@ -5,8 +5,8 @@ object and never calls the API, so no client and no network are involved.
 
 Split off from this file: the end-to-end route through upstream's
 ``message_to_dict`` (``test_message_view_pipeline.py``), the string rules these
-descriptions lean on (``test_text_fidelity.py``), and the fork's merge policy
-(``test_merge_contract.py``).
+descriptions lean on (``test_text_fidelity.py``), and what ``import *`` does to the
+tool package (``test_tool_registry.py``, formerly the merge policy).
 """
 
 from types import SimpleNamespace

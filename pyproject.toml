@@ -8,10 +8,9 @@ version = "2.0.1"
 description = "Telegram integration for Claude via the Model Context Protocol"
 readme = "README.md"
 authors = [
-    {name = "chigwell"},
-    {name = "l1v0n1"}
+    {name = "KiaroSama"}
 ]
-license = {text = "Apache-2.0"}
+license = {text = "Proprietary"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -50,7 +49,7 @@ lottie = [
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/chigwell/telegram-mcp"
+"Homepage" = "https://github.com/KiaroSama/telegram-mcp"
 "Bug Tracker" = "https://github.com/chigwell/telegram-mcp/issues"
 
 [tool.setuptools]

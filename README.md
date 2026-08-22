@@ -3,11 +3,14 @@
 </div>
 
 ![MCP Badge](https://badge.mcpx.dev)
-[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square)](https://opensource.org/licenses/Apache-2.0)
-[![Python Lint & Format Check](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/python-lint-format.yml)
-[![Docker Build & Compose Validation](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml/badge.svg)](https://github.com/chigwell/telegram-mcp/actions/workflows/docker-build.yml)
+[![Licence: Proprietary](https://img.shields.io/badge/licence-proprietary-red?style=flat-square)](LICENSE)
+[![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
+[![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
+
+**This is proprietary software.** See [LICENSE](LICENSE) — it is not open source, and it is not
+accepting outside contributions.
 
 ## 🤖 MCP in Action
 
@@ -37,11 +40,15 @@ Message sent successfully:
 - [Development](#development)
 - [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
-- [License](#license)
+- [Visual and structured access](#visual-and-structured-access)
+- [Content types beyond plain messages](#content-types-beyond-plain-messages)
+- [Licence](#licence)
 
 ## What It Can Do
 
-The server currently includes 80+ MCP tools grouped into these areas:
+The server registers **165 MCP tools**. That count is measured, not estimated — see
+[docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
+server deliberately does not. The tools group into these areas:
 
 - **Accounts:** list configured accounts and route tool calls by account label.
 - **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
@@ -94,7 +101,7 @@ Clients that can wake an agent on external output (Claude Code's persistent `Mon
 ### 1. Clone and Install
 
 ```bash
-git clone https://github.com/chigwell/telegram-mcp.git
+git clone https://github.com/KiaroSama/telegram-mcp.git
 cd telegram-mcp
 uv sync
 ```
@@ -212,7 +219,7 @@ environment using a specific release tag or commit:
 ```bash
 python -m venv .venv
 . .venv/bin/activate
-pip install "git+https://github.com/chigwell/telegram-mcp.git@<tag-or-commit>"
+pip install "git+https://github.com/KiaroSama/telegram-mcp.git@<tag-or-commit>"
 ```
 
 Then configure your MCP client to run the installed console script:
@@ -236,7 +243,7 @@ Generate a session string without cloning the repo by sourcing this repository
 from GitHub explicitly:
 
 ```bash
-uvx --from "git+https://github.com/chigwell/telegram-mcp.git@<pinned-release-tag-or-commit>" telegram-mcp-generate-session
+uvx --from "git+https://github.com/KiaroSama/telegram-mcp.git@<pinned-release-tag-or-commit>" telegram-mcp-generate-session
 ```
 
 ### Transports
@@ -530,8 +537,8 @@ main.py                    # historical entrypoint and compatibility exports
 telegram_mcp/runtime.py    # shared MCP setup, account routing, validation, file safety
 telegram_mcp/runner.py     # application startup
 telegram_mcp/tools/        # tool modules grouped by domain
-telegram_mcp/message_view.py  # deep structured message view (fork addition)
-telegram_mcp/visual/       # Telegram Desktop capture and image/frame helpers (fork addition)
+telegram_mcp/message_view.py  # deep structured message view
+telegram_mcp/visual/       # Telegram Desktop capture and image/frame helpers
 sanitize.py                # output sanitization helpers
 tests/                     # pytest suite
 ```
@@ -608,9 +615,11 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 - **Bot-only tool rejected:** regular user accounts cannot manage bot command settings.
 - **Need details:** check your MCP client logs, terminal output, and `mcp_errors.log`.
 
-## Contributing
+## Working on it
 
-1. Fork and clone the repository.
+Proprietary, so this is the maintainer's own loop rather than a contribution guide.
+
+1. Clone the repository.
 2. Install dependencies and git hooks:
    - `uv sync`
    - `uv run pre-commit install --hook-type pre-commit --hook-type pre-push`
@@ -619,15 +628,16 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 5. Run checks locally:
    - `uv run pre-commit run --all-files`
    - `uv run pre-commit run --hook-stage pre-push --all-files`
-6. Open a pull request with a concise description.
+6. Run the suite through the guarded runner, not raw `pytest` — an unbounded test run
+   has no wall ceiling and no process-tree cleanup, so a hang cannot be proven cleaned up.
 
-## Fork addition: visual and structured access
+## Visual and structured access
 
-This fork adds tools that let an agent see Telegram the way a person does — the full Telegram
-API view of a message (entities, custom emoji, reactions, media metadata) and the real Telegram
-Desktop rendering as an image — plus control over the two kinds of message that are not simply
-"sent now": the scheduled queue, and media that destroys itself. Everything in the first three
-rows below is read-only; the Actions row is not, and each entry there has a real effect.
+Tools that let an agent see Telegram the way a person does — the full Telegram API view of a
+message (entities, custom emoji, reactions, media metadata) and the real Telegram Desktop
+rendering as an image — plus control over the two kinds of message that are not simply "sent
+now": the scheduled queue, and media that destroys itself. Everything in the first three rows
+below is read-only; the Actions row is not, and each entry there has a real effect.
 
 | | Tools |
 |---|---|
@@ -660,28 +670,48 @@ and publishes a stable index — and `click_button` presses by that index rather
 Pass `expect_text` to make the press refuse if the keyboard changed underneath it.
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool
-reference, requirements and limitations. All of it lives in new modules, so merging upstream
-stays conflict-free.
+reference, requirements and limitations.
 
-## License
+## Content types beyond plain messages
 
-This project is licensed under the [Apache 2.0 License](LICENSE).
+A message is not the only thing an account holds, and each of these was unreachable until it
+had a tool. Grouped by what an agent can actually do with it.
 
-## Acknowledgements
+| Area | Read | Write |
+|---|---|---|
+| **Polls** | `get_poll_results`, `get_poll_voters` | `vote_in_poll` (`create_poll` already existed) |
+| **Stories** | `list_peer_stories`, `get_stories` | `react_to_story`, `post_story` |
+| **Saved Messages** | `list_saved_dialogs`, `get_saved_history`, `list_saved_tags` | `name_saved_tag` |
+| **Quick replies** | `list_quick_replies` | `send_quick_reply` |
+| **Sticker sets** | `inspect_sticker_set`, `suggest_sticker_set_name` | `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` |
+| **Channel identity** | `check_channel_username` | `set_channel_username` |
+| **Channel analytics** | `get_channel_statistics`, `get_similar_channels` | — |
+| **Translation** | `translate` | — |
+
+Four of these carry a caveat that is part of the feature rather than a footnote:
+
+- **Poll options are identified by opaque bytes on the wire, not by index.** `vote_in_poll` takes
+  the human-facing index and looks the blob up in the poll it just read, so a reordered poll
+  cannot silently turn a vote into a vote for something else.
+- **Sticker-set writes are not idempotent.** A timeout after the server applied the change looks
+  exactly like a timeout before it, so a blind retry duplicates the sticker. Every write reports
+  the set's count before and after, and `add_sticker_to_set` takes an `expected_count` that
+  refuses the add if the set moved underneath you.
+- **Saved Messages is not one flat chat.** Forwarding into it files the copy under the *original
+  sender*, so it is a set of per-sender buckets; a reaction placed there doubles as a named tag.
+- **Statistics come back as graph tokens, not numbers.** Telegram answers most graphs with a token
+  that needs a second call, so `get_channel_statistics` resolves what it can and plainly labels
+  what it could not — a token is never presented as data.
+
+## Licence
+
+Proprietary. See [LICENSE](LICENSE). Not open source; no licence to use, copy, modify or
+distribute is granted without written permission.
+
+## Built on
 
 - [Telethon](https://github.com/LonamiWebs/Telethon)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
-- [Claude](https://www.anthropic.com/) and [Cursor](https://cursor.so/)
-- [chigwell/telegram-mcp](https://github.com/chigwell/telegram-mcp) upstream project
 
-Maintained by [@chigwell](https://github.com/chigwell) and [@l1v0n1](https://github.com/l1v0n1). PRs welcome.
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=chigwell/telegram-mcp&type=Date)](https://www.star-history.com/#chigwell/telegram-mcp&Date)
-
-## Contributors
-
-<a href="https://github.com/chigwell/telegram-mcp/graphs/contributors">
-  <img src="https://contrib.rocks/image?repo=chigwell/telegram-mcp" />
-</a>
+Portions of this codebase originated in an Apache-2.0 project by chigwell and l1v0n1 and have
+been substantially modified since; that attribution is recorded in [LICENSE](LICENSE) §4.
