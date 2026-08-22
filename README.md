@@ -583,7 +583,7 @@ telegram_mcp/tools/           # tool modules grouped by domain
 telegram_mcp/message_view.py  # deep structured message view
 telegram_mcp/visual/          # Telegram Desktop capture and image/frame helpers
 sanitize.py                   # output sanitization helpers
-tests/                        # pytest suite
+tests/                        # pytest suite, plus PowerShell suites for the launchers
 ```
 
 Run tests:
@@ -606,6 +606,15 @@ uv run pytest --cov --cov-report=term-missing --cov-report=xml
 ```
 
 Coverage is configured in `pyproject.toml` with an 80% minimum gate for deterministic unit-testable core modules. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
+
+The launchers have their own suites, which `pytest` does not see. Run them on Windows:
+
+```powershell
+Get-ChildItem tests -Filter 'test_*.ps1' | ForEach-Object { pwsh -NoProfile -File $_.FullName }
+```
+
+CI discovers them the same way rather than from a list — a hardcoded list is how a suite
+outlived the script it tested.
 
 Run formatting checks:
 
