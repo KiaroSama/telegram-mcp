@@ -106,23 +106,27 @@ def _run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
         ) from error
 
 
-def _probe(path: str) -> tuple[Optional[float], Optional[float]]:
-    """``(duration_seconds, frame_rate)`` from one ffprobe call, ``None`` where unknown.
+def _probe(path: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
+    """``(duration_seconds, frame_rate, codec)`` from one ffprobe call.
 
     The frame rate comes from the same subprocess the duration already costs, and
     it is what makes the sampling ladder in :func:`_frames_with_ffmpeg` land on
     frames that exist: a container's duration includes the last frame's display
     time, so "just under the duration" can still be past the last real frame.
+
+    The codec rides along for the same reason - free, from a call already being
+    made - and decides whether the extractor has to name a decoder. ``None`` for
+    anything that could not be determined.
     """
     if shutil.which("ffprobe") is None:
-        return None, None
+        return None, None, None
     result = _run(
         [
             "ffprobe",
             "-v",
             "error",
             "-show_entries",
-            "format=duration:stream=avg_frame_rate",
+            "format=duration:stream=avg_frame_rate,codec_name",
             "-of",
             "json",
             path,
@@ -130,18 +134,21 @@ def _probe(path: str) -> tuple[Optional[float], Optional[float]]:
         timeout=FFPROBE_TIMEOUT_SECONDS,
     )
     if result.returncode != 0:
-        return None, None
+        return None, None, None
     try:
         payload = json.loads(result.stdout or b"{}")
         raw_duration = payload.get("format", {}).get("duration")
         duration = float(raw_duration) if raw_duration is not None else None
     except (ValueError, TypeError, AttributeError, json.JSONDecodeError):
-        return None, None
+        return None, None, None
 
     rate = None
+    codec = None
     for stream in payload.get("streams") or []:
         # ffprobe reports a rational, e.g. "30000/1001". A still image reports
         # "0/0", which must not become a division by zero.
+        if codec is None:
+            codec = stream.get("codec_name") or None
         numerator, _, denominator = str(stream.get("avg_frame_rate") or "").partition("/")
         try:
             top, bottom = float(numerator), float(denominator or 1)
@@ -150,7 +157,7 @@ def _probe(path: str) -> tuple[Optional[float], Optional[float]]:
         if top > 0 and bottom > 0:
             rate = top / bottom
             break
-    return duration, rate
+    return duration, rate, codec
 
 
 def probe_duration(path: str) -> Optional[float]:
@@ -311,7 +318,7 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
             "Install ffmpeg, or use get_media_thumbnail for a static preview."
         )
 
-    duration, frame_rate = _probe(path)
+    duration, frame_rate, codec = _probe(path)
     if duration and duration > 0:
         # Sample inside the clip: the very first and last frames are often black.
         #
@@ -330,6 +337,13 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
         # a 0.4s video note yields only the t=0 frame.
         timestamps = [round(i * 0.1, 3) for i in range(count)]
 
+    # A VP9 WebM keeps its alpha in a SEPARATE layer, and ffmpeg's default vp9
+    # decoder drops it silently - a transparent video sticker comes back as an
+    # opaque square with no error anywhere. Naming libvpx-vp9 before -i keeps it.
+    # Conditional because -c:v applies to every input, and this same function
+    # extracts from h264 video notes, which libvpx-vp9 cannot decode at all.
+    decoder = ["-c:v", "libvpx-vp9"] if codec == "vp9" else []
+
     frames: list[tuple[bytes, dict[str, Any]]] = []
     first_error: Optional[bytes] = None
     for index, timestamp in enumerate(timestamps):
@@ -341,6 +355,7 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
                 "error",
                 "-ss",
                 str(timestamp),
+                *decoder,
                 "-i",
                 path,
                 "-frames:v",

@@ -312,7 +312,9 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
     informative message; and its stderr still carries our temp path."""
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     monkeypatch.setattr(frames, "ffmpeg_available", lambda: True)
-    monkeypatch.setattr(frames, "_probe", lambda path: (None, None))
+    # (duration, frame_rate, codec) - the codec joined when the extractor had to
+    # decide whether to name the VP9 decoder.
+    monkeypatch.setattr(frames, "_probe", lambda path: (None, None, None))
     messages = iter(
         [
             b"first: moov atom not found",
@@ -514,3 +516,95 @@ def test_probe_reports_no_duration_for_the_suffixes_extract_frames_can_produce()
             assert frames.probe_duration(path) is None, f"{suffix} produced a guessed duration"
         finally:
             os.unlink(path)
+
+
+def _transparent_vp9(directory):
+    """A one-second VP9 clip whose right half is fully transparent."""
+    source = directory / "alpha.png"
+    image = Image.new("RGBA", (64, 64), (255, 0, 0, 255))
+    for x in range(32, 64):
+        for y in range(64):
+            image.putpixel((x, y), (0, 0, 0, 0))
+    image.save(source)
+
+    clip = directory / "alpha.webm"
+    result = subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-loop",
+            "1",
+            "-i",
+            str(source),
+            "-t",
+            "1",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            str(clip),
+        ],
+        capture_output=True,
+    )
+    if result.returncode != 0 or not clip.exists():
+        pytest.skip("this ffmpeg cannot encode VP9 with alpha")
+    return clip
+
+
+@pytest.mark.skipif(not frames.ffmpeg_available(), reason="ffmpeg is not on PATH")
+def test_a_transparent_video_sticker_keeps_its_alpha(tmp_path):
+    """ffmpeg's DEFAULT vp9 decoder drops the separate WebM alpha layer, silently.
+
+    Measured before the fix: the extractor returned mode=RGB with zero transparent
+    pixels for this clip - a transparent sticker previewed as an opaque square and
+    nothing anywhere reported a problem. `-c:v libvpx-vp9` before `-i` keeps it.
+    """
+    clip = _transparent_vp9(tmp_path)
+
+    extracted = frames._frames_with_ffmpeg(str(clip), 1)
+
+    assert extracted, "no frame came back"
+    rendered = Image.open(io.BytesIO(extracted[0][0]))
+    assert rendered.mode == "RGBA", f"alpha was dropped: mode={rendered.mode}"
+    transparent = sum(
+        1 for value in rendered.convert("RGBA").getchannel("A").get_flattened_data() if value == 0
+    )
+    assert transparent == 32 * 64, f"expected the right half clear, got {transparent} px"
+
+
+@pytest.mark.skipif(not frames.ffmpeg_available(), reason="ffmpeg is not on PATH")
+def test_naming_the_vp9_decoder_does_not_break_an_h264_source(tmp_path):
+    """`-c:v` applies to every input, so it must not be passed unconditionally.
+
+    Video notes are h264; libvpx-vp9 cannot decode them at all, so an unguarded
+    flag would trade one silent defect for a loud one.
+    """
+    import subprocess
+
+    clip = tmp_path / "note.mp4"
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=64x64:rate=10",
+            "-t",
+            "1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(clip),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    assert frames._probe(str(clip))[2] == "h264"
+    assert len(frames._frames_with_ffmpeg(str(clip), 2)) == 2
