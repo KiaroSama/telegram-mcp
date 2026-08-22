@@ -320,6 +320,13 @@ Adding the second account switches the server into multi-account mode, where wri
 require `account=<label>` and read-only tools fan out across every account when it is
 omitted. The menu says so at the moment it happens.
 
+Type a label however reads naturally — `KGB Verifier` is fine. Spaces and hyphens are
+stored as underscores (`kgb_verifier`) and the menu tells you the stored form, because
+that is the value tools take as `account=`. The substitution is not cosmetic: the label
+becomes part of an environment variable *name*, and python-dotenv refuses to parse a key
+containing a space — it warns and drops the line, so a literal space would save an
+account that then never loads.
+
 ## Multi-Account Setup
 
 Use suffixed session variables to configure multiple Telegram accounts:

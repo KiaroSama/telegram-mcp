@@ -80,3 +80,42 @@ jobs:
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
         run: uv run --extra lottie pytest -q
+
+  # The launchers are PowerShell and Windows-only, and nothing ran their tests
+  # until now - which is how `tests/test_update_menu.ps1` was able to outlive the
+  # script it tested. Discovery, not a list, for exactly that reason: a suite
+  # added here is picked up, and one whose subject is deleted fails loudly.
+  launchers:
+    name: PowerShell Launcher Tests
+    runs-on: windows-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      # test_launchers.ps1 exercises the launcher's Python tee wrapper, and falls
+      # back to `python` on PATH when .venv is absent - which it is, on a runner.
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Run every PowerShell suite
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $suites = @(Get-ChildItem -Path tests -Filter 'test_*.ps1' -File | Sort-Object Name)
+          if ($suites.Count -eq 0) { throw 'No PowerShell suites found under tests/ - discovery is broken.' }
+          Write-Host "Found $($suites.Count) suite(s): $(($suites.Name) -join ', ')"
+
+          $failed = @()
+          foreach ($suite in $suites) {
+              Write-Host "::group::$($suite.Name)"
+              & pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass -File $suite.FullName
+              $code = $LASTEXITCODE
+              Write-Host '::endgroup::'
+              if ($code -ne 0) { $failed += "$($suite.Name) (exit $code)" }
+          }
+          if ($failed.Count -gt 0) { throw "PowerShell suites failed: $($failed -join '; ')" }
+          Write-Host "All $($suites.Count) PowerShell suite(s) passed."

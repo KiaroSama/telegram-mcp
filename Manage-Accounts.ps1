@@ -155,22 +155,46 @@ function Read-Confirmation {
     return ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$')
 }
 
+function ConvertTo-Label {
+    <#
+      Turn what a person typed into a label that can actually be stored.
+
+      The label is spliced into an environment variable NAME
+      (`TELEGRAM_SESSION_STRING_<LABEL>`), and python-dotenv refuses to parse a
+      line whose key contains a space - it prints a warning and DROPS the line.
+      So "KGB Verifier" written literally would produce an account that is saved
+      and then never loads, which is the worst of both outcomes.
+
+      Spaces and hyphens therefore become underscores rather than being rejected.
+      Anything else is refused, because there is no safe mapping for it.
+    #>
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $Raw)
+    $trimmed = $Raw.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed -notmatch '^[A-Za-z0-9_ \-]+$') { return '' }
+    return ($trimmed -replace '[\s\-]+', '_').Trim('_').ToLowerInvariant()
+}
+
 function Read-Label {
     <#
-      The label becomes the `account` argument tools take, and the server
-      lowercases it. Restricting it to A-Z, 0-9 and _ is not decoration: the label
-      is spliced into an environment variable name, where anything else is either
-      illegal or silently mangled.
+      Reads a label and reports the stored form when it differs from what was
+      typed - the caller will use that stored form as `account=` later, so being
+      told "kgb_verifier" now is what stops a puzzled `account=KGB Verifier`.
     #>
     param([Parameter(Mandatory)] [string] $Prompt)
     while ($true) {
-        $label = (Read-Host $Prompt).Trim()
-        if (-not $label) { return $null }
-        if ($label -notmatch '^[A-Za-z0-9_]+$') {
-            Write-Host 'A label may contain only letters, digits and underscores.' -ForegroundColor Yellow
+        $raw = Read-Host $Prompt
+        $label = ConvertTo-Label -Raw $raw
+        if ($null -eq $label) { return $null }
+        if ($label -eq '') {
+            Write-Host 'A label may contain letters, digits, underscores, spaces and hyphens.' -ForegroundColor Yellow
+            Write-Host 'Spaces and hyphens are stored as underscores.' -ForegroundColor DarkGray
             continue
         }
-        return $label.ToLowerInvariant()
+        if ($label -ne $raw.Trim().ToLowerInvariant()) {
+            Write-Host "Stored as '$label' - that is the value tools take as account=." -ForegroundColor DarkGray
+        }
+        return $label
     }
 }
 

@@ -94,6 +94,40 @@ $($functions.Value -join "`n`n")
     if ($commented.Contains('old')) { throw 'A commented-out line was read as a configured account.' }
     Write-Host 'ok  a commented-out session line is ignored'
 
+    # --- labels a person actually types --------------------------------------
+    #
+    # python-dotenv REFUSES a key containing a space: it warns and drops the line,
+    # so "KGB Verifier" stored literally would save an account that never loads.
+    # Spaces and hyphens must therefore reach .env as underscores.
+    $cases = @(
+        @{ In = 'KGB Verifier';      Out = 'kgb_verifier' }
+        @{ In = '  Work  Account  '; Out = 'work_account' }
+        @{ In = 'my-second-phone';   Out = 'my_second_phone' }
+        @{ In = 'Personal';          Out = 'personal' }
+        @{ In = 'a  b';              Out = 'a_b' }
+        @{ In = '_padded_';          Out = 'padded' }
+    )
+    foreach ($case in $cases) {
+        $got = ConvertTo-Label -Raw $case.In
+        if ($got -ne $case.Out) { throw "ConvertTo-Label '$($case.In)' gave '$got', expected '$($case.Out)'." }
+    }
+    Write-Host 'ok  spaces and hyphens in a typed label become underscores'
+
+    if ($null -ne (ConvertTo-Label -Raw '   ')) { throw 'Blank input should cancel, not produce a label.' }
+    foreach ($bad in 'has.dot', 'has/slash', 'کانال', 'has=equals') {
+        if ((ConvertTo-Label -Raw $bad) -ne '') { throw "'$bad' should be refused - there is no safe mapping for it." }
+    }
+    Write-Host 'ok  blank cancels, and a character with no safe mapping is refused'
+
+    # The stored key must be one python-dotenv can parse back.
+    $label = ConvertTo-Label -Raw 'KGB Verifier'
+    Set-EnvValue -Key "TELEGRAM_SESSION_STRING_$($label.ToUpperInvariant())" -Value '1AAAAAkgb'
+    $line = @([IO.File]::ReadAllLines($envPath) | Where-Object { $_ -match '^TELEGRAM_SESSION_STRING_KGB' })
+    if ($line.Count -ne 1) { throw "Expected one KGB line, found $($line.Count)." }
+    if ($line[0] -match '\s.*=') { throw "The stored key contains whitespace: $($line[0])" }
+    if (-not (Get-Accounts).Contains($label)) { throw 'The spaced label did not round-trip through .env.' }
+    Write-Host 'ok  the stored key has no whitespace and reads back as the same label'
+
     Write-Host ''
     Write-Host 'Account manager checks passed.' -ForegroundColor Green
 }
