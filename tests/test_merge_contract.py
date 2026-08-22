@@ -13,7 +13,20 @@ REPO = Path(__file__).resolve().parents[1]
 
 
 # Spelled out because the document states the count in words, not digits.
-_FORK_IMPORT_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six"}
+_FORK_IMPORT_WORDS = {
+    1: "one",
+    2: "two",
+    3: "three",
+    4: "four",
+    5: "five",
+    6: "six",
+    7: "seven",
+    8: "eight",
+    9: "nine",
+    10: "ten",
+    11: "eleven",
+    12: "twelve",
+}
 
 
 def _fork_owned_paths():
@@ -73,3 +86,27 @@ def test_the_merge_contract_matches_the_fork_imports():
 
     # Prove the check bites: this is exactly how tools/effects.py went missing.
     assert "telegram_mcp/tools/nonexistent.py" not in doc
+
+
+def test_no_fork_tool_name_shadows_the_module_it_lives_in():
+    """`import *` binds tool names into the package, so a module whose name matches
+    one of its own tools stops being reachable as an attribute: `tools.translate`
+    returned the FUNCTION, not the module. That is silent - the server still starts,
+    registration still works - and it only surfaces when something reaches for the
+    module. Naming is the whole fix, so the check is on the names."""
+    import importlib
+    import inspect
+
+    package = importlib.import_module("telegram_mcp.tools")
+    init = (REPO / "telegram_mcp" / "tools" / "__init__.py").read_text(encoding="utf-8")
+    modules = re.findall(r"^from telegram_mcp\.tools\.(\w+) import \*", init, re.M)
+    assert modules, "no tool imports found"
+
+    for name in modules:
+        importlib.import_module(f"telegram_mcp.tools.{name}")
+        bound = getattr(package, name)
+        assert inspect.ismodule(bound), (
+            f"telegram_mcp.tools.{name} resolves to {type(bound).__name__} "
+            f"{getattr(bound, '__name__', bound)!r}, not the module - a tool inside it "
+            f"is named {name!r} and `import *` overwrote the submodule attribute."
+        )

@@ -1,17 +1,25 @@
 # API coverage: what this server exposes, and what Telegram has
 
-Measured, not estimated. Snapshot: **Telethon 1.44.0, TL layer 227, 2026-08-17.**
-Reproduce it by counting `telethon.tl.functions` request classes against the tools
-registered in `telegram_mcp.tools` and the `functions.<ns>.<Name>Request` calls in
-`telegram_mcp/`.
+Measured, not estimated. Snapshot: **Telethon 1.44.0, TL layer 227, 2026-08-22.**
+
+Reproduce the tool count by `await mcp.list_tools()` after importing
+`telegram_mcp.tools`, not by grepping for `@mcp.tool` — the two agreed here, but only
+the first survives a name collision. Reproduce the TL count by walking
+`telethon.tl.functions` recursively and collecting *unique classes* that subclass
+`TLRequest`; counting names that end in `Request` with `dir()` double-counts
+re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **148** |
-| TL namespaces | 23 |
-| TL request classes in layer 227 | **802** |
-| Raw TL requests this codebase calls | 69 |
-| Telethon high-level client methods called | 27 |
+| MCP tools registered | **165** |
+| TL namespaces | 23, plus the root `functions` module |
+| Unique `TLRequest` classes in layer 227 | **800** |
+| Raw TL requests this codebase calls | 97 |
+
+The tool count was **148** in the previous revision of this document. That number was
+wrong, not stale: the server registered 142 at that commit. It is corrected here
+rather than quietly overwritten, because the whole point of this file is that its
+numbers can be re-derived.
 
 ## Why "100% of Telegram" is the wrong target
 
@@ -75,26 +83,38 @@ Plus everything this fork added: deep structured message access, entity offsets,
 custom-emoji and effect resolution, glass-button inspection and pressing, Telegram
 Desktop capture, the scheduled queue, and self-destructing media.
 
-## Named features NOT reachable
+## The "worth building" list, now built
 
-Twenty-three, ranked by what they are worth to an agent rather than by TL size. Two
-of them — Mini App launch and message view counts — were mis-reported as reachable
-by the first probe and belong here, which is why every row in the table above was
-verified individually.
+Every row of what this document previously listed as worth building has been built,
+in the modules named beside it. The list is kept rather than deleted, because a
+coverage document that only shows the current state cannot be checked against what it
+predicted.
 
-### Worth building
-
-| Feature | Why | Cost |
+| Feature | Tools | Module |
 |---|---|---|
-| **Polls: vote and read results** | `create_poll` already ships (via `InputMediaPoll`), and the question is visible in a message — but `messages.SendVote`, `GetPollResults` and `GetPollVotes` have no call sites, so an agent can ask a question and never learn the answer. | Small — 3 requests |
-| **Stories: read, react, post** | An entire content type that is invisible today. Reading is the valuable half. | Medium — 34 requests, a new media shape |
-| **Saved messages: tags and saved dialogs** | The account's own scratch space; the natural place for an agent to keep notes. | Small |
-| **Translation** | One request, immediate utility on foreign-language chats. | Trivial |
-| **Sticker-set management** | Directly relevant here — sibling projects already automate pack edits, and the caps are recorded in `CROSS_PROJECT_LESSONS.md`. | Medium, and **not idempotent**: never blind-retry `addStickerToSet`. |
-| **Quick-reply shortcuts** | Canned responses map cleanly onto agent use. | Small |
-| **Similar / recommended channels** | Cheap discovery, one request. | Trivial |
+| Polls: vote and read results | `get_poll_results`, `vote_in_poll`, `get_poll_voters` | `tools/polls.py` |
+| Stories: read, react, post | `list_peer_stories`, `get_stories`, `react_to_story`, `post_story` | `tools/stories.py` |
+| Saved messages: tags and saved dialogs | `list_saved_dialogs`, `get_saved_history`, `list_saved_tags`, `name_saved_tag` | `tools/saved.py` |
+| Quick-reply shortcuts | `list_quick_replies`, `send_quick_reply` | `tools/saved.py` |
+| Translation | `translate` | `tools/translation.py` |
+| Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
+| Channel username (the identity gap) | `check_channel_username`, `set_channel_username` | `tools/channel_admin.py` |
+| Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
+| Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-### Lower value, build on demand
+That is **23 new tools**, 142 → 165, and it closes Phase 1's identity gap and all of
+Phase 1b. Two things learned while building them are worth more than the count:
+
+- A tool named the same as its own module is silently unreachable. `import *` in
+  `tools/__init__.py` binds the tool name over the submodule attribute, so
+  `telegram_mcp.tools.translate` resolved to the *function*. The module is
+  `translation.py` for that reason, and `test_merge_contract.py` now fails on any
+  future collision.
+- `stats.*` returns most of its numbers as **graph tokens**, not values. A tool that
+  reports them as data would be reporting a token as a statistic, so
+  `get_channel_statistics` resolves what it can and labels what it did not.
+
+### Still not reachable, lower value, build on demand
 
 Pinned-dialog ordering, channel statistics, fact-check, todo lists, history
 import/export, message-level bot inline queries, message **view counts**
@@ -115,7 +135,7 @@ a button and says plainly that no callback can press it, but nothing launches on
 
 ## Administering a channel or group: what already ships
 
-Checked by tool name against the 148 registered tools, because most of this was
+Checked by tool name against the registered tools, because most of this was
 assumed missing and is not. Nothing below needs building.
 
 | Operation | Tool |

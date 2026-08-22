@@ -540,6 +540,9 @@ telegram_mcp/media_preview.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
 telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
 telegram_mcp/tools/scheduled.py, telegram_mcp/tools/ephemeral.py
+telegram_mcp/tools/polls.py, telegram_mcp/tools/stories.py
+telegram_mcp/tools/channel_admin.py, telegram_mcp/tools/saved.py
+telegram_mcp/tools/stickers.py, telegram_mcp/tools/translation.py
 conftest.py
 docs/visual-structured-access.md
 ```
@@ -554,10 +557,13 @@ valid periods (86400 and 604800) were established by probing the live server rat
 both fail only on `PREMIUM_ACCOUNT_REQUIRED`, while 5 seconds is rejected as
 `SCHEDULE_REPEAT_PERIOD_INVALID`. `ephemeral.py` covers `ttl_seconds`, which nothing read or set
 before: finding disappearing media before it is opened, sending it with a timer through the SAME
-allowed-roots gate upstream's `upload_file` uses, and returning a copy through MCP rather than to
-disk — because the file-path route is gated behind configured roots and a message that dies on
-first view cannot wait for configuration. Saving what a sender set to disappear defeats their
-choice, so every result says so.
+allowed-roots gate upstream's `upload_file` uses, and writing an incoming one to disk before it
+expires. The save path is the answer to the case the timer creates: a message that dies on first
+view leaves nothing to fetch a second time, so `save_disappearing_media` downloads once and writes
+the bytes to a configured root rather than returning them through MCP, where they would be lost
+with the transcript. Saving what a sender set to disappear defeats their choice, so every result
+says so. Telegram silently drops a `ttl_seconds` above 60 and sends the media permanent instead of
+erroring, so the tool refuses that range itself and verifies the timer on what actually got sent.
 
 `media_preview.py` is where an asset becomes a picture *and* the label saying what the picture is
 not (`composite_fidelity`, `color_fidelity`, `preview_source`); `tools/effects.py` takes its
@@ -569,7 +575,7 @@ for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralis
 `load_dotenv()` otherwise lets the operator's own `.env` decide test results — two
 `test_file_path_security.py` assertions failed on exactly that.
 
-The only upstream files touched are `telegram_mcp/tools/__init__.py` (six import lines),
+The only upstream files touched are `telegram_mcp/tools/__init__.py` (twelve import lines),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py`
 layers on top of the upstream `message_to_dict` instead of replacing it, so upstream
 improvements keep flowing through.
