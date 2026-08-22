@@ -339,22 +339,41 @@ function Show-Accounts {
 
 function Invoke-SessionGenerator {
     Write-Host ''
-    Write-Host 'The generator will ask you to scan a QR code with the Telegram app.' -ForegroundColor Cyan
-    Write-Host 'Log in as the account you want to ADD, not the one already configured.'
-    Write-Host 'It prints a session string at the end - copy it, then paste it here.'
+    Write-Host (Get-Painted -Text 'The generator will ask how you want to log in:' -ColorName 'LightBlue')
+    Write-Host '  QR code    - scan it in Telegram under Settings > Devices > Link Desktop Device'
+    Write-Host '  Phone code - enter the number, then the code Telegram sends'
+    Write-Host ''
+    Write-Host 'Log in as the account you want to ADD, not one already configured.'
+    Write-Hint 'It asks for an account label too. Leave that blank - it only affects a'
+    Write-Hint 'suggested .env line, and this menu writes the real one for you.'
     Write-Host ''
     if (-not (Read-Confirmation 'Run the session generator now?')) { return }
 
-    $uv = Get-Command uv -ErrorAction SilentlyContinue
+    # No --qr / --phone here on purpose: without a flag the generator asks, so the
+    # choice always matches whatever methods it actually supports.
+    $script = 'session_string_generator.py'
+    $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+
     Push-Location -LiteralPath $PSScriptRoot
     try {
-        if ($uv) { & $uv.Path run session_string_generator.py --qr }
+        if (Test-Path -LiteralPath $python -PathType Leaf) {
+            # Straight to the interpreter. `uv run` would rebuild and reinstall the
+            # project first whenever a source file has changed, printing build and
+            # wheel-install progress on top of the login prompt.
+            & $python $script
+        }
         else {
-            $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
-            if (-not (Test-Path -LiteralPath $python -PathType Leaf)) {
-                throw 'Neither uv nor .venv\Scripts\python.exe was found. Install uv, or create the virtual environment first.'
+            $uv = Get-Command uv -ErrorAction SilentlyContinue
+            if (-not $uv) {
+                throw "Neither .venv\Scripts\python.exe nor uv was found. Create the virtual environment, or install uv, then try again."
             }
-            & $python session_string_generator.py --qr
+            Write-Hint 'No .venv found - falling back to uv, which may build the project first.'
+            # UV_LINK_MODE is uv's own advice for the hardlink warning it prints when
+            # the cache and the target sit on different filesystems.
+            $previousLinkMode = $env:UV_LINK_MODE
+            $env:UV_LINK_MODE = 'copy'
+            try { & $uv.Path run --quiet $script }
+            finally { $env:UV_LINK_MODE = $previousLinkMode }
         }
     }
     finally { Pop-Location }

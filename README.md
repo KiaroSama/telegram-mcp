@@ -320,6 +320,13 @@ Adding the second account switches the server into multi-account mode, where wri
 require `account=<label>` and read-only tools fan out across every account when it is
 omitted. The menu says so at the moment it happens.
 
+Choosing *Generate a session string* hands over to `session_string_generator.py` without
+forcing a login method, so it offers both QR and phone code. It runs through the existing
+`.venv` rather than `uv run`, which would rebuild and reinstall the project first and
+print build progress over the login prompt; `uv` is the fallback for when no venv exists.
+The generator asks for a label of its own — leave it blank, since the menu writes the
+real `.env` line.
+
 The menu follows the same convention as the other launchers in this family: `0` steps
 back one level and `exit` leaves, shown at each prompt as `{back=0, quit=exit}` with the
 two keys in different colours. The main menu shows only `{quit=exit}`, because there is

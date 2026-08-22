@@ -166,6 +166,42 @@ $($functions.Value -join "`n`n")
     $script:UseColor = $true
     Write-Host 'ok  colour off leaves plain text with no escapes'
 
+    # --- how the session generator is launched -------------------------------
+    #
+    # Static assertions, deliberately: the real path opens a Telegram login, so the
+    # only honest automated check is on how the command is built.
+    $generator = [regex]::Match($source, '(?ms)^function Invoke-SessionGenerator \{.*?^\}')
+    if (-not $generator.Success) { throw 'Could not find Invoke-SessionGenerator.' }
+    $body = $generator.Value
+    # Comments are stripped first. A comment explaining why `--qr` is absent
+    # contains the string `--qr`, and matching that would be asserting against my
+    # own prose rather than against the command that actually runs.
+    $code = ($body -split "`n" | Where-Object { $_ -notmatch '^\s*#' }) -join "`n"
+
+    # Forcing --qr made phone login unreachable from the menu. With no flag the
+    # generator asks, so the offer can never drift from what it really supports.
+    if ($code -match '--qr|--phone') {
+        throw 'The generator is launched with a login-method flag, which hides the other method.'
+    }
+    Write-Host 'ok  no login-method flag is forced, so the generator offers both'
+
+    # `uv run` rebuilds and reinstalls the project when a source file changed, and
+    # prints build/wheel progress on top of the login prompt. The venv is already
+    # there; uv is only for when it is not.
+    $venvAt = $code.IndexOf('.venv\Scripts\python.exe')
+    $uvAt = $code.IndexOf('Get-Command uv')
+    if ($venvAt -lt 0 -or $uvAt -lt 0) { throw 'The generator launch lost one of its two interpreters.' }
+    if ($venvAt -gt $uvAt) { throw 'uv is tried before the venv, which reintroduces the rebuild noise.' }
+    Write-Host 'ok  the existing venv is preferred over a uv rebuild'
+
+    if ($code -notmatch 'UV_LINK_MODE') {
+        throw 'The uv fallback does not apply uv''s own fix for the hardlink warning.'
+    }
+    if ($code -notmatch '\$env:UV_LINK_MODE = \$previousLinkMode') {
+        throw 'UV_LINK_MODE is set for the process and never restored.'
+    }
+    Write-Host 'ok  the uv fallback silences the hardlink warning and restores the variable'
+
     # The main menu has no previous step. FFmWiz states this in a comment and does
     # not advertise back there; the same has to hold here or the hint lies.
     if ($source -notmatch "Read-Answer -Prompt 'Selection' -NoBack") {
