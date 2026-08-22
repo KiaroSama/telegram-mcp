@@ -147,11 +147,112 @@ function Remove-EnvKey {
     )
 }
 
+# --- theme -------------------------------------------------------------------
+#
+# Ported from FFmWiz (`ffmwiz/core/colors.py`, `ffmwiz/appio.py`) so the launchers
+# across these projects read as one family. Only the tokens this menu actually
+# uses are carried over - copying the whole palette would be importing a hundred
+# names to spend six.
+#
+# 256-colour SGR, not Write-Host -ForegroundColor: the console's sixteen named
+# colours cannot express `38;5;166`, and the whole point of the theme is that
+# back-orange and exit-blue are distinguishable at a glance.
+
+$script:Esc = [char] 27
+
+$script:Color = @{
+    Reset       = "$script:Esc[0m"
+    Bold        = "$script:Esc[1m"
+    Red         = "$script:Esc[91m"
+    Green       = "$script:Esc[92m"
+    White       = "$script:Esc[97m"
+    LightBlue   = "$script:Esc[38;5;117m"
+    NoteYellow  = "$script:Esc[38;5;227m"
+    HintYellow  = "$script:Esc[38;5;221m"
+    Dim         = "$script:Esc[38;5;250m"
+    BackPrompt  = "$script:Esc[38;5;166m"
+    ExitPrompt  = "$script:Esc[38;5;32m"
+}
+
+function Test-ColorSupport {
+    <#
+      NO_COLOR is honoured the same way FFmWiz honours it. Beyond that, PowerShell
+      7 always renders SGR, and Windows PowerShell 5.1 only does so on a host with
+      virtual-terminal processing - Windows Terminal has it, an old conhost does
+      not, and printing escapes into one that does not turns the menu into noise.
+    #>
+    if ($env:NO_COLOR) { return $false }
+    if ($PSVersionTable.PSVersion.Major -ge 6) { return $true }
+    if ($env:WT_SESSION) { return $true }
+    try { return [bool] $Host.UI.SupportsVirtualTerminal } catch { return $false }
+}
+
+$script:UseColor = Test-ColorSupport
+
+function Get-Painted {
+    param(
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Text,
+        [Parameter(Mandatory)] [string] $ColorName
+    )
+    if (-not $script:UseColor) { return $Text }
+    return "$($script:Color[$ColorName])$Text$($script:Color.Reset)"
+}
+
+function Get-BackText {
+    <#
+      FFmWiz's `back_text`: the comma-separated parts are coloured by what they
+      mean, not by position, and the whole thing is wrapped in braces. Keeping the
+      shape identical is the point - someone who knows one launcher can read the
+      other without being told.
+    #>
+    param([string] $Text = 'back=0, quit=exit')
+    $parts = foreach ($part in ($Text -split ', ')) {
+        $lowered = $part.ToLowerInvariant()
+        if ($lowered -match 'back') { Get-Painted -Text $part -ColorName 'BackPrompt' }
+        elseif ($lowered -match 'exit') { Get-Painted -Text $part -ColorName 'ExitPrompt' }
+        else { Get-Painted -Text $part -ColorName 'White' }
+    }
+    return '{' + ($parts -join ', ') + '}'
+}
+
+function Write-Note { param([Parameter(Mandatory)] [string] $Message)
+    Write-Host (Get-Painted -Text $Message -ColorName 'NoteYellow') }
+
+function Write-Failure { param([Parameter(Mandatory)] [string] $Message)
+    Write-Host (Get-Painted -Text $Message -ColorName 'Red') }
+
+function Write-Hint { param([Parameter(Mandatory)] [string] $Message)
+    Write-Host (Get-Painted -Text $Message -ColorName 'Dim') }
+
+# `exit` typed at any prompt ends the program; `0` steps back to the menu. A
+# sub-prompt cannot return two different kinds of "no", so quitting sets this and
+# every loop above it unwinds.
+$script:Quitting = $false
+
+function Read-Answer {
+    <#
+      One reader for every prompt, so the two words behave identically everywhere.
+      Returns $null for "go back" - which is also what blank means - and sets
+      $script:Quitting for "exit".
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Prompt,
+        [switch] $NoBack
+    )
+    $hint = if ($NoBack) { Get-BackText -Text 'quit=exit' } else { Get-BackText }
+    $answer = (Read-Host "$(Get-Painted -Text $Prompt -ColorName 'Bold') $hint").Trim()
+    if ($answer -ieq 'exit') { $script:Quitting = $true; return $null }
+    if (-not $NoBack -and ($answer -eq '0' -or $answer -eq '')) { return $null }
+    return $answer
+}
+
 # --- prompts -----------------------------------------------------------------
 
 function Read-Confirmation {
     param([Parameter(Mandatory)] [string] $Question)
-    $answer = Read-Host "$Question [Y/n]"
+    $default = Get-Painted -Text '[Y/n]' -ColorName 'Green'
+    $answer = (Read-Host "$(Get-Painted -Text $Question -ColorName 'Bold') $default").Trim()
+    if ($answer -ieq 'exit') { $script:Quitting = $true; return $false }
     return ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$')
 }
 
@@ -183,16 +284,19 @@ function Read-Label {
     #>
     param([Parameter(Mandatory)] [string] $Prompt)
     while ($true) {
-        $raw = Read-Host $Prompt
+        # `0` and `exit` are consumed by Read-Answer, so neither can ever be a
+        # label. Nobody wants an account called "exit"; the trade is worth it.
+        $raw = Read-Answer -Prompt $Prompt
+        if ($null -eq $raw) { return $null }
         $label = ConvertTo-Label -Raw $raw
         if ($null -eq $label) { return $null }
         if ($label -eq '') {
-            Write-Host 'A label may contain letters, digits, underscores, spaces and hyphens.' -ForegroundColor Yellow
-            Write-Host 'Spaces and hyphens are stored as underscores.' -ForegroundColor DarkGray
+            Write-Note 'A label may contain letters, digits, underscores, spaces and hyphens.'
+            Write-Hint 'Spaces and hyphens are stored as underscores.'
             continue
         }
         if ($label -ne $raw.Trim().ToLowerInvariant()) {
-            Write-Host "Stored as '$label' - that is the value tools take as account=." -ForegroundColor DarkGray
+            Write-Hint "Stored as '$label' - that is the value tools take as account=."
         }
         return $label
     }
@@ -371,17 +475,20 @@ function Rename-Account {
 
 # --- menu --------------------------------------------------------------------
 
+$script:MenuItems = [ordered] @{
+    '1' = 'List configured accounts'
+    '2' = 'Add an account'
+    '3' = 'Remove an account'
+    '4' = 'Rename an account'
+    '5' = 'Generate a session string only'
+}
+
 function Show-Menu {
     Write-Host ''
-    Write-Host '=========================================' -ForegroundColor Cyan
-    Write-Host '  Telegram MCP - account manager' -ForegroundColor Cyan
-    Write-Host '=========================================' -ForegroundColor Cyan
-    Write-Host '  1. List configured accounts'
-    Write-Host '  2. Add an account'
-    Write-Host '  3. Remove an account'
-    Write-Host '  4. Rename an account'
-    Write-Host '  5. Generate a session string only'
-    Write-Host '  0. Quit'
+    Write-Host (Get-Painted -Text 'Telegram MCP account manager:' -ColorName 'LightBlue')
+    foreach ($key in $script:MenuItems.Keys) {
+        Write-Host "  $(Get-Painted -Text "$key." -ColorName 'LightBlue') $($script:MenuItems[$key])"
+    }
     Write-Host ''
 }
 
@@ -391,7 +498,7 @@ Write-Log 'Account manager started'
 try {
     if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) {
         Write-Host ''
-        Write-Host "No .env file exists at $envPath." -ForegroundColor Yellow
+        Write-Note "No .env file exists at $envPath."
         Write-Host 'It also has to hold TELEGRAM_API_ID and TELEGRAM_API_HASH, which this menu'
         Write-Host 'does not manage - copy .env.example first, fill those in, then come back.'
         if (Read-Confirmation 'Create an empty .env now so accounts can be added?') {
@@ -404,32 +511,36 @@ try {
         }
     }
 
-    while ($true) {
+    while (-not $script:Quitting) {
         Show-Menu
-        switch ((Read-Host 'Choose').Trim()) {
+        # -NoBack, and deliberately: the main menu has no previous step, so
+        # advertising back=0 here would promise something that cannot happen.
+        # This is FFmWiz's own rule, kept rather than reinvented.
+        $choice = Read-Answer -Prompt 'Selection' -NoBack
+        if ($script:Quitting) { break }
+        if ([string]::IsNullOrEmpty($choice)) { continue }
+
+        switch ($choice) {
             '1' { Show-Accounts }
             '2' { Add-Account }
             '3' { Remove-Account }
             '4' { Rename-Account }
             '5' { Invoke-SessionGenerator }
-            '0' { break }
-            ''  { }
-            default { Write-Host 'Pick a number from the menu.' -ForegroundColor Yellow }
+            default { Write-Failure "Enter a menu number from 1 to $($script:MenuItems.Count), or exit." }
         }
-        if ($Matches) { $null = $Matches }
-        if ((Read-Host 'Press Enter to return to the menu, or type q to quit') -match '^q') { break }
+        if ($script:Quitting) { break }
     }
 }
 catch {
     $exitCode = 1
     $message = $_.Exception.Message
     Write-Host ''
-    Write-Host "Failed: $message" -ForegroundColor Red
+    Write-Failure "Failed: $message"
     Write-Log $message -Level ERROR
 }
 finally {
     Write-Log "Account manager stopped with exit code $exitCode"
-    if ($script:LogPath) { Write-Host "Log: $script:LogPath" -ForegroundColor DarkGray }
+    if ($script:LogPath) { Write-Hint "Log: $script:LogPath" }
 }
 
 exit $exitCode

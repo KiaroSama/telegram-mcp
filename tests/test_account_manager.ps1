@@ -33,10 +33,20 @@ try {
     $PSScriptRoot_shim = $sandbox
     $functions = [regex]::Matches($source, '(?ms)^function [\w-]+ \{.*?^\}')
     if ($functions.Count -lt 6) { throw "Expected the function blocks, found $($functions.Count)." }
+    # Colour tokens and the menu table live outside any function, so pull those
+    # assignments across as well or Get-Painted indexes a null hashtable.
+    $tables = [regex]::Matches($source, '(?ms)^\$script:(Color|MenuItems) = (\[ordered\] )?@\{.*?^\}')
+    if ($tables.Count -ne 2) { throw "Expected the Color and MenuItems tables, found $($tables.Count)." }
+    $escLine = [regex]::Match($source, '(?m)^\$script:Esc = .*$')
+    if (-not $escLine.Success) { throw 'Could not find the Esc definition.' }
+
     $harness = @"
 `$PSScriptRoot = '$sandbox'
 `$envPath = Join-Path `$PSScriptRoot '.env'
 `$script:LogPath = `$null
+`$script:Quitting = `$false
+$($escLine.Value)
+$($tables.Value -join "`n`n")
 $($functions.Value -join "`n`n")
 "@
     . ([ScriptBlock]::Create($harness))
@@ -128,9 +138,78 @@ $($functions.Value -join "`n`n")
     if (-not (Get-Accounts).Contains($label)) { throw 'The spaced label did not round-trip through .env.' }
     Write-Host 'ok  the stored key has no whitespace and reads back as the same label'
 
-    Write-Host ''
-    Write-Host 'Account manager checks passed.' -ForegroundColor Green
+    # --- the theme, ported from FFmWiz ---------------------------------------
+    #
+    # `back_text` there renders {back=0, quit=exit} with the back half in 256-colour
+    # 166 and the exit half in 32. Those two being distinguishable at a glance is the
+    # whole reason the palette is 256-colour rather than the console's sixteen names.
+    $script:UseColor = $true
+    $back = Get-BackText
+    if ($back -notmatch '^\{.*\}$') { throw "back text is not brace-wrapped: $back" }
+    if ($back -notmatch 'back=0') { throw "back text lost the back key: $back" }
+    if ($back -notmatch 'quit=exit') { throw "back text lost the quit key: $back" }
+    $esc = [char] 27
+    if ($back -notmatch [regex]::Escape("$esc[38;5;166m")) { throw 'back=0 is not painted with FFmWiz BACK_PROMPT (166).' }
+    if ($back -notmatch [regex]::Escape("$esc[38;5;32m")) { throw 'quit=exit is not painted with FFmWiz EXIT_PROMPT (32).' }
+    Write-Host 'ok  back=0 and quit=exit carry the FFmWiz prompt colours'
+
+    $quitOnly = Get-BackText -Text 'quit=exit'
+    if ($quitOnly -match 'back') { throw "A quit-only hint still advertises back: $quitOnly" }
+    Write-Host 'ok  a prompt with nowhere to go back to advertises only quit'
+
+    # NO_COLOR is honoured the same way FFmWiz honours it, and a terminal without
+    # virtual-terminal processing would otherwise show the escapes as literal noise.
+    $script:UseColor = $false
+    $plain = Get-BackText
+    if ($plain -ne '{back=0, quit=exit}') { throw "Uncoloured hint is not plain text: $plain" }
+    if ($plain -match [regex]::Escape($esc)) { throw 'An escape survived with colour disabled.' }
+    $script:UseColor = $true
+    Write-Host 'ok  colour off leaves plain text with no escapes'
+
+    # The main menu has no previous step. FFmWiz states this in a comment and does
+    # not advertise back there; the same has to hold here or the hint lies.
+    if ($source -notmatch "Read-Answer -Prompt 'Selection' -NoBack") {
+        throw 'The main menu advertises back=0, but there is nothing to go back to.'
+    }
+    Write-Host 'ok  the main menu does not advertise a back it cannot perform'
+
 }
 finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+# The checks above run extracted functions. This one runs the SHIPPED script with
+# scripted input, because navigation is the thing a harness cannot vouch for: the
+# question is whether `0` unwinds one level and `exit` unwinds all of them.
+$e2e = Join-Path ([IO.Path]::GetTempPath()) ("tg-accounts-e2e-" + [guid]::NewGuid())
+[void] (New-Item -ItemType Directory -Path $e2e)
+try {
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'Manage-Accounts.ps1') -Destination $e2e
+    $e2eEnv = Join-Path $e2e '.env'
+    $before = @('TELEGRAM_API_ID=1', 'TELEGRAM_SESSION_STRING_WORK=1AAAAAwork')
+    [IO.File]::WriteAllLines($e2eEnv, $before, [Text.UTF8Encoding]::new($false))
+
+    # 3 = remove, 0 = step back out of it, exit = leave.
+    $output = "3`n0`nexit`n" | & pwsh -NoLogo -NoProfile -ExecutionPolicy Bypass `
+        -File (Join-Path $e2e 'Manage-Accounts.ps1') 2>&1
+    $code = $LASTEXITCODE
+    $text = $output -join [Environment]::NewLine
+
+    if ($code -ne 0) { throw "The script exited $code from a plain exit: $text" }
+    if ($text -notmatch 'Cancelled') { throw "0 did not cancel the remove step: $text" }
+    if ($text -notmatch 'Telegram MCP account manager') { throw 'The menu was never redrawn after 0.' }
+
+    $after = @([IO.File]::ReadAllLines($e2eEnv))
+    if ("$after" -ne "$before") { throw "Backing out of remove still changed .env: $after" }
+    if (@(Get-ChildItem -LiteralPath $e2e -Filter '.env.backup-*' -Force).Count -ne 0) {
+        throw 'A backup was written for a cancelled operation.'
+    }
+    Write-Host 'ok  0 unwinds one level and exit leaves, changing nothing on the way'
+}
+finally {
+    Remove-Item -LiteralPath $e2e -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+Write-Host ''
+Write-Host 'Account manager checks passed.' -ForegroundColor Green
+
