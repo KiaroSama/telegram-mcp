@@ -8,6 +8,13 @@ import pytest
 
 from telegram_mcp import runtime
 
+# `os.chmod` on Windows toggles only the read-only flag: it cannot clear the read bit
+# and `st_mode` never reports 0o600, so these assert the platform rather than the code.
+posix_permissions = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX permission bits; Windows os.chmod cannot express them",
+)
+
 
 @pytest.fixture(autouse=True)
 def _tmp_aliases(monkeypatch, tmp_path):
@@ -222,6 +229,7 @@ def test_ask_payload_lists_candidates_when_ambiguous():
     assert "which one" in payload["instruction"]
 
 
+@posix_permissions
 def test_alias_file_is_owner_only_and_written_atomically():
     runtime.save_aliases({"андрей": 1})
     path = runtime.aliases_file_path()
@@ -277,6 +285,7 @@ def test_update_aliases_does_not_lose_a_concurrent_write():
     assert _ids(runtime.load_aliases()) == {"первый": 1, "второй": 2, "третий": 3}
 
 
+@posix_permissions
 def test_update_aliases_refuses_to_write_over_an_unreadable_file():
     path = runtime.aliases_file_path()
     runtime.save_aliases({"важный": 1})

@@ -11,6 +11,13 @@ import pytest
 
 from telegram_mcp.tools import events
 
+# `os.chmod` on Windows toggles only the read-only flag: it cannot clear the read bit
+# and `st_mode` never reports 0o600, so these assert the platform rather than the code.
+posix_permissions = pytest.mark.skipif(
+    os.name != "posix",
+    reason="POSIX permission bits; Windows os.chmod cannot express them",
+)
+
 
 def _mono(seconds_ago=0.0):
     return time.monotonic() - seconds_ago
@@ -194,12 +201,14 @@ def test_default_feed_path_creates_its_directory(monkeypatch, tmp_path):
     assert events.feed_file_path().exists()
 
 
+@posix_permissions
 def test_feed_file_created_owner_only():
     events._touch_feed_file()
     mode = stat.S_IMODE(events.feed_file_path().stat().st_mode)
     assert mode == 0o600
 
 
+@posix_permissions
 def test_existing_world_readable_feed_file_is_tightened():
     path = events.feed_file_path()
     path.touch()
@@ -211,6 +220,7 @@ def test_existing_world_readable_feed_file_is_tightened():
 
 
 @pytest.mark.asyncio
+@posix_permissions
 async def test_rotated_world_readable_file_is_tightened_on_write():
     path = events.feed_file_path()
     path.touch()
