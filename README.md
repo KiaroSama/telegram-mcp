@@ -32,6 +32,7 @@ Message sent successfully:
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
 - [MCP Client Configuration](#mcp-client-configuration)
+- [Windows launchers](#windows-launchers)
 - [Multi-Account Setup](#multi-account-setup)
 - [Device Identity](#device-identity)
 - [Proxy Support](#proxy-support)
@@ -294,6 +295,30 @@ For stdio-only clients, bridge with [mcp-remote](https://www.npmjs.com/package/m
   }
 }
 ```
+
+## Windows launchers
+
+Two PowerShell scripts sit at the repository root. Both resolve everything relative
+to their own location, so they work from any directory and from a shortcut.
+
+| Script | What it does |
+|---|---|
+| `start-mcp.ps1` | Runs the server through `uv`, teeing its output to a timestamped file in `logs/` without losing the terminal's colours or its TTY. |
+| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. |
+
+`Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of
+`.env` byte-for-byte alone — comments, ordering and every key it does not recognise.
+Before any rewrite it copies the file to `.env.backup-<UTC>`, so undoing a mistake is a
+rename rather than a reconstruction.
+
+A session string is a live login to a Telegram account, so the menu reads one as hidden
+input, never echoes it, and never writes it to its log — the log records labels and
+counts only. Removing an account takes it out of `.env`; it does **not** revoke the
+Telegram session, which is done from the app under Settings → Devices.
+
+Adding the second account switches the server into multi-account mode, where write tools
+require `account=<label>` and read-only tools fan out across every account when it is
+omitted. The menu says so at the moment it happens.
 
 ## Multi-Account Setup
 

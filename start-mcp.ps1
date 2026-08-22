@@ -16,10 +16,10 @@ try {
         [void] (New-Item -ItemType Directory -Path $logsDirectory -Force)
 
         $timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
-        $logPath = Join-Path $logsDirectory "run_$timestamp.log"
+        $logPath = Join-Path $logsDirectory "start-mcp_$timestamp.log"
         $suffix = 1
         while (Test-Path -LiteralPath $logPath) {
-            $logPath = Join-Path $logsDirectory "run_${timestamp}_$suffix.log"
+            $logPath = Join-Path $logsDirectory "start-mcp_${timestamp}_$suffix.log"
             $suffix++
         }
 

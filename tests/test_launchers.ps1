@@ -3,9 +3,8 @@ Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
 $scripts = @(
-    (Join-Path $projectRoot 'run.ps1'),
-    (Join-Path $projectRoot 'chigwell.ps1'),
-    (Join-Path $projectRoot 'Install-chigwellCommand.ps1')
+    (Join-Path $projectRoot 'start-mcp.ps1'),
+    (Join-Path $projectRoot 'Manage-Accounts.ps1')
 )
 
 foreach ($script in $scripts) {
@@ -24,8 +23,8 @@ foreach ($script in $scripts) {
     }
 }
 
-$installer = Get-Content -LiteralPath $scripts[2] -Raw
 $launcher = Get-Content -LiteralPath $scripts[0] -Raw
+$manager = Get-Content -LiteralPath $scripts[1] -Raw
 if ($launcher -match '2>&1\s*\|') {
     throw 'Launcher must not pipe native output because that disables original terminal colors.'
 }
@@ -115,64 +114,27 @@ finally {
     [IO.Directory]::Delete($wrapperTestDirectory, $true)
 }
 
-# [Environment]::GetEnvironmentVariable expands %VAR% before returning, and
-# SetEnvironmentVariable writes that expansion back - which turns the machine
-# Path from REG_EXPAND_SZ into a literal string and freezes every reference to
-# whatever it meant at install time. The damage is machine-wide and invisible in
-# the value the installer prints, so it is asserted on the API names.
-if ($installer -match "\[Environment\]::SetEnvironmentVariable\([^)]*'Machine'") {
-    throw 'Installer still writes the machine environment through the expanding API.'
+# The account manager rewrites .env, which holds session strings. Two properties are
+# not negotiable: it must never echo a secret value, and it must never overwrite the
+# file without first putting a copy somewhere recoverable.
+if ($manager -notmatch 'Backup-EnvFile') {
+    throw 'The account manager rewrites .env with no backup step.'
 }
-if ($installer -match "\[Environment\]::GetEnvironmentVariable\([^)]*'Machine'") {
-    throw 'Installer still reads the machine environment through the expanding API.'
+if ($manager -match 'Write-Host[^
+]*\$sessionString') {
+    throw 'The account manager prints a session string to the terminal.'
 }
-if ($installer -notmatch 'DoNotExpandEnvironmentNames') {
-    throw 'Installer does not read the machine environment without expanding %VAR% references.'
+if ($manager -notmatch 'AsSecureString') {
+    throw 'The account manager reads a session string as visible input.'
 }
-if ($installer -notmatch '(?s)New-ItemProperty.*?-PropertyType') {
-    throw 'Installer does not persist the machine environment with an explicit registry type.'
-}
-
-# The registry type must come from the key rather than a literal: Path is
-# REG_EXPAND_SZ and PATHEXT is REG_SZ, and writing the wrong one re-creates the
-# flattening bug from the other direction.
-if ($installer -notmatch '-PropertyType \$\w*Kind\b') {
-    throw 'Installer hardcodes the registry type instead of preserving the one it read.'
-}
-if ($installer -notmatch 'ExpandString') {
-    throw 'Installer has no ExpandString fallback for a missing machine Path value.'
-}
-
-# Behavioural: run the installer's pure append helper in isolation. Executing the
-# installer itself is not an option - it elevates at load time and rewrites the
-# machine environment.
-$functionMatch = [regex]::Match(
-    $installer,
-    '(?ms)^function Get-UpdatedEnvironmentValue \{.*?^\}'
-)
-if (-not $functionMatch.Success) {
-    throw 'Could not extract Get-UpdatedEnvironmentValue from the installer.'
-}
-. ([ScriptBlock]::Create($functionMatch.Value))
-
-$current = '%SystemRoot%\system32;C:\Tools'
-$updated = Get-UpdatedEnvironmentValue -Current $current -Entry 'C:\Repo'
-if ($updated -notmatch [regex]::Escape('%SystemRoot%\system32')) {
-    throw 'The PATH update expanded or dropped a %VAR% entry.'
-}
-if ($updated -ne "$current;C:\Repo") {
-    throw "The PATH update rewrote existing entries: $updated"
-}
-
-$unchanged = Get-UpdatedEnvironmentValue -Current $current -Entry 'c:\tools'
-if ($unchanged -ne $current) {
-    throw "An already-present entry was not left untouched: $unchanged"
+if ($manager -notmatch '(?s)function Set-EnvValue.*?\[IO\.File\]::WriteAllText') {
+    throw 'The account manager does not write .env through an explicit encoding.'
 }
 
 $logsDirectory = Join-Path $projectRoot 'logs'
 $logsDirectoryExisted = Test-Path -LiteralPath $logsDirectory
 $before = @(
-    Get-ChildItem -LiteralPath $logsDirectory -Filter 'run_*.log' -File -ErrorAction SilentlyContinue |
+    Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File -ErrorAction SilentlyContinue |
         Select-Object -ExpandProperty FullName
 )
 
@@ -182,12 +144,12 @@ $newLogs = @()
 try {
     $env:PATH = "$PSScriptRoot\fixtures;$originalPath"
     $env:PATHEXT = ".PS1;$originalPathExt"
-    $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[1] 2>&1
+    $output = & pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[0] 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Launcher exited with $LASTEXITCODE`: $($output -join [Environment]::NewLine)"
     }
     $after = @(
-        Get-ChildItem -LiteralPath $logsDirectory -Filter 'run_*.log' -File |
+        Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File |
             Select-Object -ExpandProperty FullName
     )
     $newLogs = @($after | Where-Object { $_ -notin $before })
@@ -206,7 +168,7 @@ finally {
     $env:PATH = $originalPath
     $env:PATHEXT = $originalPathExt
     $testLogs = @(
-        Get-ChildItem -LiteralPath $logsDirectory -Filter 'run_*.log' -File -ErrorAction SilentlyContinue |
+        Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File -ErrorAction SilentlyContinue |
             Select-Object -ExpandProperty FullName |
             Where-Object { $_ -notin $before }
     )
