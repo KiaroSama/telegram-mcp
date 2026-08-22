@@ -245,6 +245,24 @@ async def _fetch_stats(cl, request) -> tuple[Any, Any]:
         return await sender.send(request), sender
 
 
+def _not_a_channel(chat_id, entity):
+    """A plain sentence for a peer that has no channel username, or None if it does.
+
+    Without this, Telethon raises `TypeError: Cannot cast InputPeerUser to any kind of
+    InputChannel` deep inside `resolve()`, and the tool answers with a generic error
+    code - which tells the caller nothing about the one thing that is actually wrong.
+    A user's @handle and a channel's are set through completely different requests.
+    """
+    if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
+        return None
+    kind = get_entity_type(entity)
+    return (
+        f"{chat_id} is a {kind}, and `channels.CheckUsername`/`UpdateUsername` apply only to "
+        "channels and supergroups. A user's own @handle is account-level - `update_profile` "
+        "sets that - and a basic group has no public username at all until it is upgraded."
+    )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Check Channel Username", openWorldHint=True, readOnlyHint=True
@@ -290,6 +308,9 @@ async def check_channel_username(
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
+        wrong_kind = _not_a_channel(chat_id, entity)
+        if wrong_kind:
+            return wrong_kind
         available = bool(
             await cl(functions.channels.CheckUsernameRequest(channel=entity, username=name))
         )
@@ -383,6 +404,9 @@ async def set_channel_username(
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
+        wrong_kind = _not_a_channel(chat_id, entity)
+        if wrong_kind:
+            return wrong_kind
         previous = getattr(entity, "username", None)
         title = display_name(getattr(entity, "title", "") or str(chat_id))
 

@@ -15,6 +15,15 @@ it now would change what callers catch.
 import os
 from typing import Optional
 
+from dotenv import load_dotenv
+
+# Loaded HERE, not by whoever imports this. These values are read at import time, and
+# this module now sits at the bottom of the import graph - `main.py` reaches it through
+# `file_roots` before `runtime` has run a line, so relying on `runtime` to have called
+# `load_dotenv()` first meant the server could not start from a `.env` at all. It is
+# idempotent, and `runtime` still calls it for its own remaining reads.
+load_dotenv()
+
 
 class ValidationError(Exception):
     """Custom exception for validation errors."""

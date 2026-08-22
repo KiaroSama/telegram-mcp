@@ -406,3 +406,36 @@ async def test_no_recommendations_says_so_rather_than_returning_an_empty_list(_w
     _wire(_Client(result=SimpleNamespace(chats=[])))
 
     assert "no similar-channel recommendations" in await get_similar_channels(1, account="a")
+
+
+@pytest.mark.asyncio
+async def test_checking_a_username_on_a_user_says_why_instead_of_erroring(_wire):
+    """Found live: aimed at a user, this answered `An error occurred (code: GEN-ERR-936)`.
+
+    Telethon casts the peer inside `resolve()`, so an `InputPeerUser` raises
+    `TypeError: Cannot cast ... to any kind of InputChannel` from deep in the library
+    and the generic handler turns it into a code. The two sibling tools
+    (`get_channel_statistics`, `get_similar_channels`) already explained this; these two
+    did not, which is the whole defect.
+    """
+    client = _wire(
+        _Client(), entity=SimpleNamespace(id=5899781975, broadcast=False, megagroup=False)
+    )
+
+    result = await check_channel_username(5899781975, "some_free_name", account="a")
+
+    assert "CheckUsername" in result and "channels and supergroups" in result
+    assert "GEN-ERR" not in result
+    assert client.requests == [], "a request was sent for a peer that cannot take one"
+
+
+@pytest.mark.asyncio
+async def test_setting_a_username_on_a_user_refuses_the_same_way(_wire):
+    client = _wire(
+        _Client(), entity=SimpleNamespace(id=5899781975, broadcast=False, megagroup=False)
+    )
+
+    result = await set_channel_username(5899781975, "some_free_name", account="a")
+
+    assert "channels and supergroups" in result
+    assert client.requests == []
