@@ -27,7 +27,6 @@ from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
 
-from mcp.server.fastmcp import Image
 from telethon.errors import (
     FileReferenceEmptyError,
     FileReferenceExpiredError,
