@@ -330,8 +330,13 @@ account is not written unless that parses as a session carrying an auth key. If 
 generator exits without producing one, the menu says so and saves nothing. It runs through the existing
 `.venv` rather than `uv run`, which would rebuild and reinstall the project first and
 print build progress over the login prompt; `uv` is the fallback for when no venv exists.
-The generator asks for a label of its own — leave it blank, since the menu writes the
-real `.env` line.
+The menu passes the label it already collected, so the generator does not ask again, and
+the generator saves the line itself — pressing Enter at its save prompt is enough. That
+removes the copy-paste of a 350-character secret entirely; the paste path remains for a
+session string obtained some other way, and what you paste there is validated.
+
+Both writers back `.env` up to `.env.backup-<UTC>` first. There is only one owner of the
+line at a time: if the generator saved it, the menu says so and asks for nothing further.
 
 The menu follows the same convention as the other launchers in this family: `0` steps
 back one level and `exit` leaves, shown at each prompt as `{back=0, quit=exit}` with the

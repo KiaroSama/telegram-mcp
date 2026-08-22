@@ -338,20 +338,26 @@ function Show-Accounts {
 }
 
 function Invoke-SessionGenerator {
+    param([string] $Label)
+
     Write-Host ''
     Write-Host (Get-Painted -Text 'The generator will ask how you want to log in:' -ColorName 'LightBlue')
     Write-Host '  QR code    - scan it in Telegram under Settings > Devices > Link Desktop Device'
     Write-Host '  Phone code - enter the number, then the code Telegram sends'
     Write-Host ''
     Write-Host 'Log in as the account you want to ADD, not one already configured.'
-    Write-Hint 'It asks for an account label too. Leave that blank - it only affects a'
-    Write-Hint 'suggested .env line, and this menu writes the real one for you.'
+    if ($Label) {
+        Write-Hint "It will save the result as '$Label' - press Enter when it offers to."
+    }
     Write-Host ''
     if (-not (Read-Confirmation 'Run the session generator now?')) { return }
 
     # No --qr / --phone here on purpose: without a flag the generator asks, so the
     # choice always matches whatever methods it actually supports.
     $script = 'session_string_generator.py'
+    # The label it would otherwise ask for. Passing it is what stops the same
+    # question being put twice, once by each half of this flow.
+    $arguments = if ($Label) { @($script, '--label', $Label) } else { @($script) }
     $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
 
     Push-Location -LiteralPath $PSScriptRoot
@@ -361,7 +367,7 @@ function Invoke-SessionGenerator {
             # Straight to the interpreter. `uv run` would rebuild and reinstall the
             # project first whenever a source file has changed, printing build and
             # wheel-install progress on top of the login prompt.
-            & $python $script
+            & $python @arguments
             $script:GeneratorExitCode = $LASTEXITCODE
         }
         else {
@@ -375,7 +381,7 @@ function Invoke-SessionGenerator {
             $previousLinkMode = $env:UV_LINK_MODE
             $env:UV_LINK_MODE = 'copy'
             try {
-                & $uv.Path run --quiet $script
+                & $uv.Path run --quiet @arguments
                 $script:GeneratorExitCode = $LASTEXITCODE
             }
             finally { $env:UV_LINK_MODE = $previousLinkMode }
@@ -440,8 +446,21 @@ function Add-Account {
     }
 
     Write-Host ''
-    Write-Host 'A session string authorises full access to that Telegram account.' -ForegroundColor Yellow
-    if (Read-Confirmation 'Do you need to generate one first?') { Invoke-SessionGenerator }
+    Write-Host (Get-Painted -Text 'A session string authorises full access to that Telegram account.' -ColorName 'NoteYellow')
+    if (Read-Confirmation 'Do you need to generate one first?') {
+        Invoke-SessionGenerator -Label $label
+
+        # The generator can write the line itself now. Asking for a paste after it
+        # already did would be asking someone to copy a 350-character secret across
+        # a terminal for no reason - which is how a mis-paste got saved once.
+        if ((Get-Accounts).Contains($label)) {
+            Write-Host ''
+            Write-Host "The generator saved '$label' to .env." -ForegroundColor Green
+            Write-Host 'Restart the MCP server for it to take effect.' -ForegroundColor Cyan
+            return
+        }
+        Write-Hint 'The generator did not save it, so paste the string it printed.'
+    }
 
     $sessionString = Read-SessionString 'Paste the session string (input stays hidden)'
     if ([string]::IsNullOrWhiteSpace($sessionString)) {

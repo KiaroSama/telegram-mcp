@@ -25,8 +25,11 @@ import asyncio
 import getpass
 import io
 import os
+import shutil
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 from telethon import errors
@@ -39,6 +42,43 @@ from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_dist
 _QR_MAX_REFRESHES = 10
 
 load_dotenv()
+
+
+def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Optional[Path]:
+    r"""Set one key in `.env`, replacing its line or appending it, and back the file up.
+
+    Returns the backup's path, or None when there was no file to back up.
+
+    Extracted from main() so it can be exercised without a Telegram login. It sat
+    inside the interactive flow, which meant the only way to test the file handling
+    was to fake an entire sign-in - so it never was tested, and it rewrote the file
+    holding every configured account with no way back.
+
+    Every other line survives byte-for-byte: comments, ordering, and every key this
+    knows nothing about, which is most of the file.
+    """
+    backup = None
+    if env_path.exists():
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_UTC")
+        backup = env_path.with_name(f"{env_path.name}.backup-{stamp}")
+        shutil.copyfile(env_path, backup)
+        lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    else:
+        lines = []
+
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.startswith(f"{key}="):
+            lines[index] = f"{key}={value}" + "\n"
+            replaced = True
+            break
+    if not replaced:
+        if lines and not lines[-1].endswith("\n"):
+            lines[-1] += "\n"
+        lines.append(f"{key}={value}" + "\n")
+
+    env_path.write_text("".join(lines), encoding="utf-8")
+    return backup
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,6 +95,14 @@ def _parse_args() -> argparse.Namespace:
         "--phone",
         action="store_true",
         help="Use phone number + verification code login without prompting for a login method.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        help=(
+            "Account label to save under, skipping the prompt. Passed by the account "
+            "manager, which has already asked for one."
+        ),
     )
     return parser.parse_args()
 
@@ -187,15 +235,22 @@ def main() -> None:
         "\nYour credentials will NOT be stored on any server and are only used for local authentication.\n"
     )
 
-    try:
-        label = (
-            input("Account label (optional, e.g. 'work', 'personal'; leave empty for default): ")
-            .strip()
-            .lower()
-        )
-    except EOFError:
-        # Non-interactive stdin (piped/scripted runs): fall back to the default label.
-        label = ""
+    if args.label is not None:
+        # Supplied by the account manager, which asked for it already. Asking a
+        # second time is how the same account ended up described twice.
+        label = args.label.strip()
+    else:
+        try:
+            label = (
+                input(
+                    "Account label (optional, e.g. 'work', 'personal'; leave empty for default): "
+                )
+                .strip()
+                .lower()
+            )
+        except EOFError:
+            # Non-interactive stdin (piped/scripted runs): fall back to the default label.
+            label = ""
 
     if args.qr:
         method = "1"
@@ -232,32 +287,20 @@ def main() -> None:
         print("\nIMPORTANT: Keep this string private and never share it with anyone!")
 
         try:
-            choice = input(
-                "\nWould you like to automatically update your .env file with this session string? (y/N): "
-            )
+            choice = input("\nSave this to your .env file as " f"{env_var}? [Y/n]: ")
         except EOFError:
+            # Nothing is reading the prompt, so nothing can confirm it either.
             choice = "n"
-        if choice.lower() == "y":
+        if choice.strip().lower() in {"", "y", "yes"}:
             try:
-                with open(".env", "r") as file:
-                    env_contents = file.readlines()
-
-                session_string_line_found = False
-                for i, line in enumerate(env_contents):
-                    if line.startswith(f"{env_var}="):
-                        env_contents[i] = f"{env_var}={session_string}\n"
-                        session_string_line_found = True
-                        break
-
-                if not session_string_line_found:
-                    env_contents.append(f"{env_var}={session_string}\n")
-
-                with open(".env", "w") as file:
-                    file.writelines(env_contents)
-
-                print("\n.env file updated successfully!")
+                backup = write_env_value(env_var, session_string)
+                print("")
+                print(f".env updated: {env_var} is saved.")
+                if backup:
+                    print(f"The previous file is kept as {backup.name}.")
             except Exception as e:
-                print(f"\nError updating .env file: {e}")
+                print("")
+                print(f"Error updating .env file: {e}")
                 print("Please manually add the session string to your .env file.")
 
         client.disconnect()

@@ -116,3 +116,76 @@ def test_both_login_paths_go_through_the_one_helper(generator):
     assert (
         outside.count("_sign_in_with_password(client)") == 2
     ), "both the QR and the phone path must reach the shared helper"
+
+
+def test_writing_a_labelled_key_leaves_every_other_line_alone(generator, tmp_path):
+    env = tmp_path / ".env"
+    original = [
+        "# a comment that must survive",
+        "TELEGRAM_API_ID=12345",
+        "",
+        "TELEGRAM_SESSION_STRING=1AAAexisting",
+        "UNRELATED_KEY=keep me",
+    ]
+    env.write_text("\n".join(original) + "\n", encoding="utf-8")
+
+    backup = generator.write_env_value("TELEGRAM_SESSION_STRING_WORK", "1AAAnew", env)
+
+    written = env.read_text(encoding="utf-8")
+    for line in original:
+        assert line in written, f"rewriting .env lost: {line!r}"
+    assert "TELEGRAM_SESSION_STRING_WORK=1AAAnew" in written
+    assert backup is not None and backup.exists(), "the file was rewritten with no backup"
+    assert backup.read_text(encoding="utf-8") == "\n".join(original) + "\n"
+
+
+def test_writing_an_existing_key_replaces_its_line_rather_than_appending(generator, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_SESSION_STRING=1AAAold\nOTHER=1\n", encoding="utf-8")
+
+    generator.write_env_value("TELEGRAM_SESSION_STRING", "1AAAnew", env)
+
+    lines = [
+        line
+        for line in env.read_text(encoding="utf-8").splitlines()
+        if line.startswith("TELEGRAM_SESSION_STRING=")
+    ]
+    assert lines == ["TELEGRAM_SESSION_STRING=1AAAnew"], f"duplicated instead of replaced: {lines}"
+
+
+def test_a_file_without_a_trailing_newline_does_not_glue_two_keys_together(generator, tmp_path):
+    """Appending to a file whose last line is unterminated used to join them."""
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=12345", encoding="utf-8")
+
+    generator.write_env_value("TELEGRAM_SESSION_STRING_WORK", "1AAAnew", env)
+
+    assert env.read_text(encoding="utf-8").splitlines() == [
+        "TELEGRAM_API_ID=12345",
+        "TELEGRAM_SESSION_STRING_WORK=1AAAnew",
+    ]
+
+
+def test_writing_into_a_missing_file_creates_it_and_reports_no_backup(generator, tmp_path):
+    env = tmp_path / ".env"
+
+    backup = generator.write_env_value("TELEGRAM_SESSION_STRING", "1AAAnew", env)
+
+    assert backup is None, "a backup was claimed for a file that did not exist"
+    assert env.read_text(encoding="utf-8") == "TELEGRAM_SESSION_STRING=1AAAnew\n"
+
+
+def test_the_save_prompt_defaults_to_yes(generator):
+    """Enter alone must save. Someone who completed a login wants the result kept."""
+    source = (REPO / "session_string_generator.py").read_text(encoding="utf-8")
+    assert "[Y/n]" in source, "the save prompt no longer advertises yes as the default"
+    assert "(y/N)" not in source, "the save prompt still defaults to no"
+    assert 'in {"", "y", "yes"}' in source, "an empty answer is not treated as yes"
+
+
+def test_the_label_argument_skips_the_second_prompt(generator, monkeypatch):
+    """The account manager already asked. Asking again is the duplicate that was reported."""
+    monkeypatch.setattr(sys, "argv", ["session_string_generator.py", "--label", "kgb_verifier"])
+    assert generator._parse_args().label == "kgb_verifier"
+    monkeypatch.setattr(sys, "argv", ["session_string_generator.py"])
+    assert generator._parse_args().label is None
