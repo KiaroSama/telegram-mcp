@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from telegram_mcp import runner, runtime
+from telegram_mcp import connection, runner, runtime
 from telegram_mcp.singleton import try_lock_exclusive
 
 # --- _parse_session_pool -----------------------------------------------------
@@ -25,7 +25,7 @@ def test_parse_session_pool_empty_when_unset(monkeypatch):
 @pytest.fixture
 def isolated_lock_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime.tempfile, "gettempdir", lambda: str(tmp_path))
-    monkeypatch.setattr(runtime, "_SESSION_LOCKS", [])
+    monkeypatch.setattr(connection, "_SESSION_LOCKS", [])
     return tmp_path
 
 
@@ -85,15 +85,15 @@ def test_discover_accounts_uses_pool_for_default(monkeypatch):
     monkeypatch.setenv("TELEGRAM_SESSION_STRINGS", "pooled-1 pooled-2")
     monkeypatch.delenv("TELEGRAM_SESSION_STRING", raising=False)
     monkeypatch.delenv("TELEGRAM_SESSION_NAME", raising=False)
-    monkeypatch.setattr(runtime, "_acquire_session", lambda pool: pool[0])
-    monkeypatch.setattr(runtime, "StringSession", lambda value=None: f"str::{value}")
+    monkeypatch.setattr(connection, "_acquire_session", lambda pool: pool[0])
+    monkeypatch.setattr(connection, "StringSession", lambda value=None: f"str::{value}")
     captured = {}
 
     def _fake_build_client(session, label):
         captured[label] = session
         return object()
 
-    monkeypatch.setattr(runtime, "_build_client", _fake_build_client)
+    monkeypatch.setattr(connection, "_build_client", _fake_build_client)
 
     accounts = runtime._discover_accounts()
 

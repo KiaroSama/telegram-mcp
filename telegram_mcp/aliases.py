@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import telethon
 
-from telegram_mcp.env_flags import _parse_bool_env
+from telegram_mcp.settings import _parse_bool_env
 from sanitize import sanitize_name
 
 try:  # POSIX advisory locking; absent on Windows, where the atomic replace carries it.

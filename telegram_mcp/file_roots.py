@@ -27,7 +27,7 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import Context
 from mcp.shared.exceptions import McpError
 
-from telegram_mcp.env_flags import _parse_bool_env
+from telegram_mcp.settings import _parse_bool_env
 
 logger = logging.getLogger("telegram_mcp")
 

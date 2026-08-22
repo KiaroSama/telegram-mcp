@@ -1,6 +1,6 @@
 import pytest
 
-from telegram_mcp import file_roots, runtime
+from telegram_mcp import file_roots
 from telegram_mcp.tools import media
 
 

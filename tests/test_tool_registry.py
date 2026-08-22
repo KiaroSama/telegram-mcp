@@ -38,3 +38,30 @@ def test_no_tool_name_shadows_the_module_it_lives_in():
             f"{getattr(bound, '__name__', bound)!r}, not the module - a tool inside it "
             f"is named {name!r} and `import *` overwrote the submodule attribute."
         )
+
+
+def test_no_module_in_the_package_is_shadowed_by_a_name_it_exports():
+    """The same trap, one level up. `runtime` star-imports its subsystem modules, so a
+    global named after its own module - `clients.clients` was one - makes
+    `telegram_mcp.clients` resolve to a dict for anyone who star-imported it. That is
+    how the module named `clients` got renamed to `connection`.
+
+    Checked across the whole package rather than just `tools`, because the first guard
+    only covered `tools` and this one bit in `telegram_mcp/` a day later."""
+    import importlib
+    import inspect
+    import pkgutil
+
+    import telegram_mcp
+
+    for info in pkgutil.walk_packages(telegram_mcp.__path__, "telegram_mcp."):
+        module = importlib.import_module(info.name)
+        own = info.name.rsplit(".", 1)[-1]
+        exported = getattr(module, own, None)
+        if exported is None or inspect.ismodule(exported):
+            continue
+        raise AssertionError(
+            f"{info.name} exports a {type(exported).__name__} named {own!r}, the same as "
+            f"its own module. Anything doing `from {info.name} import *` binds that value "
+            f"over the submodule, and `{info.name}` then resolves to the value, not the module."
+        )
