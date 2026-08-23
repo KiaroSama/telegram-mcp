@@ -115,6 +115,13 @@ def sanitize_dict(data: Any) -> Any:
         return [sanitize_dict(item) for item in data]
     if isinstance(data, str):
         return sanitize_user_content(data, max_length=4096)
+    if isinstance(data, bytes):
+        # Decode-then-sanitize rather than base64. Base64 would be more honest about
+        # the value being binary, but it changes the output for every existing
+        # consumer and makes a genuinely-textual field unreadable. Decoding keeps
+        # normal values looking exactly as they did, and now they get the same
+        # control-character stripping and 4096-character bound every `str` gets.
+        return sanitize_user_content(data.decode("utf-8", errors="replace"), max_length=4096)
     return data
 
 
@@ -123,7 +130,9 @@ def _json_default(obj: Any) -> Any:
     if isinstance(obj, datetime):
         return obj.isoformat()
     if isinstance(obj, bytes):
-        return obj.decode("utf-8", errors="replace")
+        # Last line of defence: a bytes value that never went through
+        # `sanitize_dict` still reaches the model through this hook.
+        return sanitize_user_content(obj.decode("utf-8", errors="replace"), max_length=4096)
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
