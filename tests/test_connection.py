@@ -252,9 +252,75 @@ async def test_with_account_routes_single_multi_and_readonly(monkeypatch):
         "Error: 'account' is required. Available accounts: work, personal"
     )
     assert await runtime.with_account(readonly=False)(tool)(account="work") == "work"
-    assert (
-        await runtime.with_account(readonly=True)(tool)() == "[work]\nwork\n\n[personal]\npersonal"
+    import json
+
+    assert json.loads(await runtime.with_account(readonly=True)(tool)()) == {
+        "accounts": {"work": "work", "personal": "personal"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_fan_out_returns_one_parseable_object_per_account(monkeypatch):
+    """Every tool returns JSON from format_tool_result. Welding those strings together
+    with [label] markers produced something that is neither JSON nor a stable text
+    format, so a caller that parsed one account's output fine broke the moment a
+    second account was configured."""
+    import json
+
+    async def tool(account=None):
+        return json.dumps({"results": [{"chat_id": 1, "owner": account}]})
+
+    monkeypatch.setattr(connection, "clients", {"work": object(), "personal": object()})
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert set(payload["accounts"]) == {"work", "personal"}
+    assert payload["accounts"]["work"]["results"][0]["owner"] == "work"
+    assert payload["accounts"]["personal"]["results"][0]["owner"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_answers_in_prose_keeps_its_sentence(monkeypatch):
+    """Not every read tool returns JSON — "Page out of range." and "No messages found."
+    are real answers. They must survive the envelope as strings, not become null."""
+    import json
+
+    async def tool(account=None):
+        return "No messages found."
+
+    monkeypatch.setattr(connection, "clients", {"work": object(), "personal": object()})
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert payload["accounts"] == {
+        "work": "No messages found.",
+        "personal": "No messages found.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_one_failing_account_does_not_discard_the_others(monkeypatch):
+    """gather() without return_exceptions=True propagates the first failure out of the
+    wrapper, so four healthy accounts' completed results are thrown away because a
+    fifth session expired."""
+    import json
+
+    async def tool(account=None):
+        if account == "broken":
+            raise RuntimeError("session expired")
+        return json.dumps({"results": [{"owner": account}]})
+
+    monkeypatch.setattr(
+        connection, "clients", {"work": object(), "broken": object(), "personal": object()}
     )
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert payload["accounts"]["work"]["results"][0]["owner"] == "work"
+    assert payload["accounts"]["personal"]["results"][0]["owner"] == "personal"
+    assert payload["accounts"]["broken"] == {
+        "error": "RuntimeError: session expired",
+    }
 
 
 class _ConnectivityClient:
@@ -291,14 +357,31 @@ class _ConnectivityClient:
 
 
 @pytest.mark.asyncio
-async def test_ensure_connected_reconnects_disconnected_client(monkeypatch):
+async def test_ensure_connected_refuses_interactive_login_for_an_unauthorized_client(monkeypatch):
+    """A revoked session must end the call, not the server.
+
+    Telethon's start() defaults to `phone=lambda: input(...)` — a synchronous read
+    inside a coroutine. It blocks the event loop, so the asyncio.wait_for around it
+    can never fire, and on stdio it steals the stream the MCP protocol speaks over.
+    This test used to assert that start() WAS called; that pinned a hang.
+    """
     client = _ConnectivityClient(connected=False, authorized=False)
     monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
 
-    await runtime.ensure_connected(client)
+    with pytest.raises(RuntimeError, match="session_string_generator.py"):
+        await runtime.ensure_connected(client)
 
-    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized", "start"]
-    assert connection._last_conn_verified[id(client)] > 0
+    # The second is_connected is _force_reconnect's post-lock re-check.
+    assert client.calls == [
+        "is_connected",
+        "is_connected",
+        "disconnect",
+        "connect",
+        "is_user_authorized",
+    ]
+    assert "start" not in client.calls, "called the blocking thing"
+    assert id(client) not in connection._last_conn_verified, "recorded a failed reconnect"
 
 
 @pytest.mark.asyncio
@@ -320,6 +403,93 @@ async def test_ensure_connected_skips_recently_verified_client(monkeypatch):
     await runtime.ensure_connected(client)
 
     assert client.calls == ["is_connected"]
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_answer_is_proof_the_connection_is_alive(monkeypatch):
+    """FloodWaitError means the server RECEIVED the request, understood it, and is
+    throttling the account. Tearing the connection down and dialling again under a
+    flood wait is exactly the wrong response — and `except (..., Exception)` made
+    every RPC refusal look like a dead socket."""
+    from telethon import errors
+
+    client = _ConnectivityClient(
+        connected=True, authorized=True, ping_error=errors.FloodWaitError(request=None)
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await runtime.ensure_connected(client)
+
+    assert client.calls == ["is_connected", "ping"], f"reconnected on a rate limit: {client.calls}"
+    assert connection._last_conn_verified[id(client)] > 0, "the probe answered — record it"
+
+
+@pytest.mark.asyncio
+async def test_a_burned_session_is_reported_even_when_the_probe_is_what_finds_it(monkeypatch):
+    """AuthKeyDuplicatedError is an RPCError, so "the server answered" is literally
+    true — but what it answered is that this session is permanently dead. Reporting
+    it as a live connection sends the caller on to a tool call that fails with a
+    generic error, throwing away the one message that says how to recover.
+
+    Telegram invalidates the key on first use after the clash, so the probe is a
+    likely place to meet it, not an exotic one.
+    """
+    from telethon.errors import AuthKeyDuplicatedError
+
+    client = _ConnectivityClient(
+        connected=True, authorized=True, ping_error=AuthKeyDuplicatedError(request=None)
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        await runtime.ensure_connected(client)
+
+    assert id(client) not in connection._last_conn_verified, "recorded a dead session as verified"
+
+
+@pytest.mark.asyncio
+async def test_a_chat_level_refusal_is_also_proof_the_connection_is_alive(monkeypatch):
+    """Any RPCError is the server talking back. The probe is help.GetNearestDc, so a
+    refusal is unusual — but the rule is about what an answer PROVES, not about which
+    error arrived."""
+    from telethon import errors
+
+    client = _ConnectivityClient(
+        connected=True,
+        authorized=True,
+        ping_error=errors.rpcerrorlist.ChatAdminRequiredError(request=None),
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await runtime.ensure_connected(client)
+
+    assert client.calls == ["is_connected", "ping"]
+
+
+@pytest.mark.asyncio
+async def test_two_callers_do_not_interleave_a_reconnect_on_a_shared_client(monkeypatch):
+    """The client is shared per account, so two tool calls that both find the socket
+    dead used to race: A disconnects, B disconnects, A connects, B tears down the
+    connection A just brought up."""
+
+    class _SlowConnectClient(_ConnectivityClient):
+        async def connect(self):
+            self.calls.append("connect")
+            await asyncio.sleep(0)  # a real yield point, exactly like a socket dial
+            await asyncio.sleep(0)
+            self.connected = True
+
+    client = _SlowConnectClient(connected=False, authorized=True)
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await asyncio.gather(runtime.ensure_connected(client), runtime.ensure_connected(client))
+
+    assert client.calls.count("connect") == 1, f"reconnected twice: {client.calls}"
+    assert client.calls.count("disconnect") == 1, f"disconnected twice: {client.calls}"
 
 
 class _HangingConnectClient(_ConnectivityClient):
@@ -351,3 +521,26 @@ async def test_force_reconnect_reports_burned_session(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no longer usable"):
         await runtime._force_reconnect(client)
+
+
+class _LoginPromptingClient(_ConnectivityClient):
+    """Its start() is a tripwire. Nothing in this server may call a Telethon API
+    that can prompt, because the prompt is a synchronous input() on the event loop.
+    """
+
+    async def start(self):
+        raise AssertionError("start() would prompt with input() and block the event loop")
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_refuses_to_prompt_for_a_phone_number(monkeypatch):
+    client = _LoginPromptingClient(connected=False, authorized=False)
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+
+    with pytest.raises(RuntimeError, match="no longer authorized") as excinfo:
+        await runtime._force_reconnect(client)
+
+    # The operator has to know what to DO. An error that ends a long-running
+    # session and only says "broken" costs them the next hour.
+    assert "session_string_generator.py" in str(excinfo.value)
+    assert "Manage-Accounts.ps1" in str(excinfo.value)

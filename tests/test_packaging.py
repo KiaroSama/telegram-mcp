@@ -204,3 +204,24 @@ def test_the_wheel_build_is_not_skipped_in_this_environment():
         "build is not installed, so test_built_wheel_contains_every_subpackage skips. "
         "Install the dev group: uv sync --group dev"
     )
+
+
+def test_requirements_txt_matches_the_declared_dependencies():
+    """Dockerfile installs from requirements.txt, so a drift there ships a container
+    missing a runtime dependency while every uv-based path stays fine.
+
+    It is the one dependency list in this repository maintained by hand: pyproject.toml
+    is the source of truth, uv.lock is generated from it, and this file is neither.
+    """
+    expected = set(_pyproject()["project"]["dependencies"])
+    listed = {
+        line.strip()
+        for line in (REPO / "requirements.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert listed == expected, (
+        "requirements.txt and pyproject.toml disagree; Dockerfile installs from the "
+        f"former. Only in requirements.txt: {sorted(listed - expected)}. "
+        f"Only in pyproject.toml: {sorted(expected - listed)}."
+    )

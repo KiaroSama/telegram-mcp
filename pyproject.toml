@@ -11,18 +11,25 @@ authors = [
     {name = "KiaroSama"}
 ]
 license = {text = "Proprietary"}
+# "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
+# upload carrying it. That is deliberate: the telegram-mcp name on PyPI belongs to a
+# different project, and install_guard.py already refuses a PyPI-installed copy at
+# import. Delete this line first if publication ever becomes intentional.
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: Other/Proprietary License",
+    "Private :: Do Not Upload",
+    # The floor is 3.11 because the suite needs it: tests/test_packaging.py imports
+    # tomllib with no fallback. Nothing in the runtime forces it, so this is a
+    # support decision - claim only what CI exercises.
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12"
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
-    "dotenv>=0.9.9",
     "httpx>=0.28.1",
     "mcp[cli]>=1.8.0,<2",
     # Image encoding/scaling for the visual capture and media preview tools.
@@ -50,7 +57,7 @@ lottie = [
 
 [project.urls]
 "Homepage" = "https://github.com/KiaroSama/telegram-mcp"
-"Bug Tracker" = "https://github.com/chigwell/telegram-mcp/issues"
+"Bug Tracker" = "https://github.com/KiaroSama/telegram-mcp/issues"
 
 [tool.setuptools]
 py-modules = ["main", "sanitize", "session_string_generator"]
@@ -107,28 +114,48 @@ addopts = [
 
 [tool.coverage.run]
 branch = true
-# Unit coverage focuses on deterministic local logic, which includes the fork's
-# own pure modules: message_view (text/entity/media description), effect_catalog
-# (catalogue caching and revalidation) and the visual package (decode/encode/
-# capture). The telegram_mcp.tools.* modules stay out: they are live API adapters
-# and need separate mocked or integration coverage.
+# What is measured: every module whose behaviour a test can pin down without a
+# live Telegram connection. That is the rule - not "the fork's own modules" and
+# not "anything outside tools/". telegram_mcp.media_transfer sits outside tools/
+# yet is measured, because byte budgets, thumbnail selection and reference retry
+# are decisions, testable against a mocked client.
+#
+# What stays out: the 31 telegram_mcp.tools.* adapters. They marshal arguments to
+# Telethon and format what comes back, so measuring them rewards mocking the API
+# rather than testing anything. Their behavioural coverage is a separate effort.
 source = [
     "main",
     "sanitize",
-    "telegram_mcp.runtime",
-    "telegram_mcp.message_view",
+    "session_string_generator",
+    "telegram_mcp.aliases",
+    "telegram_mcp.button_view",
+    "telegram_mcp.client_identity",
+    "telegram_mcp.connection",
+    "telegram_mcp.console_theme",
     "telegram_mcp.effect_catalog",
+    "telegram_mcp.file_roots",
+    "telegram_mcp.install_guard",
+    "telegram_mcp.media_preview",
+    "telegram_mcp.media_transfer",
+    "telegram_mcp.message_view",
+    "telegram_mcp.runner",
+    "telegram_mcp.runtime",
+    "telegram_mcp.settings",
+    "telegram_mcp.singleton",
+    "telegram_mcp.text_fidelity",
     "telegram_mcp.visual",
 ]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# A measured floor, not an aspiration. Measured 2026-08-16: the old three-module
-# list reported 90.04% over 1009 statements; this list reports 88.60% over 2053.
-# The number went down because it now measures twice as much code - that is the
-# point. 85 is the floor rather than 88 because the earliest measurement of this
-# list was 85.62% and the value moves with in-flight work. Raising it is a
-# separate, deliberate change once the largest Missing ranges get tests
-# (telegram_mcp/visual/capture.py and frames.py are the worst).
+# A measured floor, not an aspiration. Measured 2026-08-23: this list reports
+# 85.57% over 3015 statements and 1088 branches. The floor stays 85, but it now
+# means something: the previous 85 was justified by a 2026-08-16 measurement of
+# 2053 statements, and three refactors had since moved ~1678 lines out of the
+# measured set without removing a single test, so the gate was scoring a
+# shrinking fraction of the code it claimed to cover.
+# Raising the floor is a separate, deliberate change once the largest Missing
+# ranges get tests. Worst first: session_string_generator.py (52%),
+# runner.py (57%), media_preview.py (68%), visual/capture.py (75%).
 fail_under = 85

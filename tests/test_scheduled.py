@@ -217,3 +217,23 @@ async def test_cancelling_deletes_from_the_scheduled_queue(_wire):
     request = client.sent("DeleteScheduledMessagesRequest")
     assert request.id == [7]
     assert "removed from" in result
+
+
+@pytest.mark.asyncio
+async def test_cancelling_a_batch_uses_one_request(_wire):
+    client = _wire(_Client())
+
+    await cancel_scheduled_message(1, [7, 8, 9], account="a")
+
+    assert [type(r).__name__ for r in client.requests] == ["DeleteScheduledMessagesRequest"]
+    assert client.sent("DeleteScheduledMessagesRequest").id == [7, 8, 9]
+
+
+@pytest.mark.asyncio
+async def test_cancelling_nothing_never_reaches_the_server(_wire):
+    client = _wire(_Client())
+
+    result = await cancel_scheduled_message(1, [], account="a")
+
+    assert "empty" in result
+    assert client.requests == []

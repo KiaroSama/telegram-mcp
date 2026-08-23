@@ -560,6 +560,41 @@ async def test_both_thumbnail_encodes_run_off_the_event_loop(monkeypatch):
     assert threaded == ["_encode_one"], f"inspect_message decoded inline: {threaded}"
 
 
+@pytest.mark.asyncio
+async def test_a_message_page_is_built_off_the_event_loop(monkeypatch):
+    """inspect_messages builds up to 50 deep views, each a full character-by-character
+    pass over the message text. Done inline, every other tool call on the server waits
+    for the whole page."""
+    import threading
+
+    from telegram_mcp.tools import inspection
+
+    build_threads = []
+
+    def _deep(m, base, chat=None, link_domain=None):
+        build_threads.append(threading.get_ident())
+        return {"id": getattr(m, "id", 0)}
+
+    class _Client:
+        async def get_messages(self, entity, **kwargs):
+            return [SimpleNamespace(id=index) for index in range(50)]
+
+    async def _resolve(chat_id, client):
+        return SimpleNamespace(title="Chat")
+
+    monkeypatch.setattr(inspection, "get_client", lambda account=None: _Client())
+    monkeypatch.setattr(inspection, "resolve_entity", _resolve)
+    monkeypatch.setattr(inspection, "message_to_dict", lambda m: {})
+    monkeypatch.setattr(inspection, "deep_message_dict", _deep)
+
+    caller = threading.get_ident()
+    result = await inspection.inspect_messages(1, limit=50, account="a")
+
+    assert len(build_threads) == 50, f"built {len(build_threads)} of 50"
+    assert caller not in build_threads, "the page was built on the event loop thread"
+    assert '"id": 49' in result or '"id":49' in result
+
+
 # --- an optional extra must never cost the answer -----------------------------
 
 

@@ -18,6 +18,7 @@ second name and the code here keeps calling its own.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -29,7 +30,7 @@ from typing import Any, List, Optional
 
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, RPCError
 from telethon.sessions import StringSession
 
 from telegram_mcp.client_identity import client_identity_kwargs
@@ -301,7 +302,9 @@ def with_account(readonly=False):
     - In single-mode: always uses the sole client, no output tagging.
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
-      concurrently, prefixes each result with [label], concatenates.
+      concurrently and returns one JSON object, ``{"accounts": {label: result}}``.
+      A failing account appears as ``{"error": "<Type>: <message>"}`` beside the
+      others rather than discarding them.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str = None`` and use
@@ -326,10 +329,43 @@ def with_account(readonly=False):
             async def _call_for(label):
                 kw = dict(kwargs)
                 kw["account"] = label
-                return label, await fn(*args, **kw)
+                return await fn(*args, **kw)
 
-            results = await asyncio.gather(*(_call_for(label) for label in clients))
-            return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+            # return_exceptions: without it the first failing account propagates out of
+            # gather and out of this wrapper, discarding every other account's already
+            # completed result — one expired session turned a five-account query into a
+            # single error string.
+            #
+            # labels is materialised once and reused for the zip, so results cannot be
+            # mis-paired if `clients` is rebound mid-await. The old code carried the
+            # label inside the returned tuple, which return_exceptions makes impossible
+            # for the failing branch.
+            labels = list(clients)
+            outcomes = await asyncio.gather(
+                *(_call_for(label) for label in labels), return_exceptions=True
+            )
+
+            # One envelope instead of "\n\n".join(f"[{label}]\n{result}"). Every tool
+            # returns JSON from format_tool_result, and welding those strings together
+            # produced something no caller could parse. Values are decoded where they
+            # are JSON and kept verbatim where a tool answers in prose ("No messages
+            # found."), so both kinds survive.
+            #
+            # BaseException, not Exception: gather(return_exceptions=True) returns
+            # whatever was raised, and CancelledError is a BaseException.
+            accounts: dict[str, Any] = {}
+            for label, outcome in zip(labels, outcomes):
+                if isinstance(outcome, BaseException):
+                    accounts[label] = {"error": f"{type(outcome).__name__}: {outcome}"}
+                    continue
+                try:
+                    accounts[label] = json.loads(outcome)
+                except (TypeError, ValueError):
+                    accounts[label] = outcome
+            # ensure_ascii=False matches format_tool_result, so non-ASCII chat titles are
+            # not escaped twice; default=str is a net for a non-string, non-JSON value —
+            # this wrapper must never raise.
+            return json.dumps({"accounts": accounts}, ensure_ascii=False, default=str)
 
         return wrapper
 
@@ -337,40 +373,74 @@ def with_account(readonly=False):
 
 
 _last_conn_verified: dict[int, float] = {}
+_RECONNECT_LOCKS: dict[int, asyncio.Lock] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 _RECONNECT_TIMEOUT: float = 30.0  # seconds before a reconnect attempt is abandoned
 
+# Raised from two places — the reconnect's connect(), and the liveness probe, which
+# meets it first when Telegram invalidates the key on first use after the clash.
+_BURNED_SESSION_MESSAGE = (
+    "Telegram session is no longer usable: the same session string was "
+    "used by another client at the same time (AuthKeyDuplicatedError). "
+    "Give each concurrent client its own session via "
+    "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
+    "regenerate the burned session with `uv run session_string_generator.py`."
+)
+
 
 async def _force_reconnect(cl: TelegramClient):
-    """Force disconnect + reconnect regardless of is_connected() state."""
-    reconnect_logger = logging.getLogger("telegram_mcp")
-    reconnect_logger.warning("Forcing reconnect...")
-    try:
-        await cl.disconnect()
-    except Exception:
-        pass
-    try:
-        await asyncio.wait_for(cl.connect(), timeout=_RECONNECT_TIMEOUT)
-    except AuthKeyDuplicatedError as exc:
-        # Telegram permanently invalidates an auth key used from two IPs at
-        # once, so retrying here can never succeed — surface it instead of
-        # letting the caller sit in a reconnect loop.
-        raise RuntimeError(
-            "Telegram session is no longer usable: the same session string was "
-            "used by another client at the same time (AuthKeyDuplicatedError). "
-            "Give each concurrent client its own session via "
-            "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
-            "regenerate the burned session with `uv run session_string_generator.py`."
-        ) from exc
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError(
-            f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
-        ) from exc
-    if not await cl.is_user_authorized():
-        reconnect_logger.warning("Client not authorized after reconnect, calling start()...")
-        await asyncio.wait_for(cl.start(), timeout=_RECONNECT_TIMEOUT)
-    _last_conn_verified[id(cl)] = time.time()
-    reconnect_logger.warning("Forced reconnect successful")
+    """Disconnect + reconnect this client, one caller at a time.
+
+    The client object is SHARED: every tool call for an account gets the same one
+    from `clients`. Two concurrent callers that both found the socket dead used to
+    interleave here — A disconnects, B disconnects, A connects, B tears down the
+    connection A just brought up. The lock serialises them; the re-check after
+    acquiring it means the second caller returns instead of reconnecting a client
+    the first one already fixed.
+    """
+    key = id(cl)
+    async with _RECONNECT_LOCKS.setdefault(key, asyncio.Lock()):
+        if cl.is_connected() and time.time() - _last_conn_verified.get(key, 0.0) < (
+            _CONN_VERIFY_INTERVAL
+        ):
+            return
+        reconnect_logger = logging.getLogger("telegram_mcp")
+        reconnect_logger.warning("Forcing reconnect...")
+        try:
+            await cl.disconnect()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(cl.connect(), timeout=_RECONNECT_TIMEOUT)
+        except AuthKeyDuplicatedError as exc:
+            # Telegram permanently invalidates an auth key used from two IPs at
+            # once, so retrying here can never succeed — surface it instead of
+            # letting the caller sit in a reconnect loop.
+            raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
+            ) from exc
+        if not await cl.is_user_authorized():
+            reconnect_logger.error(
+                "Client not authorized after reconnect; refusing interactive login"
+            )
+            # A raise, not a call to Telethon's start(). That method defaults to
+            # `phone=lambda: input(...)` — a synchronous read inside a coroutine, which
+            # blocks the whole event loop, and on stdio it reads the same stdin the MCP
+            # protocol speaks over. Wrapping it in asyncio.wait_for cannot save us: the
+            # timeout is scheduled on the very loop input() has stopped, so it never
+            # fires. The server would hang silently and permanently. runner.py refuses
+            # the same thing at startup for the same reason.
+            raise RuntimeError(
+                "Telegram session is no longer authorized. Interactive phone login is "
+                "disabled for the MCP server because it runs over stdio. Regenerate the "
+                "session with `uv run session_string_generator.py` and update "
+                "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env; "
+                "`Manage-Accounts.ps1` does both for a labelled account."
+            )
+        _last_conn_verified[key] = time.time()
+        reconnect_logger.warning("Forced reconnect successful")
 
 
 async def ensure_connected(cl: TelegramClient = None):
@@ -403,9 +473,31 @@ async def ensure_connected(cl: TelegramClient = None):
             cl(functions.help.GetNearestDcRequest()),
             timeout=5.0,
         )
+    except AuthKeyDuplicatedError as exc:
+        # Also an RPCError, so "the server answered" is literally true — but what it
+        # answered is that this session is permanently dead. Falling through to the
+        # branch below would record it as verified and send the caller on to a tool
+        # call that fails generically, discarding the one message that says how to
+        # recover. Must precede the RPCError branch.
+        raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
+    except RPCError:
+        # The server ANSWERED — it just refused. That is proof the socket is alive,
+        # which is the only question this function asks. FloodWaitError is the case
+        # that made this matter: reconnecting while the account is rate-limited is
+        # exactly the wrong move, and the old `except (..., Exception)` caught every
+        # RPC refusal as if the transport had died.
         _last_conn_verified[key] = now
-    except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
+    except Exception:
+        # Transport-level: ConnectionError / OSError / asyncio.TimeoutError, and
+        # anything else that is NOT the server talking back — including
+        # TypeNotFoundError, where Telethon could not parse the reply and the read
+        # buffer is desynchronised (see runtime.py:333-341).
+        #
+        # asyncio.CancelledError is a BaseException and is deliberately NOT caught:
+        # a cancelled tool call must not drag the shared client through a reconnect.
         await _force_reconnect(cl)
+    else:
+        _last_conn_verified[key] = now
 
 
 # Setup robust logging with both file and console output
@@ -449,13 +541,12 @@ except Exception as log_error:
     logger.error(f"Failed to set up log file handler: {log_error}")
 
 
-# Error code prefix mapping for better error tracing
-
-
 __all__ = [
+    "_BURNED_SESSION_MESSAGE",
     "_CONN_VERIFY_INTERVAL",
     "_PROXY_TYPES_ALL",
     "_PROXY_TYPES_SOCKS_HTTP",
+    "_RECONNECT_LOCKS",
     "_RECONNECT_TIMEOUT",
     "_SESSION_LOCKS",
     "_acquire_session",

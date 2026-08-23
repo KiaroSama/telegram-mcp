@@ -184,7 +184,7 @@ def _format_unsafe_installation_message(identity: DistributionIdentity) -> str:
         "This guard requires a source checkout or installer-recorded direct "
         "git/file URL. Run this server from a cloned checkout or install a "
         "trusted repository explicitly with: "
-        'pip install "git+https://github.com/chigwell/telegram-mcp.git"'
+        'pip install "git+https://github.com/KiaroSama/telegram-mcp.git"'
     )
 
 
