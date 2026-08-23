@@ -8,7 +8,6 @@ import sqlite3
 import logging
 import mimetypes
 import unicodedata
-import zlib
 from contextlib import contextmanager
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
@@ -318,11 +317,7 @@ def log_and_format_error(
                     break
 
         prefix_str = prefix.value if isinstance(prefix, ErrorCategory) else (prefix or "GEN")
-        # crc32, not hash(): CPython salts str.__hash__ per process (PEP 456), so the
-        # same tool produced a different code after every restart — this log holds
-        # GEN-ERR-256 and GEN-ERR-679 for one get_full_user failure. A code whose whole
-        # purpose is to correlate a user's report with a log line has to survive one.
-        error_code = f"{prefix_str}-ERR-{zlib.crc32(function_name.encode('utf-8')) % 1000:03d}"
+        error_code = f"{prefix_str}-ERR-{abs(hash(function_name)) % 1000:03d}"
 
     # Format the additional context parameters
     context = ", ".join(f"{k}={v}" for k, v in kwargs.items())
@@ -603,6 +598,27 @@ async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
 async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
     """Like resolve_entity() but returns an InputPeer."""
     return await _resolve("get_input_entity", identifier, client, "input entity")
+
+
+def format_message(message) -> Dict[str, Any]:
+    """Helper function to format message information consistently.
+
+    Message text is sanitized to prevent prompt injection.
+    """
+    result = {
+        "id": message.id,
+        "date": message.date.isoformat(),
+        "text": sanitize_user_content(message.message),
+    }
+
+    if message.from_id:
+        result["from_id"] = utils.get_peer_id(message.from_id)
+
+    if message.media:
+        result["has_media"] = True
+        result["media_type"] = type(message.media).__name__
+
+    return result
 
 
 def get_sender_name(message) -> str:

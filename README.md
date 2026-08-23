@@ -318,8 +318,7 @@ Telegram session, which is done from the app under Settings → Devices.
 
 Adding the second account switches the server into multi-account mode, where write tools
 require `account=<label>` and read-only tools fan out across every account when it is
-omitted, returning one JSON object keyed by account label. The menu says so at the
-moment it happens.
+omitted. The menu says so at the moment it happens.
 
 Choosing *Generate a session string* hands over to `session_string_generator.py` without
 forcing a login method, so it offers both QR and phone code. A rejected two-factor
@@ -375,9 +374,7 @@ Labels are lowercased and become the `account` parameter value in tools.
 
 - In single-account mode, `account` is optional.
 - In multi-account mode, write tools require `account`.
-- Read-only tools fan out to all accounts when `account` is omitted, and answer with
-  `{"accounts": {"<label>": <that account's result>, ...}}`. An account that failed
-  appears as `{"error": "..."}` rather than discarding the accounts that succeeded.
+- Read-only tools fan out to all accounts when `account` is omitted.
 
 Example prompts:
 

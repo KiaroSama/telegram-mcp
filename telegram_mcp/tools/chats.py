@@ -33,9 +33,19 @@ async def get_chats(account: str = None, page: int = 1, page_size: int = 20) -> 
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        dialogs = await cl.get_dialogs()
+        # Clamp before computing the fetch size. Telethon maps limit<=0 to ZERO dialogs
+        # rather than all of them (requestiter.py:34, dialogs.py:41), so an unclamped
+        # page=0 or a negative page would turn today's nonsense-but-nonempty slice into
+        # a silent empty result.
+        page = max(1, int(page))
+        page_size = max(1, int(page_size))
         start = (page - 1) * page_size
         end = start + page_size
+        # Fetch only as far as the end of the requested page. Telethon's dialog cursor
+        # is not addressable by offset, so pages 1..N-1 still have to come down the
+        # wire — but the default (limit=None) means EVERY dialog on the account, which
+        # is 100 per round trip to render twenty rows.
+        dialogs = await cl.get_dialogs(limit=end)
         if start >= len(dialogs):
             return "Page out of range."
         chats = dialogs[start:end]

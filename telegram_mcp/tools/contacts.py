@@ -151,23 +151,33 @@ async def get_direct_chat_by_contact(contact_query: str, account: Optional[str] 
             return f"No contacts found matching '{contact_query}'."
         # If we found contacts, look for direct chats with them
         records = []
-        dialogs = await cl.get_dialogs()
+        # Index the dialog list once instead of rescanning it per matched contact:
+        # the old shape was `for contact: for dialog:` over a list fetched in full.
+        # The fetch stays deliberately unbounded — this tool searches the whole
+        # account for chats with any matching contact, and no cursor can express
+        # "the dialogs for these N peers", so a limit= would silently make the
+        # search partial and miss old chats.
+        by_user_id = {
+            dialog.entity.id: dialog
+            for dialog in await cl.get_dialogs()
+            if isinstance(dialog.entity, User)
+        }
         for contact in found_contacts:
             contact_name = sanitize_name(
                 f"{getattr(contact, 'first_name', '')} {getattr(contact, 'last_name', '')}".strip()
             )
-            for dialog in dialogs:
-                if isinstance(dialog.entity, User) and dialog.entity.id == contact.id:
-                    record = {
-                        "chat_id": get_marked_id(dialog.entity),
-                        "contact": contact_name,
-                    }
-                    if getattr(contact, "username", ""):
-                        record["username"] = contact.username
-                    if dialog.unread_count:
-                        record["unread"] = dialog.unread_count
-                    records.append(record)
-                    break
+            dialog = by_user_id.get(contact.id)
+            if dialog is None:
+                continue
+            record = {
+                "chat_id": get_marked_id(dialog.entity),
+                "contact": contact_name,
+            }
+            if getattr(contact, "username", ""):
+                record["username"] = contact.username
+            if dialog.unread_count:
+                record["unread"] = dialog.unread_count
+            records.append(record)
         if not records:
             found_names = ", ".join(
                 [sanitize_name(f"{c.first_name} {c.last_name}".strip()) for c in found_contacts]
@@ -203,19 +213,28 @@ async def get_contact_chats(contact_id: Union[int, str], account: Optional[str] 
             f"{getattr(contact, 'first_name', '')} {getattr(contact, 'last_name', '')}".strip()
         )
 
-        # Find direct chat
-        dialogs = await cl.get_dialogs()
-
+        # Find the direct chat for exactly this peer. Listing every dialog to locate
+        # one of them costs a round trip per hundred chats on the account, and the
+        # multi-account fan-out pays that per account. GetPeerDialogsRequest is the
+        # same request get_chat already uses for this (tools/chats.py:263-274).
         records = []
-
-        # Look for direct chat
-        for dialog in dialogs:
-            if isinstance(dialog.entity, User) and dialog.entity.id == contact_id:
-                record = {"chat_id": get_marked_id(dialog.entity), "type": "Private"}
-                if dialog.unread_count:
-                    record["unread"] = dialog.unread_count
+        try:
+            input_peer = await cl.get_input_entity(contact)
+            peer_dialogs = await cl(
+                functions.messages.GetPeerDialogsRequest(
+                    peers=[types.InputDialogPeer(peer=input_peer)]
+                )
+            )
+            for dialog in getattr(peer_dialogs, "dialogs", None) or []:
+                record = {"chat_id": get_marked_id(contact), "type": "Private"}
+                unread = getattr(dialog, "unread_count", 0)
+                if unread:
+                    record["unread"] = unread
                 records.append(record)
-                break
+        except Exception:
+            # A peer with no dialog is a normal answer here, not a failure: the
+            # contact exists but this account has never opened a chat with them.
+            pass
 
         # Look for common groups/channels
         try:
