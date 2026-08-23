@@ -362,14 +362,24 @@ async def get_bot_info(bot_username: str, account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-async def set_bot_commands(bot_username: str, commands: list, account: str = None) -> str:
+async def set_bot_commands(commands: list, account: str = None) -> str:
     """
-    Set bot commands for a bot you own.
-    Note: This function can only be used if the Telegram client is a bot account.
-    Regular user accounts cannot set bot commands.
+    Set the command list of the bot this session IS.
+
+    There is deliberately no parameter naming a bot. Telegram's `bots.setBotCommands`
+    carries `scope`, `lang_code` and `commands` and nothing else, so the commands
+    always belong to the calling account. The scopes narrow WHERE the commands appear
+    (`BotCommandScopePeer` takes a chat, `BotCommandScopePeerUser` a chat and a user);
+    none of them selects whose commands are being written. The omission is the
+    protocol's decision rather than an oversight: the sibling `bots.setBotInfo` does
+    take a `bot` field, so an owner can rewrite a bot's name and about-text from a user
+    account, but not its commands.
+
+    This therefore needs a session that is itself a bot. This server's session
+    generator only performs phone and QR login, so an ordinary setup is a user account
+    and this tool will refuse; supply a bot session string, or use @BotFather.
 
     Args:
-        bot_username: The username of the bot to set commands for.
         commands: List of command dictionaries with 'command' and 'description' keys.
     """
     try:
@@ -377,7 +387,12 @@ async def set_bot_commands(bot_username: str, commands: list, account: str = Non
         # First check if the current client is a bot
         me = await cl.get_me()
         if not getattr(me, "bot", False):
-            return "Error: This function can only be used by bot accounts. Your current Telegram account is a regular user account, not a bot."
+            return (
+                "This account is a user, not a bot. Telegram's bots.setBotCommands "
+                "applies to the calling account and has no field naming another bot, so "
+                "commands can only be set by the bot itself. Configure a bot session "
+                "string for this account slot, or set the commands through @BotFather."
+            )
 
         # Import required types
         from telethon.tl.types import BotCommand, BotCommandScopeDefault
@@ -388,9 +403,6 @@ async def set_bot_commands(bot_username: str, commands: list, account: str = Non
             BotCommand(command=c["command"], description=c["description"]) for c in commands
         ]
 
-        # Resolve the username so an unknown bot fails here rather than silently.
-        await resolve_entity(bot_username, cl)
-
         # Set the commands with proper scope
         await cl(
             SetBotCommandsRequest(
@@ -400,13 +412,15 @@ async def set_bot_commands(bot_username: str, commands: list, account: str = Non
             )
         )
 
-        return f"Bot commands set for {bot_username}."
+        # Name the bot that was actually written to, not one the caller asked for.
+        who = getattr(me, "username", None) or getattr(me, "id", "this bot")
+        return f"Set {len(bot_commands)} command(s) for {who}."
     except ImportError as ie:
         logger.exception(f"set_bot_commands failed - ImportError: {ie}")
         return log_and_format_error("set_bot_commands", ie)
     except Exception as e:
-        logger.exception(f"set_bot_commands failed (bot_username={bot_username})")
-        return log_and_format_error("set_bot_commands", e, bot_username=bot_username)
+        logger.exception("set_bot_commands failed")
+        return log_and_format_error("set_bot_commands", e)
 
 
 @mcp.tool(

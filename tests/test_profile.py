@@ -15,22 +15,33 @@ from types import SimpleNamespace
 import pytest
 
 from telegram_mcp.tools import profile as mod
-from telegram_mcp.tools.profile import delete_profile_photo, set_profile_photo, update_profile
+from telegram_mcp.tools.profile import (
+    delete_profile_photo,
+    set_bot_commands,
+    set_profile_photo,
+    update_profile,
+)
 
 
 class _Client:
     """Records every TL request and answers the ones these tools send."""
 
-    def __init__(self, photos=()):
+    def __init__(self, photos=(), bot=False):
         self.requests = []
         self.photos = list(photos)
         self.uploads = []
+        self.bot = bot
+
+    async def get_me(self):
+        return SimpleNamespace(bot=self.bot, username="thisbot", id=7)
 
     async def __call__(self, request):
         self.requests.append(request)
         name = type(request).__name__
         if name == "GetUserPhotosRequest":
             return SimpleNamespace(photos=self.photos)
+        if name == "SetBotCommandsRequest":
+            return True
         if name in ("UpdateProfileRequest", "UploadProfilePhotoRequest", "DeletePhotosRequest"):
             return SimpleNamespace(updates=[])
         raise AssertionError(f"unexpected request {name}")
@@ -124,3 +135,58 @@ async def test_deleting_a_photo_deletes_the_most_recent_one(_wire):
 
     assert client.names == ["GetUserPhotosRequest", "DeletePhotosRequest"]
     assert client.sent("DeletePhotosRequest").id == [newest]
+
+
+# --- bot commands ------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_set_bot_commands_does_not_promise_to_target_another_bot(_wire):
+    """Telegram's bots.setBotCommands has no field naming a bot: it always applies to
+    the calling account. bots.setBotInfo DOES take `bot=`, so the omission is the
+    protocol's decision, not an oversight. A `bot_username` parameter here could only
+    ever be decoration - it was resolved and then dropped, while the reply claimed the
+    commands had been set for it.
+    """
+    import inspect
+
+    params = inspect.signature(set_bot_commands).parameters
+    assert "bot_username" not in params, (
+        "the signature still accepts a target bot it cannot act on: " f"{list(params)}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_setting_commands_sends_one_bot_command_per_row(_wire):
+    client = _wire(_Client(bot=True))
+
+    result = await set_bot_commands(
+        [
+            {"command": "start", "description": "Begin"},
+            {"command": "help", "description": "Show help"},
+        ],
+        account="a",
+    )
+
+    request = client.sent("SetBotCommandsRequest")
+    assert request is not None, f"sent {client.names}"
+    assert [(c.command, c.description) for c in request.commands] == [
+        ("start", "Begin"),
+        ("help", "Show help"),
+    ]
+    assert type(request.scope).__name__ == "BotCommandScopeDefault"
+    assert request.lang_code == "en"
+    assert "thisbot" in result
+
+
+@pytest.mark.asyncio
+async def test_a_user_session_is_refused_before_anything_is_sent(_wire):
+    """The server's own session generator only does phone/QR login, so the account is
+    a user unless someone supplies a bot session string by hand. Refusing early keeps
+    that a sentence rather than a raw BOT_METHOD_INVALID."""
+    client = _wire(_Client(bot=False))
+
+    result = await set_bot_commands([{"command": "start", "description": "Begin"}], account="a")
+
+    assert client.requests == [], "a user session must not reach Telegram"
+    assert "bot" in result.lower()
