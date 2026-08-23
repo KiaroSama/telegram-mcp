@@ -249,6 +249,31 @@ class ErrorCategory(str, Enum):
     FOLDER = "FOLDER"
 
 
+# Telegram's own "this request does not apply here" answers. They are not failures
+# of ours and not transport errors: the server understood the request and declined
+# it because of what the peer IS. Reported as a generic code they are indistinguishable
+# from a bug, which sent an hour of debugging the wrong way; each one below was
+# observed against a real account, not copied from a list.
+TELEGRAM_REFUSALS: dict[str, str] = {
+    "BroadcastForbiddenError": (
+        "Telegram does not allow this in a broadcast channel. Reaction COUNTS are "
+        "visible there, but the list of who reacted is not - that exists only in "
+        "groups and private chats."
+    ),
+    "ChatAdminRequiredError": (
+        "This needs admin rights in that chat, and this account does not have them."
+    ),
+    "UserNotParticipantError": (
+        "This account is not a member of that chat, so the request does not apply."
+    ),
+}
+
+
+def _telegram_refusal(error: Exception) -> Optional[str]:
+    """Telegram's own refusal, as a sentence, or None when it is not one of them."""
+    return TELEGRAM_REFUSALS.get(type(error).__name__)
+
+
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -314,6 +339,10 @@ def log_and_format_error(
             f"parsing it failed. Upgrade Telethon; if it is already the latest release, its "
             f"schema is behind the current layer (code: {error_code})."
         )
+
+    refusal = _telegram_refusal(error)
+    if refusal:
+        return f"{refusal} (code: {error_code})"
 
     return f"An error occurred (code: {error_code}). Check mcp_errors.log for details."
 

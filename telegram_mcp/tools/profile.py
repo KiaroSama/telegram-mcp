@@ -251,6 +251,18 @@ async def get_full_user(username: Union[int, str], account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(username, cl)
+
+        # A username can resolve to a channel - @durov is one - and users.GetFullUser
+        # cannot take it. Telethon raises `Cannot cast InputPeerChannel to any kind of
+        # InputUser` from inside request.resolve(), which the generic handler turns
+        # into an error code that tells the caller nothing about what is wrong.
+        if getattr(entity, "broadcast", False) or getattr(entity, "megagroup", False):
+            kind = get_entity_type(entity)
+            return (
+                f"{username} is a {kind}, not a user, so there is no user profile to "
+                "fetch. Use get_chat or get_full_chat for a channel or a group."
+            )
+
         full = await cl(functions.users.GetFullUserRequest(id=entity))
 
         user = full.users[0] if full.users else None

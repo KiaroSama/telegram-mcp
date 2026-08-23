@@ -371,3 +371,41 @@ def test_log_and_format_error_returns_custom_and_generated_messages(caplog):
     generated = runtime.log_and_format_error("get_chat", RuntimeError("boom"))
     assert "code: CHAT-ERR-" in generated
     assert "Check mcp_errors.log" in generated
+
+
+def test_a_telegram_refusal_is_reported_as_a_sentence_not_a_code():
+    """Found live: get_message_reactions on a broadcast channel answered
+    `An error occurred (code: GEN-ERR-581)`.
+
+    Underneath was `BroadcastForbiddenError` — Telegram understood the request and
+    declined it because of what the peer is. A generic code makes that
+    indistinguishable from a bug in this server, which is where an hour went.
+    """
+    from telethon import errors
+
+    message = runtime.log_and_format_error(
+        "get_message_reactions", errors.BroadcastForbiddenError(request=None)
+    )
+
+    assert "broadcast channel" in message
+    assert "An error occurred" not in message
+    assert "code:" in message, "the code is still worth carrying for the log"
+
+
+def test_an_unrecognised_error_still_gets_the_generic_message():
+    """The table must not swallow errors it knows nothing about."""
+    message = runtime.log_and_format_error("some_tool", RuntimeError("something new"))
+
+    assert "An error occurred (code:" in message
+
+
+def test_every_refusal_in_the_table_names_a_real_telethon_error():
+    """A typo in a key is silent: the entry simply never matches.
+
+    Checked against telethon's own error classes so the table cannot drift into
+    describing errors that do not exist.
+    """
+    from telethon import errors
+
+    missing = [name for name in runtime.TELEGRAM_REFUSALS if not hasattr(errors, name)]
+    assert not missing, f"these are not telethon errors: {missing}"
