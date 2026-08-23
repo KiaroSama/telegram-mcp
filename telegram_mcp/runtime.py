@@ -8,6 +8,7 @@ import sqlite3
 import logging
 import mimetypes
 import unicodedata
+import zlib
 from contextlib import contextmanager
 from difflib import SequenceMatcher
 from datetime import datetime, timedelta, timezone
@@ -317,7 +318,11 @@ def log_and_format_error(
                     break
 
         prefix_str = prefix.value if isinstance(prefix, ErrorCategory) else (prefix or "GEN")
-        error_code = f"{prefix_str}-ERR-{abs(hash(function_name)) % 1000:03d}"
+        # crc32, not hash(): CPython salts str.__hash__ per process (PEP 456), so the
+        # same tool produced a different code after every restart — this log holds
+        # GEN-ERR-256 and GEN-ERR-679 for one get_full_user failure. A code whose whole
+        # purpose is to correlate a user's report with a log line has to survive one.
+        error_code = f"{prefix_str}-ERR-{zlib.crc32(function_name.encode('utf-8')) % 1000:03d}"
 
     # Format the additional context parameters
     context = ", ".join(f"{k}={v}" for k, v in kwargs.items())

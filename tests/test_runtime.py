@@ -365,6 +365,21 @@ def test_log_and_format_error_returns_custom_and_generated_messages(caplog):
     assert "Check mcp_errors.log" in generated
 
 
+def test_an_error_code_names_the_same_function_after_a_restart():
+    """The code is a correlation tag: a user reports it, a maintainer greps
+    mcp_errors.log for it. `hash()` of a str is salted per process (PEP 456), so
+    before this was fixed the whole table was re-rolled on every restart — the log
+    in this repo holds GEN-ERR-256 and GEN-ERR-679 for the same get_full_user
+    failure three minutes apart. These literals are the contract: changing one
+    silently orphans every historic log line that carries it.
+    """
+    assert "code: GEN-ERR-877" in runtime.log_and_format_error(
+        "get_full_user", RuntimeError("boom")
+    )
+    assert "code: GEN-ERR-882" in runtime.log_and_format_error("some_tool", RuntimeError("boom"))
+    assert "code: CHAT-ERR-658" in runtime.log_and_format_error("get_chat", RuntimeError("boom"))
+
+
 def test_a_telegram_refusal_is_reported_as_a_sentence_not_a_code():
     """Found live: get_message_reactions on a broadcast channel answered
     `An error occurred (code: GEN-ERR-581)`.
