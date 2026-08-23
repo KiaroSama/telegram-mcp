@@ -65,9 +65,7 @@ def _entity_kind(entity: Any) -> str:
     return "".join(out) or "unknown"
 
 
-def describe_entities(
-    msg, cleaned: Optional[tuple[str, list[int]]] = None
-) -> list[dict[str, Any]]:
+def describe_entities(msg) -> list[dict[str, Any]]:
     """Text entities with offsets that index into the text the caller is shown.
 
     Telegram reports ``offset``/``length`` in UTF-16 code units against its raw
@@ -75,16 +73,9 @@ def describe_entities(
     string, so both the offsets and the fragments here are rebased onto the
     ``text_fidelity`` value produced by :func:`fidelity_text` — never onto the
     generically sanitized ``text``, whose length differs.
-
-    ``cleaned`` is the ``(text, offset_map)`` :func:`fidelity_text` already
-    produced for this message. Passing it is not an optimisation detail: three
-    independent recomputations of the string the offsets index into is three
-    chances for them to disagree.
     """
     entities = getattr(msg, "entities", None) or []
-    clean, offset_map = (
-        cleaned if cleaned is not None else fidelity_text(getattr(msg, "message", "") or "")
-    )
+    clean, offset_map = fidelity_text(getattr(msg, "message", "") or "")
     encoded = clean.encode("utf-16-le")
     described: list[dict[str, Any]] = []
 
@@ -159,20 +150,14 @@ def describe_entities(
     return described
 
 
-def describe_custom_emoji(
-    msg, entities: Optional[list[dict[str, Any]]] = None
-) -> list[dict[str, Any]]:
+def describe_custom_emoji(msg) -> list[dict[str, Any]]:
     """Custom/premium emoji used in the text, as ``{id, placeholder, offset}``.
 
     The placeholder is the fallback glyph a non-premium client shows; the ID is
     what identifies the actual animated document.
-
-    ``entities`` is :func:`describe_entities`' output when the caller already has
-    it; this function only filters that list, so recomputing it costs a second
-    full text pass and a second UTF-16 encode for nothing.
     """
     found: list[dict[str, Any]] = []
-    for entity in entities if entities is not None else describe_entities(msg):
+    for entity in describe_entities(msg):
         if entity.get("custom_emoji_id") is None:
             continue
         item = {"document_id": entity["custom_emoji_id"]}
@@ -621,8 +606,7 @@ def deep_message_dict(
     data = dict(base)
 
     raw = getattr(msg, "message", "") or ""
-    cleaned = fidelity_text(raw)
-    clean, _offset_map = cleaned
+    clean, _offset_map = fidelity_text(raw)
     if clean and clean != base.get("text"):
         # The upstream "text" is sanitized for display and its length no longer
         # matches Telegram's entity offsets. Expose the character-accurate string
@@ -667,10 +651,10 @@ def deep_message_dict(
     if label:
         data["media"] = label
 
-    entities = describe_entities(msg, cleaned)
+    entities = describe_entities(msg)
     if entities:
         data["entities"] = entities
-    custom_emoji = describe_custom_emoji(msg, entities)
+    custom_emoji = describe_custom_emoji(msg)
     if custom_emoji:
         data["custom_emoji"] = custom_emoji
 

@@ -291,14 +291,23 @@ class _ConnectivityClient:
 
 
 @pytest.mark.asyncio
-async def test_ensure_connected_reconnects_disconnected_client(monkeypatch):
+async def test_ensure_connected_refuses_interactive_login_for_an_unauthorized_client(monkeypatch):
+    """A revoked session must end the call, not the server.
+
+    Telethon's start() defaults to `phone=lambda: input(...)` — a synchronous read
+    inside a coroutine. It blocks the event loop, so the asyncio.wait_for around it
+    can never fire, and on stdio it steals the stream the MCP protocol speaks over.
+    This test used to assert that start() WAS called; that pinned a hang.
+    """
     client = _ConnectivityClient(connected=False, authorized=False)
     monkeypatch.setattr(connection, "_last_conn_verified", {})
 
-    await runtime.ensure_connected(client)
+    with pytest.raises(RuntimeError, match="session_string_generator.py"):
+        await runtime.ensure_connected(client)
 
-    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized", "start"]
-    assert connection._last_conn_verified[id(client)] > 0
+    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized"]
+    assert "start" not in client.calls, "called the blocking thing"
+    assert id(client) not in connection._last_conn_verified, "recorded a failed reconnect"
 
 
 @pytest.mark.asyncio
@@ -351,3 +360,26 @@ async def test_force_reconnect_reports_burned_session(monkeypatch):
 
     with pytest.raises(RuntimeError, match="no longer usable"):
         await runtime._force_reconnect(client)
+
+
+class _LoginPromptingClient(_ConnectivityClient):
+    """Its start() is a tripwire. Nothing in this server may call a Telethon API
+    that can prompt, because the prompt is a synchronous input() on the event loop.
+    """
+
+    async def start(self):
+        raise AssertionError("start() would prompt with input() and block the event loop")
+
+
+@pytest.mark.asyncio
+async def test_force_reconnect_refuses_to_prompt_for_a_phone_number(monkeypatch):
+    client = _LoginPromptingClient(connected=False, authorized=False)
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+
+    with pytest.raises(RuntimeError, match="no longer authorized") as excinfo:
+        await runtime._force_reconnect(client)
+
+    # The operator has to know what to DO. An error that ends a long-running
+    # session and only says "broken" costs them the next hour.
+    assert "session_string_generator.py" in str(excinfo.value)
+    assert "Manage-Accounts.ps1" in str(excinfo.value)

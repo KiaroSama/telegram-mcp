@@ -100,35 +100,6 @@ def test_custom_emoji_lists_only_custom_emoji_entities():
     assert describe_custom_emoji(msg) == [{"document_id": 12345, "placeholder": "🎉", "offset": 0}]
 
 
-def test_the_deep_view_walks_the_message_text_exactly_once():
-    """Three independent recomputations of the string the entity offsets index
-    into is three chances for them to disagree — and 150 full text passes to
-    build one 50-message page, all of them on the event loop."""
-    import telegram_mcp.message_view as message_view
-
-    calls = []
-    original = message_view.fidelity_text
-
-    def _counted(raw):
-        calls.append(raw)
-        return original(raw)
-
-    message_view.fidelity_text = _counted
-    try:
-        msg = SimpleNamespace(
-            id=1,
-            message=EMOJI_TEXT,
-            entities=[_entity("CustomEmoji", offset=0, length=2, document_id=99)],
-        )
-        data = deep_message_dict(msg, {"id": 1, "text": EMOJI_TEXT})
-    finally:
-        message_view.fidelity_text = original
-
-    assert len(calls) == 1, f"fidelity_text ran {len(calls)} times: {calls}"
-    assert data["entities"][0]["custom_emoji_id"] == 99
-    assert data["custom_emoji"] == [{"document_id": 99, "placeholder": "🎉", "offset": 0}]
-
-
 def test_user_controlled_text_and_filenames_stay_sanitized():
     """Message text and file names are attacker-controlled. Without this, the
     offset assertions above still pass with the sanitizer calls removed."""

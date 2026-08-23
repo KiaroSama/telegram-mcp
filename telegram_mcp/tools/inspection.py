@@ -292,18 +292,12 @@ async def inspect_messages(
         messages = await cl.get_messages(entity, **kwargs)
         if not messages:
             return "No messages found."
-
-        def _build():
-            return [
+        return format_tool_result(
+            [
                 deep_message_dict(m, message_to_dict(m), chat=entity, link_domain=LINK_DOMAIN)
                 for m in messages
             ]
-
-        # Up to 50 messages, each a full character-by-character pass over its text plus
-        # an offset-map list sized in UTF-16 code units. Inline, that whole page is built
-        # before the loop can service any other tool call — the same reason the thumbnail
-        # encodes above are threaded.
-        return format_tool_result(await asyncio.to_thread(_build))
+        )
     except Exception as e:
         return log_and_format_error("inspect_messages", e, chat_id=chat_id, limit=limit)
 

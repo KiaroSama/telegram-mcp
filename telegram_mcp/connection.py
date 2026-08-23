@@ -367,8 +367,21 @@ async def _force_reconnect(cl: TelegramClient):
             f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
         ) from exc
     if not await cl.is_user_authorized():
-        reconnect_logger.warning("Client not authorized after reconnect, calling start()...")
-        await asyncio.wait_for(cl.start(), timeout=_RECONNECT_TIMEOUT)
+        reconnect_logger.error("Client not authorized after reconnect; refusing interactive login")
+        # A raise, not a call to Telethon's start(). That method defaults to
+        # `phone=lambda: input(...)` — a synchronous read inside a coroutine, which
+        # blocks the whole event loop, and on stdio it reads the same stdin the MCP
+        # protocol speaks over. Wrapping it in asyncio.wait_for cannot save us: the
+        # timeout is scheduled on the very loop input() has stopped, so it never
+        # fires. The server would hang silently and permanently. runner.py refuses
+        # the same thing at startup for the same reason.
+        raise RuntimeError(
+            "Telegram session is no longer authorized. Interactive phone login is "
+            "disabled for the MCP server because it runs over stdio. Regenerate the "
+            "session with `uv run session_string_generator.py` and update "
+            "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env; "
+            "`Manage-Accounts.ps1` does both for a labelled account."
+        )
     _last_conn_verified[id(cl)] = time.time()
     reconnect_logger.warning("Forced reconnect successful")
 
