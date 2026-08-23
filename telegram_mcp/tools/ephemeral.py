@@ -443,6 +443,9 @@ async def save_disappearing_media(
             saved = Path(target).resolve(strict=True)
             roots, roots_error = await _ensure_allowed_roots(ctx, "save_disappearing_media")
             if roots_error:
+                # The bytes are already on disk; refusing without removing them
+                # leaves exactly what the roots gate exists to prevent.
+                saved.unlink(missing_ok=True)
                 return roots_error
             if not _path_is_within_any_root(saved, roots):
                 saved.unlink(missing_ok=True)

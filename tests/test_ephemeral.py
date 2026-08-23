@@ -231,6 +231,26 @@ async def test_without_roots_nothing_is_written_but_the_preview_still_arrives(_w
 
 
 @pytest.mark.asyncio
+async def test_a_save_that_cannot_read_the_roots_leaves_nothing_on_disk(
+    _wire, _with_roots, monkeypatch, tmp_path
+):
+    """The roots error is only discovered after the bytes are written. Refusing and
+    keeping the file is the one outcome the gate exists to prevent."""
+    _wire(_Client(messages=[_msg(5, ttl=30)]))
+    _with_roots()
+
+    async def _roots(ctx, tool_name):
+        return None, "Path is outside allowed roots."
+
+    monkeypatch.setattr(mod, "_ensure_allowed_roots", _roots)
+
+    result = await save_disappearing_media(1, 5, account="a")
+
+    assert "allowed roots" in str(result)
+    assert list(tmp_path.iterdir()) == [], "the refused save is still on disk"
+
+
+@pytest.mark.asyncio
 async def test_a_message_without_a_timer_is_refused_with_the_right_alternative(_wire):
     _wire(_Client(messages=[_msg(5, ttl=None)]))
 

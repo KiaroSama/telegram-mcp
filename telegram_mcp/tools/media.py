@@ -178,10 +178,16 @@ async def download_media(
 
         final_path = Path(downloaded).resolve(strict=True)
         roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
+        # The file already exists by now, and it is not the path the pre-flight gate
+        # validated: out_path.with_suffix("") hands Telethon a stem and lets it pick
+        # the extension. A refusal that leaves those bytes outside the allowed roots
+        # has enforced nothing, so every refusing return takes the file with it.
         if roots_error:
+            final_path.unlink(missing_ok=True)
             return roots_error
         if not _path_is_within_any_root(final_path, roots):
-            return "Download failed: resulting path is outside allowed roots."
+            final_path.unlink(missing_ok=True)
+            return "Download refused: the resulting path is outside the allowed roots."
 
         return f"Media downloaded to {final_path}."
     except Exception as e:
