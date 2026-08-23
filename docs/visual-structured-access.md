@@ -499,9 +499,9 @@ have checked the title yourself.
 * A **minimized window cannot be screen-captured**. Use `method="window"`.
 * In **multi-account mode**, `inspect_message`, `get_media_thumbnail`, `get_media_frames`,
   `get_custom_emoji` and `get_message_effect` require an explicit `account`. The server's
-  read-only fan-out concatenates each account's result as text, which would stringify the image
-  blocks and lose them, so every tool that returns image blocks refuses the fan-out with a
-  message naming the configured accounts instead. `inspect_messages` and
+  read-only fan-out returns one JSON object keyed by account label, which can carry each
+  account's text result but not its image blocks, so every tool that returns image blocks
+  refuses the fan-out with a message naming the configured accounts instead. `inspect_messages` and
   `get_media_details` return text only and fan out normally. The capture tools never touch
   Telegram, so `account` does not apply to them at all.
 * **`native_resolution=True` opts out of the size cap** on the three capture tools when you

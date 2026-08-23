@@ -58,8 +58,8 @@ _SCREEN_WARNING = (
 def require_explicit_account(fn):
     """Refuse the multi-account fan-out for tools that return images.
 
-    ``with_account(readonly=True)`` fans a tool out across every account and joins
-    the results with ``f"[{label}]\\n{result}"``. For a tool returning
+    ``with_account(readonly=True)`` fans a tool out across every account and returns
+    one JSON envelope, ``{"accounts": {label: result}}``. For a tool returning
     ``[metadata, Image, ...]`` that formats the Python list into a string, so the
     images are silently destroyed and the JSON arrives nested in a list repr.
     Applied ABOVE ``with_account`` so it intercepts before the fan-out happens.

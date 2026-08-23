@@ -18,6 +18,7 @@ second name and the code here keeps calling its own.
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
@@ -301,7 +302,9 @@ def with_account(readonly=False):
     - In single-mode: always uses the sole client, no output tagging.
     - In multi-mode with explicit account: uses that account's client.
     - In multi-mode without account + readonly: fans out to all accounts
-      concurrently, prefixes each result with [label], concatenates.
+      concurrently and returns one JSON object, ``{"accounts": {label: result}}``.
+      A failing account appears as ``{"error": "<Type>: <message>"}`` beside the
+      others rather than discarding them.
     - In multi-mode without account + NOT readonly: returns an error.
 
     The wrapped function must accept ``account: str = None`` and use
@@ -326,10 +329,43 @@ def with_account(readonly=False):
             async def _call_for(label):
                 kw = dict(kwargs)
                 kw["account"] = label
-                return label, await fn(*args, **kw)
+                return await fn(*args, **kw)
 
-            results = await asyncio.gather(*(_call_for(label) for label in clients))
-            return "\n\n".join(f"[{label}]\n{result}" for label, result in results)
+            # return_exceptions: without it the first failing account propagates out of
+            # gather and out of this wrapper, discarding every other account's already
+            # completed result — one expired session turned a five-account query into a
+            # single error string.
+            #
+            # labels is materialised once and reused for the zip, so results cannot be
+            # mis-paired if `clients` is rebound mid-await. The old code carried the
+            # label inside the returned tuple, which return_exceptions makes impossible
+            # for the failing branch.
+            labels = list(clients)
+            outcomes = await asyncio.gather(
+                *(_call_for(label) for label in labels), return_exceptions=True
+            )
+
+            # One envelope instead of "\n\n".join(f"[{label}]\n{result}"). Every tool
+            # returns JSON from format_tool_result, and welding those strings together
+            # produced something no caller could parse. Values are decoded where they
+            # are JSON and kept verbatim where a tool answers in prose ("No messages
+            # found."), so both kinds survive.
+            #
+            # BaseException, not Exception: gather(return_exceptions=True) returns
+            # whatever was raised, and CancelledError is a BaseException.
+            accounts: dict[str, Any] = {}
+            for label, outcome in zip(labels, outcomes):
+                if isinstance(outcome, BaseException):
+                    accounts[label] = {"error": f"{type(outcome).__name__}: {outcome}"}
+                    continue
+                try:
+                    accounts[label] = json.loads(outcome)
+                except (TypeError, ValueError):
+                    accounts[label] = outcome
+            # ensure_ascii=False matches format_tool_result, so non-ASCII chat titles are
+            # not escaped twice; default=str is a net for a non-string, non-JSON value —
+            # this wrapper must never raise.
+            return json.dumps({"accounts": accounts}, ensure_ascii=False, default=str)
 
         return wrapper
 

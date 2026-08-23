@@ -252,9 +252,75 @@ async def test_with_account_routes_single_multi_and_readonly(monkeypatch):
         "Error: 'account' is required. Available accounts: work, personal"
     )
     assert await runtime.with_account(readonly=False)(tool)(account="work") == "work"
-    assert (
-        await runtime.with_account(readonly=True)(tool)() == "[work]\nwork\n\n[personal]\npersonal"
+    import json
+
+    assert json.loads(await runtime.with_account(readonly=True)(tool)()) == {
+        "accounts": {"work": "work", "personal": "personal"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_fan_out_returns_one_parseable_object_per_account(monkeypatch):
+    """Every tool returns JSON from format_tool_result. Welding those strings together
+    with [label] markers produced something that is neither JSON nor a stable text
+    format, so a caller that parsed one account's output fine broke the moment a
+    second account was configured."""
+    import json
+
+    async def tool(account=None):
+        return json.dumps({"results": [{"chat_id": 1, "owner": account}]})
+
+    monkeypatch.setattr(connection, "clients", {"work": object(), "personal": object()})
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert set(payload["accounts"]) == {"work", "personal"}
+    assert payload["accounts"]["work"]["results"][0]["owner"] == "work"
+    assert payload["accounts"]["personal"]["results"][0]["owner"] == "personal"
+
+
+@pytest.mark.asyncio
+async def test_a_tool_that_answers_in_prose_keeps_its_sentence(monkeypatch):
+    """Not every read tool returns JSON — "Page out of range." and "No messages found."
+    are real answers. They must survive the envelope as strings, not become null."""
+    import json
+
+    async def tool(account=None):
+        return "No messages found."
+
+    monkeypatch.setattr(connection, "clients", {"work": object(), "personal": object()})
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert payload["accounts"] == {
+        "work": "No messages found.",
+        "personal": "No messages found.",
+    }
+
+
+@pytest.mark.asyncio
+async def test_one_failing_account_does_not_discard_the_others(monkeypatch):
+    """gather() without return_exceptions=True propagates the first failure out of the
+    wrapper, so four healthy accounts' completed results are thrown away because a
+    fifth session expired."""
+    import json
+
+    async def tool(account=None):
+        if account == "broken":
+            raise RuntimeError("session expired")
+        return json.dumps({"results": [{"owner": account}]})
+
+    monkeypatch.setattr(
+        connection, "clients", {"work": object(), "broken": object(), "personal": object()}
     )
+
+    payload = json.loads(await runtime.with_account(readonly=True)(tool)())
+
+    assert payload["accounts"]["work"]["results"][0]["owner"] == "work"
+    assert payload["accounts"]["personal"]["results"][0]["owner"] == "personal"
+    assert payload["accounts"]["broken"] == {
+        "error": "RuntimeError: session expired",
+    }
 
 
 class _ConnectivityClient:
