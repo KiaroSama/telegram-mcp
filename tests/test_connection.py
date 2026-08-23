@@ -360,6 +360,30 @@ async def test_a_rate_limit_answer_is_proof_the_connection_is_alive(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_a_burned_session_is_reported_even_when_the_probe_is_what_finds_it(monkeypatch):
+    """AuthKeyDuplicatedError is an RPCError, so "the server answered" is literally
+    true — but what it answered is that this session is permanently dead. Reporting
+    it as a live connection sends the caller on to a tool call that fails with a
+    generic error, throwing away the one message that says how to recover.
+
+    Telegram invalidates the key on first use after the clash, so the probe is a
+    likely place to meet it, not an exotic one.
+    """
+    from telethon.errors import AuthKeyDuplicatedError
+
+    client = _ConnectivityClient(
+        connected=True, authorized=True, ping_error=AuthKeyDuplicatedError(request=None)
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        await runtime.ensure_connected(client)
+
+    assert id(client) not in connection._last_conn_verified, "recorded a dead session as verified"
+
+
+@pytest.mark.asyncio
 async def test_a_chat_level_refusal_is_also_proof_the_connection_is_alive(monkeypatch):
     """Any RPCError is the server talking back. The probe is help.GetNearestDc, so a
     refusal is unusual — but the rule is about what an answer PROVES, not about which

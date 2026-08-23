@@ -341,6 +341,16 @@ _RECONNECT_LOCKS: dict[int, asyncio.Lock] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 _RECONNECT_TIMEOUT: float = 30.0  # seconds before a reconnect attempt is abandoned
 
+# Raised from two places — the reconnect's connect(), and the liveness probe, which
+# meets it first when Telegram invalidates the key on first use after the clash.
+_BURNED_SESSION_MESSAGE = (
+    "Telegram session is no longer usable: the same session string was "
+    "used by another client at the same time (AuthKeyDuplicatedError). "
+    "Give each concurrent client its own session via "
+    "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
+    "regenerate the burned session with `uv run session_string_generator.py`."
+)
+
 
 async def _force_reconnect(cl: TelegramClient):
     """Disconnect + reconnect this client, one caller at a time.
@@ -370,13 +380,7 @@ async def _force_reconnect(cl: TelegramClient):
             # Telegram permanently invalidates an auth key used from two IPs at
             # once, so retrying here can never succeed — surface it instead of
             # letting the caller sit in a reconnect loop.
-            raise RuntimeError(
-                "Telegram session is no longer usable: the same session string was "
-                "used by another client at the same time (AuthKeyDuplicatedError). "
-                "Give each concurrent client its own session via "
-                "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
-                "regenerate the burned session with `uv run session_string_generator.py`."
-            ) from exc
+            raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
         except asyncio.TimeoutError as exc:
             raise RuntimeError(
                 f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
@@ -433,6 +437,13 @@ async def ensure_connected(cl: TelegramClient = None):
             cl(functions.help.GetNearestDcRequest()),
             timeout=5.0,
         )
+    except AuthKeyDuplicatedError as exc:
+        # Also an RPCError, so "the server answered" is literally true — but what it
+        # answered is that this session is permanently dead. Falling through to the
+        # branch below would record it as verified and send the caller on to a tool
+        # call that fails generically, discarding the one message that says how to
+        # recover. Must precede the RPCError branch.
+        raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
     except RPCError:
         # The server ANSWERED — it just refused. That is proof the socket is alive,
         # which is the only question this function asks. FloodWaitError is the case
@@ -495,6 +506,7 @@ except Exception as log_error:
 
 
 __all__ = [
+    "_BURNED_SESSION_MESSAGE",
     "_CONN_VERIFY_INTERVAL",
     "_PROXY_TYPES_ALL",
     "_PROXY_TYPES_SOCKS_HTTP",
