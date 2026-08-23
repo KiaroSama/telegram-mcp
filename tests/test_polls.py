@@ -350,3 +350,47 @@ async def test_an_out_of_range_option_is_refused_before_the_voters_are_fetched(_
 
     assert "does not exist" in result and "0-2" in result
     assert client.sent("GetPollVotesRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_create_poll_reports_the_message_it_created(monkeypatch):
+    """Found by sweeping the writing tools: it answered "Poll created successfully"
+    and nothing else, so the caller could not read results, vote, or take it down.
+
+    The sweep littered Saved Messages because it had no id to clean up with. An
+    agent is in the same position, with nobody watching.
+    """
+    from types import SimpleNamespace
+
+    from telegram_mcp.tools import messages_state
+
+    class _Client:
+        async def __call__(self, request):
+            return SimpleNamespace(updates=[SimpleNamespace(message=SimpleNamespace(id=4242))])
+
+    monkeypatch.setattr(messages_state, "get_client", lambda account=None: _Client())
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    monkeypatch.setattr(messages_state, "ensure_connected", _ensure, raising=False)
+    monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
+
+    payload = json.loads(await messages_state.create_poll("me", "probe?", ["a", "b"], account="a"))
+
+    assert payload["results"][0]["message_id"] == 4242
+    assert payload["created"] is True
+
+
+def test_create_poll_accepts_a_chat_reference_not_only_a_number():
+    """`chat_id: int` rejected "me" and @usernames at argument validation, while
+    every neighbouring tool took Union[int, str]."""
+    import inspect
+
+    from telegram_mcp.tools import messages_state
+
+    annotation = inspect.signature(messages_state.create_poll).parameters["chat_id"].annotation
+    assert annotation is not int, "chat_id is int-only again; 'me' and @usernames cannot be used"

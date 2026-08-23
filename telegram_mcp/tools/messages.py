@@ -408,8 +408,16 @@ async def send_message(
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             return await _send_rich(cl, entity, message, parse_mode.lower())
-        await cl.send_message(entity, message, parse_mode=parse_mode)
-        return "Message sent successfully."
+        sent = await cl.send_message(entity, message, parse_mode=parse_mode)
+        # The id, because everything a caller might do next needs it: edit, react,
+        # pin, forward, delete. Returning only "sent" leaves an agent holding a
+        # message it cannot address.
+        message_id = getattr(sent, "id", None)
+        if message_id is None:
+            return "Message sent successfully."
+        return format_tool_result(
+            [{"message_id": message_id, "chat_id": str(chat_id)}], {"sent": True}
+        )
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id)
 

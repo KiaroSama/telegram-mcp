@@ -15,6 +15,11 @@ close it — is state manipulation of that attachment.
 
 from telegram_mcp.runtime import *
 
+# Explicitly, not via the star import: `display_text` is not part of
+# runtime's surface, and assuming it was is what left a NameError in a
+# path only a live call reaches.
+from telegram_mcp.message_view import display_text
+
 
 @mcp.tool(
     annotations=ToolAnnotations(title="List Inline Buttons", openWorldHint=True, readOnlyHint=True)
@@ -328,8 +333,9 @@ async def unpin_all_messages(chat_id: Union[int, str], account: str = None) -> s
     annotations=ToolAnnotations(title="Create Poll", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
+@validate_id("chat_id")
 async def create_poll(
-    chat_id: int,
+    chat_id: Union[int, str],
     question: str,
     options: list,
     multiple_choice: bool = False,
@@ -397,7 +403,22 @@ async def create_poll(
             )
         )
 
-        return f"Poll created successfully in chat {chat_id}."
+        # SendMedia answers with an Updates; the new message is the one carrying
+        # the poll. Without its id the caller cannot read the results back, vote,
+        # or take the poll down again.
+        message_id = None
+        for update in getattr(result, "updates", None) or []:
+            candidate = getattr(update, "message", None)
+            if candidate is not None and getattr(candidate, "id", None):
+                message_id = candidate.id
+                break
+            if getattr(update, "id", None) and getattr(update, "poll_id", None) is None:
+                message_id = update.id
+
+        return format_tool_result(
+            [{"message_id": message_id, "question": display_text(question)}],
+            {"chat_id": str(chat_id), "created": True},
+        )
     except Exception as e:
         logger.exception(f"create_poll failed (chat_id={chat_id}, question='{question}')")
         return log_and_format_error(
