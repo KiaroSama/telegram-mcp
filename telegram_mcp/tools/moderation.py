@@ -83,7 +83,7 @@ async def promote_admin(
         )
 
         try:
-            result = await cl(
+            await cl(
                 functions.channels.EditAdminRequest(
                     channel=chat, user_id=user, admin_rights=admin_rights, rank="Admin"
                 )
@@ -143,7 +143,7 @@ async def demote_admin(
         )
 
         try:
-            result = await cl(
+            await cl(
                 functions.channels.EditAdminRequest(
                     channel=chat, user_id=user, admin_rights=admin_rights, rank=""
                 )

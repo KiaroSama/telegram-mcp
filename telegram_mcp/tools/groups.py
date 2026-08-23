@@ -374,7 +374,7 @@ async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
             return log_and_format_error(
                 "leave_chat",
                 Exception(
-                    f"Error leaving chat: This appears to be a channel/supergroup. Please check the chat ID and try again."
+                    "Error leaving chat: This appears to be a channel/supergroup. Please check the chat ID and try again."
                 ),
                 chat_id=chat_id,
             )

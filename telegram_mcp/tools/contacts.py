@@ -372,7 +372,7 @@ async def add_contact(
 
                 user = resolve_result.users[0]
                 if not isinstance(user, User):
-                    return f"Error: Resolved entity is not a user."
+                    return "Error: Resolved entity is not a user."
 
                 user_id = user.id
                 access_hash = user.access_hash
@@ -448,7 +448,7 @@ async def add_contact(
                 logger.exception(f"add_contact (alt method) failed (phone={phone})")
                 return log_and_format_error("add_contact", alt_e, phone=phone)
         else:
-            logger.exception(f"add_contact (type error) failed")
+            logger.exception("add_contact (type error) failed")
             return log_and_format_error("add_contact", type_err)
     except Exception as e:
         logger.exception(f"add_contact failed (phone={phone}, username={username})")

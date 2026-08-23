@@ -151,7 +151,9 @@ async def _main() -> None:
             except Exception as warm_exc:
                 print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)
 
-        warm_task = asyncio.create_task(_warm_caches())
+        # Held deliberately: asyncio keeps only a weak reference to a running task,
+        # so dropping this name can let the cache warm-up be collected mid-flight.
+        warm_task = asyncio.create_task(_warm_caches())  # noqa: F841
 
         transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
         print(

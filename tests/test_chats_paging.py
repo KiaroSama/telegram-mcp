@@ -69,7 +69,7 @@ async def test_a_later_page_fetches_only_up_to_its_own_end(_wire):
 
 @pytest.mark.asyncio
 async def test_a_page_past_the_end_says_so(_wire):
-    client = _wire(_DialogClient(total=10))
+    _wire(_DialogClient(total=10))
 
     assert "Page out of range." == await mod.get_chats(page=5, page_size=20, account="a")
 

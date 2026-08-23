@@ -372,7 +372,7 @@ async def create_poll(
             try:
                 close_date_obj = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
             except ValueError:
-                return f"Invalid close_date format. Use YYYY-MM-DD HH:MM:SS format."
+                return "Invalid close_date format. Use YYYY-MM-DD HH:MM:SS format."
 
         # Create the poll using InputMediaPoll with SendMediaRequest
         from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities

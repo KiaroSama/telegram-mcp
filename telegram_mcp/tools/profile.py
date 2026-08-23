@@ -220,7 +220,7 @@ async def set_privacy_settings(
 
         # Apply the privacy settings
         try:
-            result = await cl(functions.account.SetPrivacyRequest(key=privacy_key, rules=rules))
+            await cl(functions.account.SetPrivacyRequest(key=privacy_key, rules=rules))
             return f"Privacy settings for {key} updated successfully."
         except TypeError as type_err:
             if "TLObject was expected" in str(type_err):
@@ -388,8 +388,8 @@ async def set_bot_commands(bot_username: str, commands: list, account: str = Non
             BotCommand(command=c["command"], description=c["description"]) for c in commands
         ]
 
-        # Get the bot entity
-        bot = await resolve_entity(bot_username, cl)
+        # Resolve the username so an unknown bot fails here rather than silently.
+        await resolve_entity(bot_username, cl)
 
         # Set the commands with proper scope
         await cl(

@@ -140,7 +140,7 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
                 # If we got chat info, we're already a member
                 chat_title = sanitize_name(getattr(invite_info.chat, "title", "Unknown Chat"))
                 return f"You are already a member of this chat: {chat_title}"
-        except Exception as check_err:
+        except Exception:
             # This often fails if not a member - just continue
             pass
 
@@ -150,7 +150,7 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
             if result and hasattr(result, "chats") and result.chats:
                 chat_title = sanitize_name(getattr(result.chats[0], "title", "Unknown Chat"))
                 return f"Successfully joined chat: {chat_title}"
-            return f"Joined chat via invite hash."
+            return "Joined chat via invite hash."
         except Exception as join_err:
             err_str = str(join_err).lower()
             if "expired" in err_str:
@@ -209,7 +209,7 @@ async def join_chat_by_link(link: str, account: str = None) -> str:
         if result and hasattr(result, "chats") and result.chats:
             chat_title = sanitize_name(getattr(result.chats[0], "title", "Unknown Chat"))
             return f"Successfully joined chat: {chat_title}"
-        return f"Joined chat via invite hash."
+        return "Joined chat via invite hash."
     except Exception as e:
         err_str = str(e).lower()
         if "expired" in err_str:

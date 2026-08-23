@@ -1,0 +1,15 @@
+[flake8]
+# flake8 does not read pyproject.toml, which is why this file exists rather than a
+# [tool.flake8] block: without it, `flake8 .` runs on stock defaults - 79-column lines
+# against a 99-column black codebase, and no exclude, so it walks .venv too.
+max-line-length = 99
+exclude = .git,__pycache__,.venv,build,dist,docs/source/conf.py
+# E203/E501/W503: black owns line length and slice/operator whitespace.
+# F401/F403/F405: the 31 tool modules deliberately open with
+#   `from telegram_mcp.runtime import *`, and runtime.py's own import block is its
+#   public surface. Silencing these is the price of that architecture, not an
+#   oversight - see telegram_mcp/tools/__init__.py.
+extend-ignore = E203,E501,W503,F401,F403,F405
+# max-complexity is deliberately absent. Setting a limit that is already breached, or
+# raising the limit until it fits, would both be theatre. Reducing complexity is
+# separate, deliberate work.

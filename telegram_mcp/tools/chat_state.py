@@ -73,7 +73,7 @@ async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
         )
         return f"Chat {chat_id} muted."
-    except (ImportError, AttributeError) as type_err:
+    except (ImportError, AttributeError):
         try:
             # Alternative approach directly using raw API
             peer = await resolve_input_entity(chat_id, cl)
@@ -118,7 +118,7 @@ async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
         )
         return f"Chat {chat_id} unmuted."
-    except (ImportError, AttributeError) as type_err:
+    except (ImportError, AttributeError):
         try:
             # Alternative approach directly using raw API
             peer = await resolve_input_entity(chat_id, cl)

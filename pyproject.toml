@@ -77,19 +77,6 @@ telegram-mcp-generate-session = "session_string_generator:main"
 line-length = 99
 target-version = ['py311']
 
-[tool.flake8]
-ignore = ["E203", "E501", "W503"]
-max-line-length = 99
-max-complexity = 10
-exclude = [
-    ".git",
-    "__pycache__",
-    ".venv",
-    "build",
-    "dist",
-    "docs/source/conf.py",
-]
-
 [dependency-groups]
 dev = [
     "black>=25.9.0",
