@@ -260,7 +260,8 @@ path. The work is not new TL, it is making the existing gate usable:
 (`Create/Edit/Delete/Get/ResolveBusinessChatLink`) and `GetBotBusinessConnection`.
 
 Expect a subscription gate exactly like `schedule_repeat_period`: the value is
-accepted and the account is refused. Whatever that error turns out to be, report it
+accepted and a non-Premium account is refused, while a Premium one goes through — both
+halves of that have now been observed. Whatever that error turns out to be, report it
 as a plain sentence rather than a raw RPC name — and **measure the gate rather than
 assuming it**, the way the repeat periods were measured.
 

@@ -562,9 +562,11 @@ the bounded-download layer and `media_preview.py` the asset-preview layer — bo
 `scheduled.py` and `ephemeral.py` are the timed-message pair. Upstream can only *create* a
 plain scheduled message, so `scheduled.py` adds reading the queue back, editing it, cancelling
 it, and `schedule_repeat_period` — the field behind Telegram's recurring messages, whose two
-valid periods (86400 and 604800) were established by probing the live server rather than inferred:
-both fail only on `PREMIUM_ACCOUNT_REQUIRED`, while 5 seconds is rejected as
-`SCHEDULE_REPEAT_PERIOD_INVALID`. `ephemeral.py` covers `ttl_seconds`, which nothing read or set
+valid periods (86400 and 604800) were established by probing the live server rather than inferred,
+and have since been seen **working**: on a Premium account `repeat="daily"` and `"weekly"` are
+accepted and come back with the period set. A non-Premium account gets `PREMIUM_ACCOUNT_REQUIRED`
+for the same call, which is reported as that sentence rather than the raw error, and 5 seconds is
+rejected by Telegram itself as `SCHEDULE_REPEAT_PERIOD_INVALID`. `ephemeral.py` covers `ttl_seconds`, which nothing read or set
 before: finding disappearing media before it is opened, sending it with a timer through the SAME
 allowed-roots gate upstream's `upload_file` uses, and writing an incoming one to disk before it
 expires. The save path is the answer to the case the timer creates: a message that dies on first
