@@ -281,6 +281,16 @@ async def create_folder(
         return log_and_format_error("create_folder", e, ErrorCategory.FOLDER, title=title)
 
 
+def _peer_key(peer, self_id: int) -> int:
+    """Marked id of a folder peer.
+
+    Telegram stores Saved Messages in a dialog filter as ``InputPeerSelf``, which
+    ``utils.get_peer_id`` refuses to cast; the account's own numeric id is what it
+    would have returned.
+    """
+    return self_id if isinstance(peer, types.InputPeerSelf) else utils.get_peer_id(peer)
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Add Chat to Folder", openWorldHint=True, destructiveHint=True, idempotentHint=True
@@ -324,14 +334,21 @@ async def add_chat_to_folder(
         except Exception as e:
             return f"Failed to resolve chat '{chat_id}': {str(e)}"
 
+        # Telegram stores Saved Messages as InputPeerSelf, which cannot be cast to
+        # an id and would not survive the round trip; store the concrete peer.
+        self_peer = await cl.get_me(input_peer=True)
+        self_id = utils.get_peer_id(self_peer)
+        if isinstance(peer, types.InputPeerSelf):
+            peer = self_peer
+
         # Check if already included (idempotent)
         include_peers = list(getattr(target_folder, "include_peers", []))
         pinned_peers = list(getattr(target_folder, "pinned_peers", []))
 
         # Get peer ID for comparison
-        peer_id = utils.get_peer_id(peer)
-        already_included = any(utils.get_peer_id(p) == peer_id for p in include_peers)
-        already_pinned = any(utils.get_peer_id(p) == peer_id for p in pinned_peers)
+        peer_id = _peer_key(peer, self_id)
+        already_included = any(_peer_key(p, self_id) == peer_id for p in include_peers)
+        already_pinned = any(_peer_key(p, self_id) == peer_id for p in pinned_peers)
 
         if already_included and (not pinned or already_pinned):
             return f"Chat {chat_id} is already in folder {folder_id}."
@@ -421,23 +438,27 @@ async def remove_chat_from_folder(
                 f"Folder with ID {folder_id} not found. Use list_folders to see available folders."
             )
 
-        # Resolve chat to get peer ID
+        # Resolve chat to get peer ID. Only the *resolution* belongs in this handler:
+        # anything else moved back inside it gets its exception text formatted into
+        # the reply as if it were the answer to the user's question.
         try:
             peer = await resolve_input_entity(chat_id, cl)
-            peer_id = utils.get_peer_id(peer)
         except Exception as e:
             return f"Failed to resolve chat '{chat_id}': {str(e)}"
+
+        self_id = utils.get_peer_id(await cl.get_me(input_peer=True))
+        peer_id = _peer_key(peer, self_id)
 
         # Filter out the peer from both include and pinned lists
         include_peers = [
             p
             for p in getattr(target_folder, "include_peers", [])
-            if utils.get_peer_id(p) != peer_id
+            if _peer_key(p, self_id) != peer_id
         ]
         pinned_peers = [
             p
             for p in getattr(target_folder, "pinned_peers", [])
-            if utils.get_peer_id(p) != peer_id
+            if _peer_key(p, self_id) != peer_id
         ]
 
         original_include_count = len(getattr(target_folder, "include_peers", []))
