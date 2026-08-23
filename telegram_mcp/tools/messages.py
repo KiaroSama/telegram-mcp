@@ -20,6 +20,14 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 """
 
 from telegram_mcp.runtime import *
+from telegram_mcp.text_fidelity import display_name
+
+# A URL is a machine value: bounded so a hostile link cannot flood the context,
+# but far above display_name's prose default, which cuts real Mini App links in
+# half. The convention originates in telegram_mcp/button_view.py; it is repeated
+# here rather than imported because that module reaches back into this one and
+# this module deliberately imports from none of its siblings (see the docstring).
+MAX_MACHINE_VALUE = 2048
 
 # Domain used to build message permalinks. Overridable because the default is a
 # single point of failure: on 2026-07-13 the .me registry put t.me on serverHold
@@ -51,7 +59,11 @@ def get_media_label(msg) -> str:
             for attr in getattr(sticker, "attributes", []) or []:
                 a = getattr(attr, "alt", None)
                 if a:
-                    alt = a
+                    # Whoever built the sticker pack chose this alt, and this label is
+                    # what an agent reads to decide what the message contains. Clean it
+                    # here, at the producer: an alt that is nothing but bidi overrides
+                    # empties out and the label falls back to the bare "sticker".
+                    alt = display_name(a)
                     break
             return f"sticker {alt}".strip()
         if getattr(msg, "photo", None) is not None:
@@ -70,7 +82,10 @@ def get_media_label(msg) -> str:
             name = None
             f = getattr(msg, "file", None)
             if f is not None:
-                name = getattr(f, "name", None)
+                # The filename is chosen by whoever sent the document. Cleaned before
+                # interpolation so a name that is only hidden characters degrades to
+                # the bare "document" instead of a dangling "document: ".
+                name = display_name(getattr(f, "name", None))
             return f"document: {name}" if name else "document"
         if getattr(msg, "contact", None) is not None:
             return "contact"
@@ -86,12 +101,18 @@ def get_media_label(msg) -> str:
 
 
 def _inline_button_texts(msg):
-    """Inline button texts of the message (flat list), [] if none."""
+    """Inline button texts of the message (flat list), [] if none.
+
+    The label is sender-controlled and is exactly what an agent uses to decide
+    which button to press, so a bidi override in it can make it read as something
+    else entirely. A label that cleans away to nothing is dropped rather than
+    reported as an empty button.
+    """
     out = []
     try:
         for row in getattr(msg, "buttons", None) or []:
             for b in row:
-                t = getattr(b, "text", None)
+                t = display_name(getattr(b, "text", None))
                 if t:
                     out.append(t)
     except Exception:
@@ -100,11 +121,16 @@ def _inline_button_texts(msg):
 
 
 def _link_urls(msg):
-    """Explicit URLs from entities (links hidden behind text), [] if none."""
+    """Explicit URLs from entities (links hidden behind text), [] if none.
+
+    These are the URLs a message hides behind its visible text, so they are read
+    precisely when the visible text cannot be trusted. Bounded as a machine value
+    rather than as prose; one that cleans away to nothing is dropped.
+    """
     out = []
     try:
         for e in getattr(msg, "entities", None) or []:
-            u = getattr(e, "url", None)
+            u = display_name(getattr(e, "url", None), max_length=MAX_MACHINE_VALUE)
             if u:
                 out.append(u)
     except Exception:
