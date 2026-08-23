@@ -85,7 +85,7 @@ Clients that can wake an agent on external output (Claude Code's persistent `Mon
 
 ## Requirements
 
-- Python 3.10+
+- Python 3.11+ (the test suite imports `tomllib`, which arrived in 3.11)
 - Telegram API credentials from [my.telegram.org/apps](https://my.telegram.org/apps)
 - A Telegram session string or file-based session
 - An MCP client such as Claude Desktop, Cursor, or another MCP-compatible host
