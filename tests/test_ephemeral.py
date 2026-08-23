@@ -377,3 +377,102 @@ async def test_an_applied_timer_is_not_flagged(monkeypatch):
 
     assert "timer_dropped" not in payload["results"][0]
     assert payload["timer_applied"] is True
+
+
+# --- the suffix that reaches the filesystem ---------------------------------
+#
+# The extension comes from Telethon's File.ext, i.e. from the mime type or
+# filename the SENDER chose, and it is concatenated into a real filename written
+# into one of the operator's roots. These assert on the path that would be
+# written, because the filename is the thing under test.
+
+
+def _sender_suffix(monkeypatch, extension=None, mime_type=None, kind="photo"):
+    """Re-point describe_media at a sender-chosen suffix for the next call."""
+    details = {"kind": kind}
+    if extension is not None:
+        details["extension"] = extension
+    if mime_type is not None:
+        details["mime_type"] = mime_type
+    monkeypatch.setattr(mod, "describe_media", lambda m: details)
+
+
+async def _saved_record(_wire, _with_roots, monkeypatch, **suffix_kwargs):
+    _wire(_Client(messages=[_msg(5, ttl=30)]))
+    _with_roots()
+    _sender_suffix(monkeypatch, **suffix_kwargs)
+
+    payload = json.loads((await save_disappearing_media(1, 5, account="a"))[0])
+    return payload["results"][0]
+
+
+@pytest.mark.asyncio
+async def test_a_colon_suffix_never_reaches_the_filesystem(_wire, _with_roots, monkeypatch):
+    """A ".webm:ads" suffix would make NTFS write the payload into an alternate
+    data stream: the visible file looks empty and the reported path carries the
+    stream name."""
+    record = await _saved_record(_wire, _with_roots, monkeypatch, extension=".webm:ads")
+    saved = Path(record["saved_path"])
+
+    assert saved.suffix == ".bin"
+    assert ":" not in saved.name
+    assert saved.is_file()
+    assert record["suffix_replaced"] == ".webm:ads"
+
+
+@pytest.mark.asyncio
+async def test_a_path_separator_in_the_suffix_is_replaced(_wire, _with_roots, monkeypatch):
+    record = await _saved_record(_wire, _with_roots, monkeypatch, extension="./../evil")
+    saved = Path(record["saved_path"])
+
+    assert saved.suffix == ".bin"
+    assert record["suffix_replaced"] == "./../evil"
+
+
+@pytest.mark.parametrize("extension", [".hta", ".HTA"])
+@pytest.mark.asyncio
+async def test_a_shell_interpreted_suffix_is_replaced_whatever_its_case(
+    _wire, _with_roots, monkeypatch, extension
+):
+    """A shell-interpreted suffix is well formed -- ".hta" is a dot and three
+    ASCII letters, exactly like ".jpg" -- so the shape rule keeps it and only the
+    denylist catches it. Left alone it would sit in the operator's folder and run
+    when double-clicked, and a sender can send ".HTA" as easily as ".hta"."""
+    record = await _saved_record(_wire, _with_roots, monkeypatch, extension=extension)
+
+    assert Path(record["saved_path"]).suffix == ".bin"
+    assert record["suffix_replaced"] == extension
+
+
+@pytest.mark.parametrize("extension", [".jpg", ".ogg", ".tgs"])
+@pytest.mark.asyncio
+async def test_a_real_media_suffix_is_kept_and_not_flagged(
+    _wire, _with_roots, monkeypatch, extension
+):
+    """A flag that always fires is noise, so the report has to be conditional."""
+    record = await _saved_record(_wire, _with_roots, monkeypatch, extension=extension)
+
+    assert Path(record["saved_path"]).suffix == extension
+    assert "suffix_replaced" not in record
+
+
+@pytest.mark.asyncio
+async def test_a_missing_extension_still_falls_back_to_the_mime_table(
+    _wire, _with_roots, monkeypatch
+):
+    """The new rule sits after the _MIME_EXTENSIONS lookup, not instead of it."""
+    record = await _saved_record(_wire, _with_roots, monkeypatch, mime_type="audio/ogg")
+
+    assert Path(record["saved_path"]).suffix == ".ogg"
+    assert "suffix_replaced" not in record
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_mime_type_lands_on_bin_without_being_flagged(
+    _wire, _with_roots, monkeypatch
+):
+    """.bin was already the table's fallback, so nothing was replaced."""
+    record = await _saved_record(_wire, _with_roots, monkeypatch, mime_type="application/x-weird")
+
+    assert Path(record["saved_path"]).suffix == ".bin"
+    assert "suffix_replaced" not in record

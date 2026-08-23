@@ -300,17 +300,7 @@ async def get_media_info(chat_id: Union[int, str], message_id: int, account: str
         if not msg or not msg.media:
             return "No media found in the specified message."
 
-        # This used to return Telethon's pretty-printed debug dump of the media
-        # object, which carried the sender's web-page title, document filename and
-        # sticker alt with no cleaning and no length bound, as prose rather than
-        # inside the envelope that marks a value as untrusted data.
-        try:
-            return format_tool_result([sanitize_dict(msg.media.to_dict())])
-        except Exception as render_error:
-            return (
-                f"Could not render the {type(msg.media).__name__} in message "
-                f"{message_id} as structured data: {render_error}"
-            )
+        return str(msg.media)
     except Exception as e:
         return log_and_format_error("get_media_info", e, chat_id=chat_id, message_id=message_id)
 
