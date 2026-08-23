@@ -10,7 +10,13 @@ stable index per button and press by that index alone.
 from typing import Any, Optional, Union
 
 from telegram_mcp.runtime import *
-from telegram_mcp.button_view import PREMIUM_EMOJI_NOTE, describe_keyboard, find_button
+from telegram_mcp.button_view import (
+    MAX_MACHINE_VALUE,
+    PREMIUM_EMOJI_NOTE,
+    describe_keyboard,
+    find_button,
+)
+from telegram_mcp.message_view import display_name
 
 from telethon import functions
 
@@ -69,7 +75,12 @@ async def _resolve_icons(cl, buttons: list) -> None:
             if alt:
                 # The glyph a client without the emoji falls back to — and the one
                 # thing that says what the icon MEANS rather than which file it is.
-                info["alt"] = alt
+                # Short prose, so the plain display_name bound, matching what
+                # media_preview.py does with this same field.
+                cleaned_alt = display_name(alt)
+                info["alt"] = cleaned_alt
+                if cleaned_alt != alt:
+                    info["alt_altered"] = True
                 break
         resolved[document.id] = info
 
@@ -263,7 +274,12 @@ async def click_button(
         if url:
             # Telegram answers some callbacks with a URL the client would open.
             # Reporting it is useful; opening it is not this tool's business.
-            result["url"] = url
+            # Bot-supplied, so cleaned as a machine value and flagged when that
+            # changed it — the reader is deciding whether to follow it.
+            cleaned_url = display_name(url, max_length=MAX_MACHINE_VALUE)
+            result["url"] = cleaned_url
+            if cleaned_url != url:
+                result["url_altered"] = True
         if not message and not url:
             result["bot_message"] = None
             result["note_no_answer"] = (

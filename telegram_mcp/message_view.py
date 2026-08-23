@@ -33,6 +33,12 @@ from telegram_mcp.text_fidelity import (  # noqa: F401  (re-exported)
     fidelity_text,
 )
 
+# The machine-value budget, duplicated from `telegram_mcp.button_view` rather than
+# imported: button_view imports `display_name` from THIS module, so importing the
+# constant back would close a cycle. button_view is the origin and the reference
+# implementation of the convention — keep the two numbers in step.
+MAX_MACHINE_VALUE = 2048
+
 # Media kinds that carry a downloadable file.
 _DOWNLOADABLE_KINDS = {
     "photo",
@@ -117,7 +123,13 @@ def describe_entities(msg) -> list[dict[str, Any]]:
 
         url = getattr(entity, "url", None)
         if url:
-            item["url"] = url
+            # The real destination behind sender-chosen display text: attacker-chosen,
+            # so cleaned as a machine value and flagged when cleaning changed it. A
+            # caller deciding whether to report or follow it needs to know it moved.
+            cleaned_url = display_name(url, max_length=MAX_MACHINE_VALUE)
+            item["url"] = cleaned_url
+            if cleaned_url != url:
+                item["url_altered"] = True
         document_id = getattr(entity, "document_id", None)
         if document_id is not None:
             item["custom_emoji_id"] = document_id
@@ -126,7 +138,11 @@ def describe_entities(msg) -> list[dict[str, Any]]:
             item["user_id"] = user_id
         language = getattr(entity, "language", None)
         if language:
-            item["language"] = language
+            # A `pre` block's language tag is sender-supplied, not a known enum.
+            cleaned_language = display_name(language, max_length=MAX_MACHINE_VALUE)
+            item["language"] = cleaned_language
+            if cleaned_language != language:
+                item["language_altered"] = True
         if getattr(entity, "collapsed", False):
             item["collapsed"] = True
         described.append(item)

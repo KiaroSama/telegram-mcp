@@ -90,25 +90,34 @@ async def list_messages(
 
         if from_date:
             try:
-                # `timezone` comes from `from telegram_mcp.runtime import *`
-                # (runtime.py:13). `datetime` here is the CLASS, not the module, so
-                # `datetime.timezone` would raise AttributeError on every Python
-                # version — the version-fallback that used to sit here was dead code
-                # documenting a fact that was never true.
-                from_date_obj = datetime.strptime(from_date, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                )
+                from_date_obj = datetime.strptime(from_date, "%Y-%m-%d")
+                # Make it timezone aware by adding UTC timezone info
+                # Use datetime.timezone.utc for Python 3.9+ or import timezone directly for 3.13+
+                try:
+                    # For Python 3.9+
+                    from_date_obj = from_date_obj.replace(tzinfo=datetime.timezone.utc)
+                except AttributeError:
+                    # For Python 3.13+
+                    from datetime import timezone
+
+                    from_date_obj = from_date_obj.replace(tzinfo=timezone.utc)
             except ValueError:
-                return "Invalid from_date format. Use YYYY-MM-DD."
+                return f"Invalid from_date format. Use YYYY-MM-DD."
 
         if to_date:
             try:
-                # End of the named day, in UTC. See the note above about `timezone`.
-                to_date_obj = datetime.strptime(to_date, "%Y-%m-%d").replace(
-                    tzinfo=timezone.utc
-                ) + timedelta(days=1, microseconds=-1)
+                to_date_obj = datetime.strptime(to_date, "%Y-%m-%d")
+                # Set to end of day and make timezone aware
+                to_date_obj = to_date_obj + timedelta(days=1, microseconds=-1)
+                # Add timezone info
+                try:
+                    to_date_obj = to_date_obj.replace(tzinfo=datetime.timezone.utc)
+                except AttributeError:
+                    from datetime import timezone
+
+                    to_date_obj = to_date_obj.replace(tzinfo=timezone.utc)
             except ValueError:
-                return "Invalid to_date format. Use YYYY-MM-DD."
+                return f"Invalid to_date format. Use YYYY-MM-DD."
 
         # Prepare filter parameters
         params = {}
