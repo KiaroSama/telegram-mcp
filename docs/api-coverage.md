@@ -23,7 +23,7 @@ numbers can be re-derived.
 
 ## Why "100% of Telegram" is the wrong target
 
-802 request classes is the whole protocol, including `langpack`, `smsjobs`,
+800 request classes is the whole protocol, including `langpack`, `smsjobs`,
 `fragment`, `aicompose` and the login flow. Exposing all of it would produce
 hundreds of tools an agent will never pick correctly, and every one still needs a
 docstring, a test and a safety review. Tool choice degrades as the surface grows —
@@ -116,7 +116,7 @@ Phase 1b. Two things learned while building them are worth more than the count:
 
 ### Still not reachable, lower value, build on demand
 
-Pinned-dialog ordering, channel statistics, fact-check, todo lists, history
+Pinned-dialog ordering, fact-check, todo lists, history
 import/export, message-level bot inline queries, message **view counts**
 (`messages.GetMessagesViews`, distinct from the read receipts that already work),
 and **Mini App launch** (`messages.RequestWebView` — `inspect_buttons` describes such

@@ -1,7 +1,8 @@
 """Visual access to the real Telegram Desktop rendering.
 
-Kept in its own package so it stays separate from the upstream
-``chigwell/telegram-mcp`` sources and survives future upstream merges.
+Its own package because capture, decode and encode are one coherent
+responsibility with a single entry point, not because anything outside depends
+on the boundary.
 """
 
 from telegram_mcp.visual.capture import (

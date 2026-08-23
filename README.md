@@ -383,6 +383,7 @@ Example prompts:
 
 - "List my accounts"
 - "Show unread messages from all accounts"
+- "Send this from my work account to @example"
 
 ### Session pool (one account, several concurrent clients)
 
@@ -408,7 +409,17 @@ Size the pool to the number of clients you actually run concurrently. If every
 slot is already claimed, the server refuses to start with an explicit error
 rather than reusing a session another client holds — reuse would make Telegram
 permanently invalidate that session for both clients.
-- "Send this from my work account to @example"
+
+## Message Links
+
+`TELEGRAM_LINK_DOMAIN` sets the domain used to build message permalinks; the default is
+`t.me`. It is overridable because that default is a single point of failure: on
+2026-07-13 the .me registry put `t.me` on serverHold over an OFAC listing and every
+`t.me` link on earth broke for about a day, while `telegram.me` kept resolving.
+
+```env
+TELEGRAM_LINK_DOMAIN=t.me
+```
 
 ## Device Identity
 
@@ -640,7 +651,7 @@ Run tests with coverage:
 uv run pytest --cov --cov-report=term-missing --cov-report=xml
 ```
 
-Coverage is configured in `pyproject.toml` with an 80% minimum gate for deterministic unit-testable core modules. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
+Coverage is configured in `pyproject.toml` (`fail_under` under `[tool.coverage.report]`), currently a 85% minimum gate for the deterministic, unit-testable modules listed in `[tool.coverage.run] source`. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
 
 The launchers have their own suites, which `pytest` does not see. Run them on Windows:
 
