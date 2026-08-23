@@ -743,7 +743,19 @@ those, because a second fetch after the countdown has started returns nothing. W
 unconfigured nothing can be written and it says so, still returning a photo/video preview so the
 content is at least visible meanwhile. Saving one keeps a copy the sender did not agree to leave
 behind — the protocol permits it because the bytes already arrived, which is not the same as
-consent, so every result says so. `send_disappearing_media` sends with a timer through that same
+consent, so every result says so.
+
+The file's **extension comes from the sender**, so it is checked before anything is written. A
+suffix that is not a dot plus one to seven letters or digits becomes `.bin` — `.webm:ads` would
+otherwise make NTFS put the payload in an alternate data stream, leaving a file that looks empty
+next to a reported path carrying the `:stream` suffix. A short denylist of extensions Windows
+executes or follows (`.hta`, `.cmd`, `.exe`, `.lnk` and similar, matched case-insensitively) is
+replaced too, because those are well formed and still dangerous in a folder the operator opens.
+Either substitution is reported as `suffix_replaced`. It is a denylist rather than an allowlist
+because this tool saves arbitrary media — a PDF, a zip, an mp3 — and an allowlist would refuse
+legitimate documents.
+
+`send_disappearing_media` sends with a timer through that same
 gate; `seconds` is 1-60 or 0 for view-once, and anything longer is refused because Telegram
 silently drops an out-of-range timer and would send permanent media instead.
 

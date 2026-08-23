@@ -53,6 +53,73 @@ _MIME_EXTENSIONS = {
     "audio/mp4": ".m4a",
 }
 
+# A leading dot then 1-7 ASCII alphanumerics. That admits every real media
+# extension (.jpg, .webm, .ogg, .tgs, .sticker) while rejecting colons, spaces,
+# path separators, inner dots and the empty suffix.
+_WELL_FORMED_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,7}$")
+
+# Well formed and still dangerous: Windows runs or follows these when the
+# operator double-clicks the saved file in the folder they chose. The rule above
+# cannot catch them -- ".hta" is a dot and three ASCII letters, exactly like
+# ".jpg".
+#
+# A denylist is normally the weaker shape and is chosen deliberately here. This
+# tool saves *arbitrary* media -- a PDF, a zip, an mp3 -- so an allowlist of
+# media extensions would refuse legitimate documents the operator asked to save.
+# The threat answered is narrow and its members are enumerable: a suffix Windows
+# itself executes or follows. That, and only that, justifies adding one.
+_SHELL_INTERPRETED_SUFFIXES = frozenset(
+    {
+        ".hta",
+        ".cmd",
+        ".bat",
+        ".com",
+        ".exe",
+        ".scr",
+        ".pif",
+        ".msi",
+        ".ps1",
+        ".vbs",
+        ".vbe",
+        ".js",
+        ".jse",
+        ".wsf",
+        ".wsh",
+        ".reg",
+        ".lnk",
+        ".url",
+    }
+)
+
+
+def _safe_suffix(candidate: str) -> str:
+    """The candidate suffix if it is well formed, else ``.bin``.
+
+    The suffix arrives from Telethon's ``File.ext``, i.e. from the mime type or
+    filename the *sender* chose, and it is concatenated into a real filename
+    written into one of the operator's configured roots. ".webm:ads" is the case
+    this closes: on Windows that makes NTFS create an alternate data stream, so
+    the visible file looks empty while the payload lives in the stream and the
+    reported path carries the ":stream" suffix. Separators, spaces, inner dots
+    and an over-long or empty suffix go the same way.
+
+    The second rule answers the other threat: ".hta" is well formed, so the
+    first rule keeps it, and double-clicking the saved file would then run it.
+    Shell-interpreted suffixes are replaced even though their shape is fine.
+
+    ``visual/frames.py`` guards the temp-file path with a decoder allowlist. It
+    can, because it only ever decodes. This tool saves arbitrary media, so the
+    shape here is well-formedness plus a narrow denylist rather than a fixed set
+    of decodable types.
+    """
+    if not _WELL_FORMED_SUFFIX.match(candidate):
+        return ".bin"
+    # Case-folded: a sender can send ".HTA" as easily as ".hta".
+    if candidate.lower() in _SHELL_INTERPRETED_SUFFIXES:
+        return ".bin"
+    return candidate
+
+
 # Telegram's own "view once" convention: the maximum int, meaning the media is
 # destroyed after a single viewing rather than after a countdown.
 VIEW_ONCE = 0x7FFFFFFF
@@ -348,9 +415,15 @@ async def save_disappearing_media(
 
         # Write it out. The extension comes from the media, never from the caller:
         # a .jpg name on a voice note would produce a file nothing can open.
-        suffix = details.get("extension") or _MIME_EXTENSIONS.get(
+        sender_suffix = details.get("extension") or _MIME_EXTENSIONS.get(
             (details.get("mime_type") or "").lower(), ".bin"
         )
+        suffix = _safe_suffix(sender_suffix)
+        if suffix != sender_suffix:
+            # The caller asked to save a file and deserves to know its extension is
+            # not the one the sender set. Cleaned on the way out: the original is
+            # attacker-controlled text being reported back to a model.
+            record["suffix_replaced"] = display_name(sender_suffix)
         default_name = f"disappearing_{chat_id}_{message_id}_{int(time.time())}{suffix}"
         out_path, path_error = await _resolve_writable_file_path(
             raw_path=file_path,
