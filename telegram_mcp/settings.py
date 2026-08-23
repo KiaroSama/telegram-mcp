@@ -31,40 +31,8 @@ class ValidationError(Exception):
     pass
 
 
-def _require_credential(name: str) -> str:
-    """Read a mandatory credential, or say which one is missing and where it comes from.
-
-    Missing credentials are the most common way this server fails for a new operator,
-    and the bare reads this replaced failed as `int(None)` - a TypeError naming no
-    variable, no file and no next step. Same wording as
-    `session_string_generator.py`, which already got this right: name the variable,
-    name the file, name where the value comes from. It raises rather than prints
-    because this is a library module, and on the stdio transport stdout is the MCP
-    protocol channel.
-    """
-    value = os.getenv(name)
-    if not value:
-        raise ValidationError(
-            f"{name} is not set. Put it in the .env file next to the server. "
-            "Get both TELEGRAM_API_ID and TELEGRAM_API_HASH from "
-            "https://my.telegram.org/apps."
-        )
-    return value
-
-
-_RAW_TELEGRAM_API_ID = _require_credential("TELEGRAM_API_ID")
-try:
-    TELEGRAM_API_ID = int(_RAW_TELEGRAM_API_ID)
-except ValueError:
-    # Truncated: this is an operator-supplied string, and an error message is a
-    # place things get logged.
-    raise ValidationError(
-        "TELEGRAM_API_ID must be a number, but .env has "
-        f"{_RAW_TELEGRAM_API_ID[:40]!r}. Copy the numeric App api_id from "
-        "https://my.telegram.org/apps."
-    ) from None
-
-TELEGRAM_API_HASH = _require_credential("TELEGRAM_API_HASH")
+TELEGRAM_API_ID = int(os.getenv("TELEGRAM_API_ID"))
+TELEGRAM_API_HASH = os.getenv("TELEGRAM_API_HASH")
 
 
 def parse_bool_env(value: Optional[str], default: bool) -> bool:

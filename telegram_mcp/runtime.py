@@ -74,9 +74,7 @@ def json_serializer(obj):
     if isinstance(obj, datetime):
         return obj.isoformat()
     if isinstance(obj, bytes):
-        # Same decode-then-sanitize as `sanitize.sanitize_dict`: this is the other
-        # last line of defence, and fixing only one of the two moves the gap.
-        return sanitize_user_content(obj.decode("utf-8", errors="replace"), max_length=4096)
+        return obj.decode("utf-8", errors="replace")
     # Add other non-serializable types as needed
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
