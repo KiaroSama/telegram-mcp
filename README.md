@@ -348,6 +348,10 @@ two keys in different colours. The main menu shows only `{quit=exit}`, because t
 nothing above it to go back to. Colours are 256-colour ANSI and are dropped when
 `NO_COLOR` is set or the terminal has no virtual-terminal processing.
 
+Both the menu and the generator normalise the label the same way, and the generator
+refuses outright to write a key containing whitespace — such a line parses as nothing,
+so a "successful" save would leave an account that looks configured and never loads.
+
 Type a label however reads naturally — `KGB Verifier` is fine. Spaces and hyphens are
 stored as underscores (`kgb_verifier`) and the menu tells you the stored form, because
 that is the value tools take as `account=`. The substitution is not cosmetic: the label

@@ -25,6 +25,7 @@ import asyncio
 import getpass
 import io
 import os
+import re
 import shutil
 import sys
 from datetime import datetime, timezone
@@ -45,6 +46,23 @@ _QR_MAX_REFRESHES = 10
 load_dotenv()
 
 
+def normalise_label(raw: str) -> str:
+    r"""Turn a typed label into one that can survive a round trip through `.env`.
+
+    A label becomes part of an environment variable NAME, and python-dotenv refuses
+    to parse a line whose key contains a space: it warns on stderr and DROPS the
+    line. "KGB Verifier" was written literally once and produced
+    `TELEGRAM_SESSION_STRING_KGB VERIFIER=...` - an account that sat in the file,
+    looked correct, and could never load.
+
+    Spaces and hyphens become underscores; everything else is left alone, because
+    there is no safe mapping to invent for it and refusing loudly beats guessing.
+    The account manager applies the same rule before it ever gets here, so this is
+    the guard for the standalone path.
+    """
+    return re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+
+
 def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Optional[Path]:
     r"""Set one key in `.env`, replacing its line or appending it, and back the file up.
 
@@ -58,6 +76,11 @@ def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Opti
     Every other line survives byte-for-byte: comments, ordering, and every key this
     knows nothing about, which is most of the file.
     """
+    if not key or any(character.isspace() for character in key):
+        # python-dotenv drops such a line on read, so the write would look like a
+        # success and produce a setting that never loads.
+        raise ValueError(f"an env key cannot contain whitespace: {key!r}")
+
     backup = None
     if env_path.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_UTC")
@@ -291,7 +314,10 @@ def main() -> None:
         session_string = StringSession.save(client.session)
 
         if label:
-            env_var = f"TELEGRAM_SESSION_STRING_{label.upper()}"
+            safe = normalise_label(label)
+            if safe != label.strip():
+                print(hint(f"Saving under '{safe}' - a key cannot contain a space."))
+            env_var = f"TELEGRAM_SESSION_STRING_{safe.upper()}"
         else:
             env_var = "TELEGRAM_SESSION_STRING"
 

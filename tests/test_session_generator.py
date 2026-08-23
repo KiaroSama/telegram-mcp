@@ -189,3 +189,50 @@ def test_the_label_argument_skips_the_second_prompt(generator, monkeypatch):
     assert generator._parse_args().label == "kgb_verifier"
     monkeypatch.setattr(sys, "argv", ["session_string_generator.py"])
     assert generator._parse_args().label is None
+
+
+def test_a_typed_label_becomes_a_key_dotenv_can_read(generator):
+    """Found live: the generator wrote `TELEGRAM_SESSION_STRING_KGB VERIFIER=...`.
+
+    python-dotenv drops a line whose key contains a space, warning only on stderr, so
+    the account sat in .env looking correct and never loaded. The account manager
+    already normalised; the generator's own path did not.
+    """
+    cases = {
+        "KGB Verifier": "KGB_Verifier",
+        "  Work  Account  ": "Work_Account",  # a run of spaces collapses to one _
+        "my-second-phone": "my_second_phone",
+        "Personal": "Personal",
+        "_padded_": "padded",
+    }
+    for typed, expected in cases.items():
+        got = generator.normalise_label(typed)
+        assert got == expected, f"{typed!r} became {got!r}, expected {expected!r}"
+        assert not any(c.isspace() for c in got), f"{typed!r} kept whitespace"
+
+
+def test_writing_a_key_with_whitespace_is_refused(generator, tmp_path):
+    """Defence in depth: such a key is silently unreadable, so a 'successful' write
+    is worse than an error - it produces a setting that can never load."""
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="whitespace"):
+        generator.write_env_value("TELEGRAM_SESSION_STRING_KGB VERIFIER", "1AAA", env)
+
+    assert env.read_text(encoding="utf-8") == "TELEGRAM_API_ID=1\n", "the file was touched anyway"
+
+
+def test_a_normalised_key_round_trips_through_dotenv(generator, tmp_path):
+    """The end-to-end property that actually matters: write it, then read it back
+    with the same parser the server uses."""
+    from dotenv import dotenv_values
+
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\n", encoding="utf-8")
+    label = generator.normalise_label("KGB Verifier")
+
+    generator.write_env_value(f"TELEGRAM_SESSION_STRING_{label.upper()}", "1AAAsession", env)
+
+    parsed = dotenv_values(env)
+    assert parsed.get("TELEGRAM_SESSION_STRING_KGB_VERIFIER") == "1AAAsession"
