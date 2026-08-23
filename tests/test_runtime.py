@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
-from telethon.tl.types import Channel, Chat, PeerUser, User
+from telethon.tl.types import Channel, Chat, User
 
 from telegram_mcp import runtime
 
@@ -331,21 +331,13 @@ def test_entity_type_filter_and_formatting_helpers():
 
 def test_message_formatting_sender_and_engagement_helpers():
     message = SimpleNamespace(
-        id=42,
         date=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        message="hello\x00world",
-        from_id=PeerUser(user_id=99),
-        media=SimpleNamespace(),
         sender=SimpleNamespace(first_name="Jane", last_name="Doe"),
         views=10,
         forwards=2,
         reactions=SimpleNamespace(results=[SimpleNamespace(count=3), SimpleNamespace(count=None)]),
     )
 
-    formatted = runtime.format_message(message)
-    assert formatted["from_id"] == 99
-    assert formatted["has_media"] is True
-    assert formatted["text"] == "helloworld"
     assert runtime.get_sender_name(message) == "Jane Doe"
     assert runtime.get_sender_name(SimpleNamespace(sender=None)) == "Unknown"
     assert (

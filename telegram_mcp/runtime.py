@@ -600,27 +600,6 @@ async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
     return await _resolve("get_input_entity", identifier, client, "input entity")
 
 
-def format_message(message) -> Dict[str, Any]:
-    """Helper function to format message information consistently.
-
-    Message text is sanitized to prevent prompt injection.
-    """
-    result = {
-        "id": message.id,
-        "date": message.date.isoformat(),
-        "text": sanitize_user_content(message.message),
-    }
-
-    if message.from_id:
-        result["from_id"] = utils.get_peer_id(message.from_id)
-
-    if message.media:
-        result["has_media"] = True
-        result["media_type"] = type(message.media).__name__
-
-    return result
-
-
 def get_sender_name(message) -> str:
     """Helper function to get sender name from a message.
 

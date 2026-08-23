@@ -494,9 +494,6 @@ except Exception as log_error:
     logger.error(f"Failed to set up log file handler: {log_error}")
 
 
-# Error code prefix mapping for better error tracing
-
-
 __all__ = [
     "_CONN_VERIFY_INTERVAL",
     "_PROXY_TYPES_ALL",
