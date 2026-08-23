@@ -83,7 +83,7 @@ def test_install_guard_rejects_known_pypi_collision_metadata():
     assert "Refusing to start" in message
     assert "0.6.3" in message
     assert "Furkan Kucuk" in message
-    assert "git+https://github.com/chigwell/telegram-mcp.git" in message
+    assert "git+https://github.com/KiaroSama/telegram-mcp.git" in message
 
 
 def test_install_guard_rejects_spoofed_metadata_without_trusted_origin():

@@ -11,16 +11,24 @@ authors = [
     {name = "KiaroSama"}
 ]
 license = {text = "Proprietary"}
+# "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
+# upload carrying it. That is deliberate: the telegram-mcp name on PyPI belongs to a
+# different project, and install_guard.py already refuses a PyPI-installed copy at
+# import. Delete this line first if publication ever becomes intentional.
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: Other/Proprietary License",
+    "Private :: Do Not Upload",
+    # The floor is 3.11 because the suite needs it: tests/test_packaging.py imports
+    # tomllib with no fallback. Nothing in the runtime forces it, so this is a
+    # support decision - claim only what CI exercises.
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12"
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13"
 ]
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
     "httpx>=0.28.1",
     "mcp[cli]>=1.8.0,<2",
@@ -49,7 +57,7 @@ lottie = [
 
 [project.urls]
 "Homepage" = "https://github.com/KiaroSama/telegram-mcp"
-"Bug Tracker" = "https://github.com/chigwell/telegram-mcp/issues"
+"Bug Tracker" = "https://github.com/KiaroSama/telegram-mcp/issues"
 
 [tool.setuptools]
 py-modules = ["main", "sanitize", "session_string_generator"]
