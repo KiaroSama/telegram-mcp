@@ -338,6 +338,10 @@ session string obtained some other way, and what you paste there is validated.
 Both writers back `.env` up to `.env.backup-<UTC>` first. There is only one owner of the
 line at a time: if the generator saved it, the menu says so and asks for nothing further.
 
+The generator shares the menu's palette (`telegram_mcp/console_theme.py` carries it for
+Python, `Manage-Accounts.ps1` for PowerShell, and `tests/test_console_theme.py` compares
+the two so they cannot drift), and it skips the parts the menu has already said or asked.
+
 The menu follows the same convention as the other launchers in this family: `0` steps
 back one level and `exit` leaves, shown at each prompt as `{back=0, quit=exit}` with the
 two keys in different colours. The main menu shows only `{quit=exit}`, because there is

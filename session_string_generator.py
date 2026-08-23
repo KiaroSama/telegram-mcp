@@ -36,6 +36,7 @@ from telethon import errors
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telegram_mcp.client_identity import client_identity_kwargs
+from telegram_mcp.console_theme import default_hint, failure, heading, hint, note
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
 
 # How many times the QR code is regenerated after expiry before giving up.
@@ -118,7 +119,9 @@ def _check_installation() -> None:
 def _render_qr(qr) -> None:
     import qrcode
 
-    print("\n----- QR Code Login -----\n")
+    print()
+    print(heading("QR code login"))
+    print()
 
     qr_obj = qrcode.QRCode(border=1)
     qr_obj.add_data(qr.url)
@@ -127,11 +130,12 @@ def _render_qr(qr) -> None:
     qr_obj.print_ascii(out=f, invert=True)
     print(f.getvalue())
 
-    print("Scan the QR code above with your Telegram app:")
-    print("  Open Telegram > Settings > Devices > Link Desktop Device\n")
+    print(note("Scan the QR code above with your Telegram app:"))
+    print(hint("  Open Telegram > Settings > Devices > Link Desktop Device"))
+    print()
     print(f"Or open this link on a device where you're logged in:\n  {qr.url}\n")
-    print(f"Expires at: {qr.expires.strftime('%H:%M:%S')}")
-    print("Waiting for you to scan...")
+    print(hint(f"Expires at: {qr.expires.strftime('%H:%M:%S')}"))
+    print(hint("Waiting for you to scan..."))
 
 
 def _seconds_until_expiry(qr) -> float:
@@ -153,13 +157,15 @@ def _qr_login(client: TelegramClient) -> None:
             return
         except asyncio.TimeoutError:
             client.loop.run_until_complete(qr.recreate())
-            print("\nQR code expired, here is a fresh one.")
+            print()
+            print(note("That QR code expired. Here is a fresh one."))
             _render_qr(qr)
         except errors.SessionPasswordNeededError:
             _sign_in_with_password(client)
             return
 
-    print("\nQR code expired too many times. Please run the generator again.")
+    print()
+    print(failure("The QR code expired too many times. Run the generator again."))
     client.disconnect()
     sys.exit(1)
 
@@ -176,13 +182,13 @@ def _sign_in_with_password(client: TelegramClient) -> None:
     while True:
         pw = getpass.getpass("\nTwo-factor authentication enabled. Please enter your password: ")
         if not pw:
-            print("No password entered. Press Ctrl+C to give up, or try again.")
+            print(note("No password entered. Press Ctrl+C to give up, or try again."))
             continue
         try:
             client.sign_in(password=pw)
             return
         except errors.PasswordHashInvalidError:
-            print("That password was not accepted. Try again.")
+            print(failure("That password was not accepted. Try again."))
 
 
 def _phone_login(client: TelegramClient) -> None:
@@ -191,15 +197,18 @@ def _phone_login(client: TelegramClient) -> None:
     try:
         client.send_code_request(phone)
     except errors.FloodWaitError as e:
-        print(f"\nFlood wait error; you must wait {e.seconds} seconds before trying again.")
+        print()
+        print(failure(f"Telegram asked for a wait of {e.seconds} seconds before trying again."))
         client.disconnect()
         sys.exit(1)
     except errors.PhoneNumberInvalidError:
-        print("\nThe phone number is invalid.")
+        print()
+        print(failure("That phone number is not valid."))
         client.disconnect()
         sys.exit(1)
     except Exception as e:
-        print(f"\nError sending code: {e}")
+        print()
+        print(failure(f"Telegram would not send the code: {e}"))
         client.disconnect()
         sys.exit(1)
 
@@ -218,19 +227,24 @@ def main() -> None:
     API_HASH = os.getenv("TELEGRAM_API_HASH")
 
     if not API_ID or not API_HASH:
-        print("Error: TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env file")
-        print("Create an .env file with your credentials from https://my.telegram.org/apps")
+        print(failure("TELEGRAM_API_ID and TELEGRAM_API_HASH must be set in .env."))
+        print(hint("Get them from https://my.telegram.org/apps, then put them in .env."))
         sys.exit(1)
 
     try:
         API_ID = int(API_ID)
     except ValueError:
-        print("Error: TELEGRAM_API_ID must be an integer")
+        print(failure("TELEGRAM_API_ID must be a number."))
         sys.exit(1)
 
-    print("\n----- Telegram Session String Generator -----\n")
-    print("This script will generate a session string for your Telegram account.")
-    print("The generated session string can be added to your .env file.")
+    print()
+    print(heading("Telegram session string generator"))
+    print()
+    if args.label is None:
+        # Skipped when the account manager is the caller: it has just explained the
+        # same thing, and saying it twice in two styles is what prompted this.
+        print("This script will generate a session string for your Telegram account.")
+        print("The generated session string can be added to your .env file.")
     print(
         "\nYour credentials will NOT be stored on any server and are only used for local authentication.\n"
     )
@@ -257,10 +271,12 @@ def main() -> None:
     elif args.phone:
         method = "2"
     else:
-        print("\nChoose login method:")
+        print()
+        print(heading("Choose login method:"))
         print("  1) QR code login (recommended -- scan from your Telegram app)")
         print("  2) Phone number + verification code")
-        method = input("\nEnter 1 or 2 [default: 1]: ").strip() or "1"
+        print()
+        method = input(f'Selection {default_hint("[1]")}: ').strip() or "1"
 
     try:
         client = TelegramClient(StringSession(), API_ID, API_HASH, **client_identity_kwargs())
@@ -279,15 +295,18 @@ def main() -> None:
         else:
             env_var = "TELEGRAM_SESSION_STRING"
 
-        print("\nAuthentication successful!")
-        print("\n----- Your Session String -----")
+        print()
+        print(heading("Authentication successful."))
+        print(heading("Your session string"))
         print(f"\n{session_string}\n")
         print("Add this to your .env file as:")
         print(f"{env_var}={session_string}")
-        print("\nIMPORTANT: Keep this string private and never share it with anyone!")
+        print()
+        print(note("This string is a full login to that account. Never share it."))
 
         try:
-            choice = input("\nSave this to your .env file as " f"{env_var}? [Y/n]: ")
+            print()
+            choice = input(f'Save it to .env as {env_var}? {default_hint("[Y/n]")}: ')
         except EOFError:
             # Nothing is reading the prompt, so nothing can confirm it either.
             choice = "n"
@@ -297,17 +316,18 @@ def main() -> None:
                 print("")
                 print(f".env updated: {env_var} is saved.")
                 if backup:
-                    print(f"The previous file is kept as {backup.name}.")
+                    print(hint(f"The previous file is kept as {backup.name}."))
             except Exception as e:
                 print("")
                 print(f"Error updating .env file: {e}")
-                print("Please manually add the session string to your .env file.")
+                print(hint("Add the session string to .env by hand instead."))
 
         client.disconnect()
 
     except Exception as e:
-        print(f"\nError: {e}")
-        print("Failed to generate session string. Please try again.")
+        print()
+        print(failure(f"{e}"))
+        print(failure("No session string was generated."))
         sys.exit(1)
 
 

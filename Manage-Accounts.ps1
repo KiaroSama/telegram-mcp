@@ -338,19 +338,20 @@ function Show-Accounts {
 }
 
 function Invoke-SessionGenerator {
-    param([string] $Label)
+    param(
+        [string] $Label,
+        # Add-Account has just asked whether to generate one. Asking again here is
+        # the same question twice in a row, which is what a caller reports as noise.
+        [switch] $AlreadyConfirmed
+    )
 
-    Write-Host ''
-    Write-Host (Get-Painted -Text 'The generator will ask how you want to log in:' -ColorName 'LightBlue')
-    Write-Host '  QR code    - scan it in Telegram under Settings > Devices > Link Desktop Device'
-    Write-Host '  Phone code - enter the number, then the code Telegram sends'
     Write-Host ''
     Write-Host 'Log in as the account you want to ADD, not one already configured.'
     if ($Label) {
         Write-Hint "It will save the result as '$Label' - press Enter when it offers to."
     }
     Write-Host ''
-    if (-not (Read-Confirmation 'Run the session generator now?')) { return }
+    if (-not $AlreadyConfirmed -and -not (Read-Confirmation 'Run the session generator now?')) { return }
 
     # No --qr / --phone here on purpose: without a flag the generator asks, so the
     # choice always matches whatever methods it actually supports.
@@ -448,7 +449,7 @@ function Add-Account {
     Write-Host ''
     Write-Host (Get-Painted -Text 'A session string authorises full access to that Telegram account.' -ColorName 'NoteYellow')
     if (Read-Confirmation 'Do you need to generate one first?') {
-        Invoke-SessionGenerator -Label $label
+        Invoke-SessionGenerator -Label $label -AlreadyConfirmed
 
         # The generator can write the line itself now. Asking for a paste after it
         # already did would be asking someone to copy a 350-character secret across
