@@ -301,11 +301,19 @@ async def test_ensure_connected_refuses_interactive_login_for_an_unauthorized_cl
     """
     client = _ConnectivityClient(connected=False, authorized=False)
     monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
 
     with pytest.raises(RuntimeError, match="session_string_generator.py"):
         await runtime.ensure_connected(client)
 
-    assert client.calls == ["is_connected", "disconnect", "connect", "is_user_authorized"]
+    # The second is_connected is _force_reconnect's post-lock re-check.
+    assert client.calls == [
+        "is_connected",
+        "is_connected",
+        "disconnect",
+        "connect",
+        "is_user_authorized",
+    ]
     assert "start" not in client.calls, "called the blocking thing"
     assert id(client) not in connection._last_conn_verified, "recorded a failed reconnect"
 
@@ -329,6 +337,69 @@ async def test_ensure_connected_skips_recently_verified_client(monkeypatch):
     await runtime.ensure_connected(client)
 
     assert client.calls == ["is_connected"]
+
+
+@pytest.mark.asyncio
+async def test_a_rate_limit_answer_is_proof_the_connection_is_alive(monkeypatch):
+    """FloodWaitError means the server RECEIVED the request, understood it, and is
+    throttling the account. Tearing the connection down and dialling again under a
+    flood wait is exactly the wrong response — and `except (..., Exception)` made
+    every RPC refusal look like a dead socket."""
+    from telethon import errors
+
+    client = _ConnectivityClient(
+        connected=True, authorized=True, ping_error=errors.FloodWaitError(request=None)
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await runtime.ensure_connected(client)
+
+    assert client.calls == ["is_connected", "ping"], f"reconnected on a rate limit: {client.calls}"
+    assert connection._last_conn_verified[id(client)] > 0, "the probe answered — record it"
+
+
+@pytest.mark.asyncio
+async def test_a_chat_level_refusal_is_also_proof_the_connection_is_alive(monkeypatch):
+    """Any RPCError is the server talking back. The probe is help.GetNearestDc, so a
+    refusal is unusual — but the rule is about what an answer PROVES, not about which
+    error arrived."""
+    from telethon import errors
+
+    client = _ConnectivityClient(
+        connected=True,
+        authorized=True,
+        ping_error=errors.rpcerrorlist.ChatAdminRequiredError(request=None),
+    )
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await runtime.ensure_connected(client)
+
+    assert client.calls == ["is_connected", "ping"]
+
+
+@pytest.mark.asyncio
+async def test_two_callers_do_not_interleave_a_reconnect_on_a_shared_client(monkeypatch):
+    """The client is shared per account, so two tool calls that both find the socket
+    dead used to race: A disconnects, B disconnects, A connects, B tears down the
+    connection A just brought up."""
+
+    class _SlowConnectClient(_ConnectivityClient):
+        async def connect(self):
+            self.calls.append("connect")
+            await asyncio.sleep(0)  # a real yield point, exactly like a socket dial
+            await asyncio.sleep(0)
+            self.connected = True
+
+    client = _SlowConnectClient(connected=False, authorized=True)
+    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+
+    await asyncio.gather(runtime.ensure_connected(client), runtime.ensure_connected(client))
+
+    assert client.calls.count("connect") == 1, f"reconnected twice: {client.calls}"
+    assert client.calls.count("disconnect") == 1, f"disconnected twice: {client.calls}"
 
 
 class _HangingConnectClient(_ConnectivityClient):

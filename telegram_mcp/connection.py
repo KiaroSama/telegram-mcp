@@ -29,7 +29,7 @@ from typing import Any, List, Optional
 
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions
-from telethon.errors import AuthKeyDuplicatedError
+from telethon.errors import AuthKeyDuplicatedError, RPCError
 from telethon.sessions import StringSession
 
 from telegram_mcp.client_identity import client_identity_kwargs
@@ -337,53 +337,70 @@ def with_account(readonly=False):
 
 
 _last_conn_verified: dict[int, float] = {}
+_RECONNECT_LOCKS: dict[int, asyncio.Lock] = {}
 _CONN_VERIFY_INTERVAL: float = 30.0  # seconds between live pings
 _RECONNECT_TIMEOUT: float = 30.0  # seconds before a reconnect attempt is abandoned
 
 
 async def _force_reconnect(cl: TelegramClient):
-    """Force disconnect + reconnect regardless of is_connected() state."""
-    reconnect_logger = logging.getLogger("telegram_mcp")
-    reconnect_logger.warning("Forcing reconnect...")
-    try:
-        await cl.disconnect()
-    except Exception:
-        pass
-    try:
-        await asyncio.wait_for(cl.connect(), timeout=_RECONNECT_TIMEOUT)
-    except AuthKeyDuplicatedError as exc:
-        # Telegram permanently invalidates an auth key used from two IPs at
-        # once, so retrying here can never succeed — surface it instead of
-        # letting the caller sit in a reconnect loop.
-        raise RuntimeError(
-            "Telegram session is no longer usable: the same session string was "
-            "used by another client at the same time (AuthKeyDuplicatedError). "
-            "Give each concurrent client its own session via "
-            "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
-            "regenerate the burned session with `uv run session_string_generator.py`."
-        ) from exc
-    except asyncio.TimeoutError as exc:
-        raise RuntimeError(
-            f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
-        ) from exc
-    if not await cl.is_user_authorized():
-        reconnect_logger.error("Client not authorized after reconnect; refusing interactive login")
-        # A raise, not a call to Telethon's start(). That method defaults to
-        # `phone=lambda: input(...)` — a synchronous read inside a coroutine, which
-        # blocks the whole event loop, and on stdio it reads the same stdin the MCP
-        # protocol speaks over. Wrapping it in asyncio.wait_for cannot save us: the
-        # timeout is scheduled on the very loop input() has stopped, so it never
-        # fires. The server would hang silently and permanently. runner.py refuses
-        # the same thing at startup for the same reason.
-        raise RuntimeError(
-            "Telegram session is no longer authorized. Interactive phone login is "
-            "disabled for the MCP server because it runs over stdio. Regenerate the "
-            "session with `uv run session_string_generator.py` and update "
-            "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env; "
-            "`Manage-Accounts.ps1` does both for a labelled account."
-        )
-    _last_conn_verified[id(cl)] = time.time()
-    reconnect_logger.warning("Forced reconnect successful")
+    """Disconnect + reconnect this client, one caller at a time.
+
+    The client object is SHARED: every tool call for an account gets the same one
+    from `clients`. Two concurrent callers that both found the socket dead used to
+    interleave here — A disconnects, B disconnects, A connects, B tears down the
+    connection A just brought up. The lock serialises them; the re-check after
+    acquiring it means the second caller returns instead of reconnecting a client
+    the first one already fixed.
+    """
+    key = id(cl)
+    async with _RECONNECT_LOCKS.setdefault(key, asyncio.Lock()):
+        if cl.is_connected() and time.time() - _last_conn_verified.get(key, 0.0) < (
+            _CONN_VERIFY_INTERVAL
+        ):
+            return
+        reconnect_logger = logging.getLogger("telegram_mcp")
+        reconnect_logger.warning("Forcing reconnect...")
+        try:
+            await cl.disconnect()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(cl.connect(), timeout=_RECONNECT_TIMEOUT)
+        except AuthKeyDuplicatedError as exc:
+            # Telegram permanently invalidates an auth key used from two IPs at
+            # once, so retrying here can never succeed — surface it instead of
+            # letting the caller sit in a reconnect loop.
+            raise RuntimeError(
+                "Telegram session is no longer usable: the same session string was "
+                "used by another client at the same time (AuthKeyDuplicatedError). "
+                "Give each concurrent client its own session via "
+                "TELEGRAM_SESSION_STRINGS or TELEGRAM_SESSION_STRING_<LABEL>, then "
+                "regenerate the burned session with `uv run session_string_generator.py`."
+            ) from exc
+        except asyncio.TimeoutError as exc:
+            raise RuntimeError(
+                f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
+            ) from exc
+        if not await cl.is_user_authorized():
+            reconnect_logger.error(
+                "Client not authorized after reconnect; refusing interactive login"
+            )
+            # A raise, not a call to Telethon's start(). That method defaults to
+            # `phone=lambda: input(...)` — a synchronous read inside a coroutine, which
+            # blocks the whole event loop, and on stdio it reads the same stdin the MCP
+            # protocol speaks over. Wrapping it in asyncio.wait_for cannot save us: the
+            # timeout is scheduled on the very loop input() has stopped, so it never
+            # fires. The server would hang silently and permanently. runner.py refuses
+            # the same thing at startup for the same reason.
+            raise RuntimeError(
+                "Telegram session is no longer authorized. Interactive phone login is "
+                "disabled for the MCP server because it runs over stdio. Regenerate the "
+                "session with `uv run session_string_generator.py` and update "
+                "TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env; "
+                "`Manage-Accounts.ps1` does both for a labelled account."
+            )
+        _last_conn_verified[key] = time.time()
+        reconnect_logger.warning("Forced reconnect successful")
 
 
 async def ensure_connected(cl: TelegramClient = None):
@@ -416,9 +433,24 @@ async def ensure_connected(cl: TelegramClient = None):
             cl(functions.help.GetNearestDcRequest()),
             timeout=5.0,
         )
+    except RPCError:
+        # The server ANSWERED — it just refused. That is proof the socket is alive,
+        # which is the only question this function asks. FloodWaitError is the case
+        # that made this matter: reconnecting while the account is rate-limited is
+        # exactly the wrong move, and the old `except (..., Exception)` caught every
+        # RPC refusal as if the transport had died.
         _last_conn_verified[key] = now
-    except (ConnectionError, OSError, asyncio.TimeoutError, Exception):
+    except Exception:
+        # Transport-level: ConnectionError / OSError / asyncio.TimeoutError, and
+        # anything else that is NOT the server talking back — including
+        # TypeNotFoundError, where Telethon could not parse the reply and the read
+        # buffer is desynchronised (see runtime.py:333-341).
+        #
+        # asyncio.CancelledError is a BaseException and is deliberately NOT caught:
+        # a cancelled tool call must not drag the shared client through a reconnect.
         await _force_reconnect(cl)
+    else:
+        _last_conn_verified[key] = now
 
 
 # Setup robust logging with both file and console output
@@ -469,6 +501,7 @@ __all__ = [
     "_CONN_VERIFY_INTERVAL",
     "_PROXY_TYPES_ALL",
     "_PROXY_TYPES_SOCKS_HTTP",
+    "_RECONNECT_LOCKS",
     "_RECONNECT_TIMEOUT",
     "_SESSION_LOCKS",
     "_acquire_session",
