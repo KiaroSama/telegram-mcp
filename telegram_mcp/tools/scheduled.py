@@ -15,7 +15,7 @@ fixed set and these two are in it.
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Optional, Union
+from typing import Any, List, Optional, Union
 
 from telegram_mcp.runtime import *
 from telegram_mcp.message_view import describe_media_label, display_text
@@ -293,11 +293,11 @@ async def edit_scheduled_message(
 @validate_id("chat_id")
 async def cancel_scheduled_message(
     chat_id: Union[int, str],
-    message_id: int,
+    message_id: Union[int, List[int]],
     account: str = None,
 ) -> str:
     """
-    Remove a message from the scheduled queue so it never sends.
+    Remove one or more messages from the scheduled queue so they never send.
 
     The counterpart to schedule_message: without it, a recurring message could be
     created and never stopped through this server, which is a trap rather than a
@@ -305,16 +305,25 @@ async def cancel_scheduled_message(
 
     Args:
         chat_id: The chat ID or username.
-        message_id: The scheduled message's ID, from list_scheduled_messages.
+        message_id: One scheduled message ID, or a list of them. IDs come from
+            list_scheduled_messages. A whole batch goes in one request.
     """
     try:
+        # A list, because DeleteScheduledMessagesRequest takes one: sending them one
+        # at a time would turn a single round trip into N.
+        ids = (
+            [int(message_id)]
+            if isinstance(message_id, (int, str))
+            else [int(m) for m in message_id]
+        )
+        if not ids:
+            return "message_id must not be an empty list."
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
-        await cl(
-            functions.messages.DeleteScheduledMessagesRequest(peer=entity, id=[int(message_id)])
-        )
-        return f"Scheduled message {message_id} was removed from chat {chat_id}'s queue."
+        await cl(functions.messages.DeleteScheduledMessagesRequest(peer=entity, id=ids))
+        removed = ", ".join(str(i) for i in ids)
+        return f"Scheduled message(s) {removed} were removed from chat {chat_id}'s queue."
     except Exception as e:
         return log_and_format_error(
             "cancel_scheduled_message", e, chat_id=chat_id, message_id=message_id

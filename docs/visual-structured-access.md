@@ -146,8 +146,9 @@ rescheduling to now; omitting `message` keeps the current text. `repeat="off"` s
 `edit_scheduled_message("me", 12, when="2026-09-02T08:00:00Z")`
 
 **`cancel_scheduled_message(chat_id, message_id, account=None) -> str`**
-Remove it from the queue so it never sends. Nothing already delivered is touched.
-`cancel_scheduled_message("me", 12)`
+Remove one or more from the queue so they never send. `message_id` is a single ID or a
+list of them; a batch goes in one request. Nothing already delivered is touched.
+`cancel_scheduled_message("me", 12)` · `cancel_scheduled_message("me", [12, 13])`
 
 ### Self-destructing media
 
