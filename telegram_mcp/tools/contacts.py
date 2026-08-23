@@ -532,8 +532,11 @@ async def import_contacts(contacts: list, account: Optional[str] = None) -> str:
     try:
         cl = get_client(account)
         await ensure_connected(cl)
+        # types, not functions: InputPhoneContact is a TL *type*, and the same file
+        # already imports it from the right place in add_contact. Spelled this way it
+        # raised AttributeError on every call, so no import ever reached Telegram.
         input_contacts = [
-            functions.contacts.InputPhoneContact(
+            types.InputPhoneContact(
                 client_id=i,
                 phone=c["phone"],
                 first_name=c["first_name"],

@@ -228,14 +228,10 @@ async def test_blocking_and_unblocking_send_the_resolved_user(_wire, tool, reque
 # --- importing in bulk -------------------------------------------------------
 
 
-@pytest.mark.xfail(
-    reason=(
-        "contacts.py:536 builds functions.contacts.InputPhoneContact, which does not "
-        "exist — InputPhoneContact lives in telethon.tl.types. Every import_contacts "
-        "call raises AttributeError and returns an error code instead of importing."
-    ),
-    strict=True,
-)
+# Was xfail(strict=True) when this test was written: contacts.py built
+# functions.contacts.InputPhoneContact, which does not exist, so every import_contacts
+# call raised AttributeError and returned an error code instead of importing anybody.
+# Fixed to types.InputPhoneContact; the test is a regression guard now.
 @pytest.mark.asyncio
 async def test_import_contacts_builds_one_input_phone_contact_per_row(_wire):
     """Each row needs its own client_id: Telegram keys the import result by it, so
