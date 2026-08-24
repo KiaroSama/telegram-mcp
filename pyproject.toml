@@ -136,12 +136,17 @@ source = [
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# A measured floor, not an aspiration. Measured 2026-08-24: this list reports
-# 88.12% over 3519 statements and 1230 branches, on Windows where the Win32
-# capture tests run. CI measures lower because it runs ubuntu-latest, where the
-# genuinely Windows-only capture tests skip - that gap is the reason the floor is
-# 85 and not the measured number.
-# The floor is not raised to match: it would then fail on Linux while passing
-# here, which is how a gate stops meaning anything. Raise it only with a Linux
-# measurement in hand.
+# A measured floor, not an aspiration. Measured 2026-08-24: 88.09% over 3626
+# statements and 1270 branches on Windows, where the Win32 capture tests run.
+#
+# The CI job measures lower, for two reasons rather than one: it runs
+# ubuntu-latest, where the genuinely Windows-only capture tests skip, AND it
+# installs no optional rlottie, so every test gated on the renderer skips too.
+# An external audit measured 84.52% there - below this floor - while this host
+# read 88%.
+# Deselecting both groups here reproduces that: 84.75% at the audited commit
+# against the auditor's 84.52%, so the simulation runs ~0.2 points optimistic.
+# The same simulation now reads 86.34%, putting the CI job near 86%.
+# The floor stays 85 because an estimate is not a measurement: raise it only
+# with a real Linux number in hand.
 fail_under = 85
