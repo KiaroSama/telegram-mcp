@@ -196,6 +196,8 @@ claude_desktop_config.json
 .cursor/
 *.tmp
 mcp_errors.log
+# The logger rotates, so the numbered siblings are the same artifact.
+mcp_errors.log.*
 telegram_test.log
 test_issues_report.md
 
