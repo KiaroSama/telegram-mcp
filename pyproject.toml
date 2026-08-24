@@ -136,13 +136,12 @@ source = [
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# A measured floor, not an aspiration. Measured 2026-08-23: this list reports
-# 85.57% over 3015 statements and 1088 branches. The floor stays 85, but it now
-# means something: the previous 85 was justified by a 2026-08-16 measurement of
-# 2053 statements, and three refactors had since moved ~1678 lines out of the
-# measured set without removing a single test, so the gate was scoring a
-# shrinking fraction of the code it claimed to cover.
-# Raising the floor is a separate, deliberate change once the largest Missing
-# ranges get tests. Worst first: session_string_generator.py (52%),
-# runner.py (57%), media_preview.py (68%), visual/capture.py (75%).
+# A measured floor, not an aspiration. Measured 2026-08-24: this list reports
+# 88.17% over 3294 statements and 1168 branches, on Windows where the Win32
+# capture tests run. CI measures lower because it runs ubuntu-latest, where the
+# genuinely Windows-only capture tests skip - that gap is the reason the floor is
+# 85 and not the measured number.
+# The floor is not raised to match: it would then fail on Linux while passing
+# here, which is how a gate stops meaning anything. Raise it only with a Linux
+# measurement in hand.
 fail_under = 85

@@ -635,20 +635,20 @@ tests/                        # pytest suite, plus PowerShell suites for the lau
 Run tests:
 
 ```bash
-uv run pytest
+uv run python scripts/run_tests_guarded.py --
 ```
 
 The `.tgs` Lottie tests skip unless the optional renderer is installed, which is also how the
 base install stays verified. To exercise that path too:
 
 ```bash
-uv run --extra lottie pytest
+uv run --extra lottie python scripts/run_tests_guarded.py --
 ```
 
 Run tests with coverage:
 
 ```bash
-uv run pytest --cov --cov-report=term-missing --cov-report=xml
+uv run python scripts/run_tests_guarded.py -- --cov --cov-report=term-missing --cov-report=xml
 ```
 
 Coverage is configured in `pyproject.toml` (`fail_under` under `[tool.coverage.report]`), currently a 85% minimum gate for the deterministic, unit-testable modules listed in `[tool.coverage.run] source`. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
@@ -726,10 +726,11 @@ Proprietary, so this is the maintainer's own loop rather than a contribution gui
 5. Run checks locally:
    - `uv run pre-commit run --all-files`
    - `uv run pre-commit run --hook-stage pre-push --all-files`
-6. Run the suite through the guarded runner, not raw `pytest` — an unbounded test run
-   has no wall ceiling and no process-tree cleanup, so a hang cannot be proven cleaned up.
-   This project drives ffmpeg, ffprobe and a native rlottie decoder, any of which can wedge
-   without exiting, and a wedged child outlives the pytest that spawned it:
+6. Every test command on this page already goes through the guarded runner, and so does
+   CI and the pre-push hook — an unbounded run has no wall ceiling and no process-tree
+   cleanup, so a hang cannot be proven cleaned up. This project drives ffmpeg, ffprobe and
+   a native rlottie decoder, any of which can wedge without exiting, and a wedged child
+   outlives the pytest that spawned it:
 
    ```bash
    uv run python scripts/run_tests_guarded.py -- -q
