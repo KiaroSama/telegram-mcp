@@ -27,7 +27,8 @@ import tempfile
 import time
 from functools import wraps
 from logging.handlers import RotatingFileHandler
-from typing import Any, List, Optional
+from pathlib import Path
+from typing import Any, Callable, List, Optional
 
 from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions
@@ -40,6 +41,12 @@ from telegram_mcp.safe_log import log_event, logger, safe_exception
 from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, ValidationError
 from telegram_mcp.settings import _parse_bool_env, state_dir
 from telegram_mcp.singleton import try_lock_exclusive
+
+# The installation, for the two things that still resolve against it: a session
+# file an older install left beside main.py, and the historic `script_dir` name
+# the tools re-export.
+package_dir = os.path.dirname(os.path.abspath(__file__))
+script_dir = os.path.dirname(package_dir)
 
 # ---------------------------------------------------------------------------
 # Multi-account configuration
@@ -152,8 +159,128 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
     return proxy, None
 
 
+# --- File-based sessions -----------------------------------------------------
+#
+# A `.session` file IS the account. It is a SQLite database holding the auth
+# key, and whoever can read it is logged in as that account with no password
+# and no second factor -- Telethon's own docstring says as much. It was being
+# created wherever the process happened to start, with whatever the umask gave
+# it (0644 on a normal host) and, on Windows, readable by every account on the
+# machine.
+
+# SQLite writes alongside the database it opens. A `-journal` holds pages of
+# the same file mid-write, and `-wal`/`-shm` hold them for as long as the
+# connection lives, so restricting only the `.session` restricts nothing while
+# a write is in flight.
+_SESSION_SIDECARS = ("", "-journal", "-wal", "-shm")
+
+
+def session_file_path(name: str) -> Path:
+    """Where a file-based session lives.
+
+    A bare name goes in the private state directory, beside the alias store and
+    the log: not in the git checkout, not wherever the client happened to spawn
+    the server from, and in a directory this module can make owner-only.
+
+    An explicit path is honoured where the operator put it, and so is a session
+    already sitting beside the installation or in the working directory. That
+    is deliberate rather than a migration: moving a session database is moving
+    the account, and a live client on the other end of it may hold the file
+    open. An existing install keeps working, and gets hardened where it is.
+    """
+    candidate = Path(name)
+    stem = candidate.name if candidate.name.endswith(".session") else candidate.name + ".session"
+    if candidate.is_absolute() or len(candidate.parts) > 1:
+        return candidate.parent / stem
+    for legacy in (Path(script_dir) / stem, Path.cwd() / stem):
+        if legacy.exists():
+            return legacy
+    return state_dir() / stem
+
+
+def harden_session_files(path, restrict: Optional[Callable[[Any], bool]] = None) -> bool:
+    """Owner-only on a session database, every sidecar, and the directory.
+
+    The directory matters as much as the files: SQLite creates a `-journal` at
+    write time with whatever the umask gives it, and a directory nobody else can
+    traverse is what bounds the ones this call did not see. **Only the state
+    directory is treated that way** -- it is the one this server created for
+    itself. A session the operator put somewhere of their own lives in a
+    directory that is theirs, and locking it down would strip the permissions
+    off whatever else is in it. (Measured: with a legacy session in the working
+    directory, this took the inherited ACL off the whole project checkout.)
+
+    Repairs rather than refuses. A permission bit the operator cannot see is a
+    bad reason to leave a working server unable to start; an unrepairable one
+    is reported, and the return value says which happened.
+    """
+    restrict = restrict or restrict_to_owner
+    path = Path(path)
+    applied = True
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as error:
+        log_event(
+            logging.WARNING,
+            "could not create the directory for the Telegram session file",
+            error=error,
+        )
+        return False
+    if path.parent == state_dir():
+        applied = bool(restrict(path.parent)) and applied
+    for suffix in _SESSION_SIDECARS:
+        sibling = Path(str(path) + suffix)
+        if sibling.exists():
+            applied = bool(restrict(sibling)) and applied
+    if not applied:
+        # No path in the message: where an operator keeps their account is not
+        # something a log file needs to record.
+        log_event(
+            logging.WARNING,
+            "could not restrict the Telegram session file to its owner; "
+            "anyone who can read it is signed in as this account",
+        )
+    return applied
+
+
+def harden_env_file(path=None, restrict: Optional[Callable[[Any], bool]] = None) -> None:
+    """Make the credential file readable by its owner alone.
+
+    `.env` holds TELEGRAM_API_HASH and, in the single-account setup the README
+    shows first, a full session string -- either of which is the account. The
+    documented `cp .env.example .env` copies the example's mode, which a normal
+    umask leaves at 0644.
+
+    The file is never opened here: only its mode/ACL is touched. An install
+    configured entirely through real environment variables has no `.env` at
+    all, which is a supported setup rather than a failure.
+    """
+    restrict = restrict or restrict_to_owner
+    if path is None:
+        from dotenv import find_dotenv
+
+        found = find_dotenv(usecwd=True)
+        if not found:
+            return
+        path = found
+    target = Path(path)
+    if not target.is_file():
+        return
+    if not restrict(target):
+        log_event(
+            logging.WARNING,
+            "could not restrict the .env file to its owner; it holds the API "
+            "hash and may hold a session string",
+        )
+
+
 def _build_client(session: Any, label: str) -> TelegramClient:
-    """Construct a ``TelegramClient`` honoring per-label proxy configuration."""
+    """Construct a ``TelegramClient`` honoring per-label proxy configuration.
+
+    A string session is a name, not a path: it is resolved to the private state
+    directory (unless the operator named one) and the database Telethon creates
+    in its constructor is restricted before this returns.
+    """
     proxy, connection = _build_proxy_for_label(label)
     kwargs: dict[str, Any] = {}
     if proxy is not None:
@@ -161,7 +288,19 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     if connection is not None:
         kwargs["connection"] = connection
     kwargs.update(client_identity_kwargs())
-    return TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
+
+    session_path = None
+    if isinstance(session, str):
+        session_path = session_file_path(session)
+        # The directory has to exist and be private BEFORE SQLite creates the
+        # database in it, or the file is briefly world-readable.
+        harden_session_files(session_path)
+        session = str(session_path)
+
+    client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
+    if session_path is not None:
+        harden_session_files(session_path)
+    return client
 
 
 # --- Session pool ------------------------------------------------------------
@@ -682,8 +821,6 @@ console_handler.addFilter(RedactingFilter())
 # inheriting whatever that directory grants, and unwritable wherever the
 # install is read-only. Same location as the alias store and file sessions, so
 # there is one directory to lock down.
-package_dir = os.path.dirname(os.path.abspath(__file__))
-script_dir = os.path.dirname(package_dir)
 _log_directory = state_dir()
 log_file_path = str(_log_directory / "mcp_errors.log")
 
@@ -725,12 +862,15 @@ __all__ = [
     "console_handler",
     "ensure_connected",
     "get_client",
+    "harden_env_file",
+    "harden_session_files",
     "is_multi_mode",
     "log_event",
     "log_file_path",
     "logger",
     "package_dir",
     "restrict_to_owner",
+    "session_file_path",
     "safe_exception",
     "script_dir",
     "with_account",

@@ -25,20 +25,31 @@ class _FakeTelegramClient:
         self.kwargs = kwargs
 
 
+class _FakeStringSession:
+    def __init__(self, value):
+        self.value = value
+
+
 def test_discover_accounts_supports_suffixed_and_default_sessions(monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK", "work-session")
     monkeypatch.setenv("TELEGRAM_SESSION_NAME_PERSONAL", "personal.session")
     monkeypatch.setenv("TELEGRAM_SESSION_STRING", "default-session")
     monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
-    monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
+    # An object, not a string: that is what `StringSession` really returns, and
+    # it is how a string session is told apart from a file-session NAME, which
+    # gets resolved to a real location before Telethon sees it.
+    monkeypatch.setattr(connection, "StringSession", _FakeStringSession)
 
     accounts = runtime._discover_accounts()
 
     assert sorted(accounts) == ["default", "personal", "work"]
-    assert accounts["work"].args[0] == "StringSession:work-session"
-    assert accounts["personal"].args[0] == "personal.session"
-    assert accounts["default"].args[0] == "StringSession:default-session"
+    assert accounts["work"].args[0].value == "work-session"
+    # A file session is resolved to a real location before Telethon sees it: a
+    # bare name used to make Telethon create the auth-key database wherever the
+    # process happened to start, with whatever the umask gave it.
+    assert accounts["personal"].args[0] == str(connection.session_file_path("personal.session"))
+    assert accounts["default"].args[0].value == "default-session"
 
 
 def test_discover_accounts_exits_when_no_sessions_configured(monkeypatch):

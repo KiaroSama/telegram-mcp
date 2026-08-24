@@ -131,11 +131,27 @@ Without a flag, the generator keeps the interactive method prompt.
 
 ### 3. Configure Environment
 
-Copy the example file and fill in your real values:
+Copy the example file and fill in your real values. Create it readable by you
+alone: it holds your API hash and, in the single-account setup below, a session
+string — and a session string is the account, with no password and no second
+factor. A plain `cp` copies the example's mode, which a normal umask leaves
+readable by every account on the machine.
 
 ```bash
-cp .env.example .env
+install -m 600 .env.example .env
 ```
+
+On Windows, `Copy-Item` then strip the inherited access. `/inheritance:r` is the
+half that matters: `icacls /grant` on its own ADDS an entry and leaves the
+inherited `BUILTIN\Users` one in place.
+
+```powershell
+Copy-Item .env.example .env
+icacls .env /inheritance:r /grant:r "${env:USERDOMAIN}\${env:USERNAME}:(F)"
+```
+
+The server re-applies this at startup on both platforms and warns if it cannot,
+so an existing `.env` gets repaired rather than silently left open.
 
 Single-account setup:
 
@@ -712,6 +728,12 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   interactive phone-code login over stdio.
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).
 - **Database is locked:** prefer string sessions, or make sure no other process is using the same file session.
+- **Where is my `.session` file?** A bare `TELEGRAM_SESSION_NAME` now resolves to
+  `$XDG_STATE_HOME/telegram-mcp/` (`~/.local/state/telegram-mcp/` by default), a directory the
+  server creates readable by you alone — the database holds your auth key, so anyone who can read
+  it is signed in as you. A session already sitting beside the installation or in the working
+  directory keeps being used where it is, and is hardened there; nothing is moved out from under a
+  running client. Give `TELEGRAM_SESSION_NAME` a path to choose the location yourself.
 - **`AuthKeyDuplicatedError` / "Another telegram-mcp process is already connected with this session":** two processes tried to connect the same Telegram session at once (e.g. an MCP client restarted the connector before the old process exited), which Telegram rejects and can invalidate the session for both. The server now takes an exclusive lock per session before connecting; a second concurrent launch waits briefly (default 20s, override with `TELEGRAM_LOCK_GRACE_SECONDS`) for the first to release it and otherwise exits without ever calling `connect()`, instead of racing into a duplicate connection. Retry once only one instance is running.
 - **File tools are disabled:** pass allowed roots or configure MCP Roots in your client.
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.

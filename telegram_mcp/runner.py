@@ -12,7 +12,7 @@ import math
 from telethon.errors import AuthKeyDuplicatedError
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, parse_port
+from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, harden_env_file, parse_port
 from telegram_mcp.safe_log import safe_exception
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
@@ -259,6 +259,11 @@ async def _main() -> None:
 
 
 def main() -> None:
+    # Startup, not import: this touches a file's permissions, and a library that
+    # does that merely by being imported is a surprise. `.env` holds the API hash
+    # and, in the single-account setup, a session string; the documented
+    # `cp .env.example .env` leaves it 0644 under a normal umask.
+    harden_env_file()
     _configure_allowed_roots_from_cli(sys.argv[1:])
     _runtime._apply_exposed_tools_mode()
     asyncio.run(_main())
