@@ -414,7 +414,7 @@ sticker effect at once, so only `get_telegram_frames`, captured while it plays, 
 ## Glass buttons: reading one, and pressing one
 
 `inspect_buttons(chat_id, message_id, resolve_icons=True)` lists a message's inline keyboard;
-`click_button(chat_id, message_id, button_index, expect_text=None)` presses one. Everything about the pair follows from
+`click_button(chat_id, message_id, button_index, expect_text)` presses one. Everything about the pair follows from
 two facts about the data.
 
 **A label is written by the sender.** It is also the thing an agent reads to decide which button
@@ -427,8 +427,10 @@ worth treating as a reason not to press.
 **An index is a position, not an identity.** Pressing by label would mean selecting by the
 attacker-controlled string, so `click_button` takes the index `inspect_buttons` published. But a
 bot can edit its own keyboard between the two calls, and the index would still resolve —
-silently, to a different button. `expect_text` closes that: supply the label you saw and a
-mismatch becomes a refusal instead of a press.
+silently, to a different button. `expect_text` closes that, and it is **required** rather than offered: an
+optional guard is one an agent in a hurry omits, and the press it omits it on is the one that needed
+it. Supply the label `inspect_buttons` reported, and a mismatch -- or an omission -- becomes a
+refusal before any callback is sent.
 
 Not every button can be pressed, and the tool says which rather than pretending:
 

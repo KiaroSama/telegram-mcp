@@ -794,7 +794,7 @@ silently drops an out-of-range timer and would send permanent media instead.
 a button label is written by whoever sent the message and can carry a bidi override that makes
 it read as a different button, so `inspect_buttons` cleans every label, flags one that changed,
 and publishes a stable index — and `click_button` presses by that index rather than by text.
-Pass `expect_text` to make the press refuse if the keyboard changed underneath it.
+`expect_text` is required: pass the label you saw at that index, and a press whose keyboard changed underneath it becomes a refusal instead of a wrong button.
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool
 reference, requirements and limitations.
