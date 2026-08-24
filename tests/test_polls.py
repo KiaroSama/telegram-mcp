@@ -333,6 +333,17 @@ async def test_restricting_to_one_option_sends_that_options_bytes(_wire):
 
 
 @pytest.mark.asyncio
+async def test_the_reported_next_offset_can_be_handed_back_for_page_two(_wire):
+    """`next_offset` came out but nothing took it in, so the second page of a
+    poll with more voters than `limit` was unreachable."""
+    client = _wire(_Client(message=_message(), votes=_votes_list()))
+
+    await get_poll_voters(1, 11, offset="page2", account="a")
+
+    assert client.sent("GetPollVotesRequest").offset == "page2"
+
+
+@pytest.mark.asyncio
 async def test_an_anonymous_poll_refuses_to_list_voters_and_says_why(_wire):
     client = _wire(_Client(message=_message(_poll(public_voters=False))))
 

@@ -579,19 +579,25 @@ async def get_message_reactions(
     chat_id: Union[int, str],
     message_id: int,
     limit: int = 50,
+    offset: str = None,
     account: str = None,
 ) -> str:
     """
-    Get the list of reactions on a message.
+    Get the list of reactions on a message, one page at a time.
 
     Args:
         chat_id: The chat ID or username
         message_id: The message ID to get reactions from
-        limit: Maximum number of users to return per reaction (default: 50)
+        limit: How many reactors this page returns in total, across every emoji
+            (default: 50). It is not a per-emoji limit.
+        offset: The `next_offset` from a previous call, to continue where it
+            stopped. Omitted starts at the newest reactor; a page answering with
+            `next_offset: null` was the last one.
     """
     try:
         cl = get_client(account)
         from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
+        from telethon import utils as telethon_utils
 
         peer = await resolve_input_entity(chat_id, cl)
 
@@ -600,15 +606,25 @@ async def get_message_reactions(
                 peer=peer,
                 id=message_id,
                 limit=limit,
+                offset=offset or None,
             )
         )
 
-        if not result.reactions:
-            return f"No reactions on message {message_id} in chat {chat_id}."
-
         reactions_data = []
-        for reaction in result.reactions:
-            user_id = reaction.peer_id.user_id if hasattr(reaction.peer_id, "user_id") else None
+        for reaction in result.reactions or []:
+            # A reactor is not always a user: a channel or a group can react as
+            # itself, and reading `peer_id.user_id` reported those as a null id
+            # indistinguishable from each other. The marked id is what every
+            # other tool here takes back as a chat_id.
+            peer_id = getattr(reaction, "peer_id", None)
+            kind = {"PeerUser": "user", "PeerChat": "chat", "PeerChannel": "channel"}.get(
+                type(peer_id).__name__
+            )
+            try:
+                reactor_id = telethon_utils.get_peer_id(peer_id)
+            except Exception:
+                reactor_id = None
+
             emoji = None
             if isinstance(reaction.reaction, ReactionEmoji):
                 emoji = reaction.reaction.emoticon
@@ -617,7 +633,11 @@ async def get_message_reactions(
 
             reactions_data.append(
                 {
-                    "user_id": user_id,
+                    "reactor_id": reactor_id,
+                    "reactor_kind": kind,
+                    # Kept so a caller written against the old shape still reads;
+                    # it is None for anything that is not a user.
+                    "user_id": reactor_id if kind == "user" else None,
                     "emoji": emoji,
                     "date": reaction.date.isoformat() if reaction.date else None,
                 }
@@ -628,7 +648,11 @@ async def get_message_reactions(
                 "message_id": message_id,
                 "chat_id": str(chat_id),
                 "reactions": reactions_data,
-                "count": len(reactions_data),
+                # The server's own total for the message, which outlives this page.
+                "count": getattr(result, "count", None),
+                "returned": len(reactions_data),
+                "offset": offset or None,
+                "next_offset": getattr(result, "next_offset", None),
             },
             indent=2,
             default=json_serializer,
