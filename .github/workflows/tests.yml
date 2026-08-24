@@ -11,6 +11,9 @@ jobs:
   test:
     name: Pytest With Coverage
     runs-on: ubuntu-latest
+    # A hung decoder would otherwise hold a runner for GitHub's 6-hour default.
+    # The guarded runner below bounds the run itself; this bounds the job around it.
+    timeout-minutes: 20
 
     # The floor and the ceiling. pyproject declares >=3.11 and classifies up to
     # 3.13; running both is what turns that claim into evidence.
@@ -36,12 +39,16 @@ jobs:
           TELEGRAM_API_ID: "12345"
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
-        run: uv run pytest --cov --cov-report=term-missing --cov-report=xml
+        run: >
+          uv run python scripts/run_tests_guarded.py --
+          --cov --cov-report=term-missing --cov-report=xml
 
       - name: Upload coverage report
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml
+          # Must be unique per matrix leg: upload-artifact@v4 refuses a second
+          # upload to the same name, so a static name fails the 3.13 job.
+          name: coverage-xml-py${{ matrix.python-version }}
           path: coverage.xml
 
   # The job above installs the base package, where the .tgs tests skip - which is
@@ -54,6 +61,9 @@ jobs:
   lottie:
     name: Pytest With Lottie Renderer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    # The native rlottie decoder is exactly the kind of child that wedges
+    # without exiting, so this job needs the ceiling more than the others.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -86,7 +96,7 @@ jobs:
           TELEGRAM_API_ID: "12345"
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
-        run: uv run --extra lottie pytest -q
+        run: uv run --extra lottie python scripts/run_tests_guarded.py -- -q
 
   # The launchers are PowerShell and Windows-only, and nothing ran their tests
   # until now - which is how `tests/test_update_menu.ps1` was able to outlive the

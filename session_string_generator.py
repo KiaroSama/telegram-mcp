@@ -26,8 +26,8 @@ import getpass
 import io
 import os
 import re
-import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -46,6 +46,12 @@ _QR_MAX_REFRESHES = 10
 load_dotenv()
 
 
+_ENV_KEY_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+# A label is a SUFFIX of an env key, so it may start with a digit; it may not
+# contain anything an env-var name cannot hold.
+_LABEL_RE = re.compile(r"\A[A-Za-z0-9_]+\Z")
+
+
 def normalise_label(raw: str) -> str:
     r"""Turn a typed label into one that can survive a round trip through `.env`.
 
@@ -55,12 +61,63 @@ def normalise_label(raw: str) -> str:
     `TELEGRAM_SESSION_STRING_KGB VERIFIER=...` - an account that sat in the file,
     looked correct, and could never load.
 
-    Spaces and hyphens become underscores; everything else is left alone, because
-    there is no safe mapping to invent for it and refusing loudly beats guessing.
-    The account manager applies the same rule before it ever gets here, so this is
-    the guard for the standalone path.
+    Spaces and hyphens become underscores; anything the result still cannot be
+    is refused, because there is no safe mapping to invent for it and refusing
+    loudly beats guessing. That promise used to be documented and not kept:
+    `---` collapsed to the empty label and `work=other` kept its `=`, which
+    moves the split point of the `.env` line and files the account under a key
+    nobody configured. The account manager applies the same rule before it ever
+    gets here, so this is the guard for the standalone path.
     """
-    return re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+    label = re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+    if not _LABEL_RE.match(label):
+        raise ValueError(
+            f"{raw!r} is not a usable account label: a label becomes part of an "
+            "environment variable name, so it must be ASCII letters, digits and "
+            "underscores, and cannot be empty."
+        )
+    return label
+
+
+ENV_BACKUP_RETENTION = 5
+_MAX_BACKUP_COLLISIONS = 100
+
+
+def _write_owner_only(path: Path, text: str) -> None:
+    """Create ``path`` with 0600 from the first byte, refusing to clobber."""
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def _backup_env(env_path: Path) -> Path:
+    """Copy `.env` aside owner-only, under a name nothing else has taken."""
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_UTC")
+    text = env_path.read_text(encoding="utf-8")
+    for attempt in range(_MAX_BACKUP_COLLISIONS):
+        suffix = "" if attempt == 0 else f"-{attempt}"
+        backup = env_path.with_name(f"{env_path.name}.backup-{stamp}{suffix}")
+        try:
+            _write_owner_only(backup, text)
+            return backup
+        except FileExistsError:
+            continue
+    raise OSError(f"could not find a free backup name for {env_path} within one second")
+
+
+def _prune_env_backups(env_path: Path) -> None:
+    """Keep the newest ``ENV_BACKUP_RETENTION`` backups and delete the rest.
+
+    Each one holds a complete login to every account configured at the time, so
+    an unbounded pile of them turns one readable directory into a leak of every
+    session ever generated on the machine.
+    """
+    backups = sorted(env_path.parent.glob(f"{env_path.name}.backup-*"))
+    for stale in backups[: max(0, len(backups) - ENV_BACKUP_RETENTION)]:
+        try:
+            stale.unlink()
+        except OSError:
+            pass
 
 
 def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Optional[Path]:
@@ -75,17 +132,24 @@ def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Opti
 
     Every other line survives byte-for-byte: comments, ordering, and every key this
     knows nothing about, which is most of the file.
+
+    The file and its backups are session strings -- full logins -- so both are
+    created 0600 rather than inheriting the umask's 0644, the replacement is
+    atomic so a crash cannot leave a half-written `.env`, and old backups are
+    pruned rather than kept for ever.
     """
     if not key or any(character.isspace() for character in key):
         # python-dotenv drops such a line on read, so the write would look like a
         # success and produce a setting that never loads.
         raise ValueError(f"an env key cannot contain whitespace: {key!r}")
+    if not _ENV_KEY_RE.match(key):
+        # An '=' or any other punctuation moves where the line splits, so the
+        # value is read back under a different key than the one written.
+        raise ValueError(f"not a usable env key: {key!r}")
 
     backup = None
     if env_path.exists():
-        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S_UTC")
-        backup = env_path.with_name(f"{env_path.name}.backup-{stamp}")
-        shutil.copyfile(env_path, backup)
+        backup = _backup_env(env_path)
         lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
     else:
         lines = []
@@ -101,7 +165,21 @@ def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Opti
             lines[-1] += "\n"
         lines.append(f"{key}={value}" + "\n")
 
-    env_path.write_text("".join(lines), encoding="utf-8")
+    # mkstemp makes a 0600 file with an unpredictable name in the same
+    # directory, so the rename is atomic and no reader ever sees a partial file.
+    fd, tmp = tempfile.mkstemp(dir=str(env_path.parent), prefix=env_path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write("".join(lines))
+        os.replace(tmp, env_path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+    _prune_env_backups(env_path)
     return backup
 
 
@@ -126,6 +204,14 @@ def _parse_args() -> argparse.Namespace:
         help=(
             "Account label to save under, skipping the prompt. Passed by the account "
             "manager, which has already asked for one."
+        ),
+    )
+    parser.add_argument(
+        "--no-echo",
+        action="store_true",
+        help=(
+            "Save the session to .env without printing it. A terminal is "
+            "scrollback, often a screen share, and sometimes a shell log."
         ),
     )
     return parser.parse_args()
@@ -242,6 +328,26 @@ def _phone_login(client: TelegramClient) -> None:
         _sign_in_with_password(client)
 
 
+def _report_session(env_var: str, session_string: str, *, echo: bool) -> None:
+    """Say the login succeeded, and show the session only if asked to.
+
+    Printing a StringSession puts a full account login into scrollback, into a
+    screen share, and into whatever records the terminal. `--no-echo` names the
+    key it will be saved under and nothing else.
+    """
+    print()
+    print(heading("Authentication successful."))
+    if echo:
+        print(heading("Your session string"))
+        print(f"\n{session_string}\n")
+        print("Add this to your .env file as:")
+        print(f"{env_var}={session_string}")
+        print()
+        print(note("This string is a full login to that account. Never share it."))
+    else:
+        print(note(f"The session will be saved to .env as {env_var} and not printed."))
+
+
 def main() -> None:
     args = _parse_args()
     _check_installation()
@@ -289,6 +395,21 @@ def main() -> None:
             # Non-interactive stdin (piped/scripted runs): fall back to the default label.
             label = ""
 
+    # Before the login, not after it: a label that cannot become an env key used
+    # to be discovered once the session already existed, and the run then either
+    # wrote an unreadable line or threw the freshly minted session away.
+    if label:
+        try:
+            safe_label = normalise_label(label)
+        except ValueError as exc:
+            print(failure(str(exc)))
+            sys.exit(1)
+        if safe_label != label.strip():
+            print(hint(f"Saving under '{safe_label}' - a key cannot contain a space."))
+        env_var = f"TELEGRAM_SESSION_STRING_{safe_label.upper()}"
+    else:
+        env_var = "TELEGRAM_SESSION_STRING"
+
     if args.qr:
         method = "1"
     elif args.phone:
@@ -313,30 +434,22 @@ def main() -> None:
 
         session_string = StringSession.save(client.session)
 
-        if label:
-            safe = normalise_label(label)
-            if safe != label.strip():
-                print(hint(f"Saving under '{safe}' - a key cannot contain a space."))
-            env_var = f"TELEGRAM_SESSION_STRING_{safe.upper()}"
+        _report_session(env_var, session_string, echo=not args.no_echo)
+
+        if args.no_echo:
+            # --no-echo means "save it, do not show it": there is nothing on
+            # screen to copy, so asking whether to save would only be a way to
+            # lose the session.
+            save = True
         else:
-            env_var = "TELEGRAM_SESSION_STRING"
-
-        print()
-        print(heading("Authentication successful."))
-        print(heading("Your session string"))
-        print(f"\n{session_string}\n")
-        print("Add this to your .env file as:")
-        print(f"{env_var}={session_string}")
-        print()
-        print(note("This string is a full login to that account. Never share it."))
-
-        try:
-            print()
-            choice = input(f'Save it to .env as {env_var}? {default_hint("[Y/n]")}: ')
-        except EOFError:
-            # Nothing is reading the prompt, so nothing can confirm it either.
-            choice = "n"
-        if choice.strip().lower() in {"", "y", "yes"}:
+            try:
+                print()
+                choice = input(f'Save it to .env as {env_var}? {default_hint("[Y/n]")}: ')
+            except EOFError:
+                # Nothing is reading the prompt, so nothing can confirm it either.
+                choice = "n"
+            save = choice.strip().lower() in {"", "y", "yes"}
+        if save:
             try:
                 backup = write_env_value(env_var, session_string)
                 print("")

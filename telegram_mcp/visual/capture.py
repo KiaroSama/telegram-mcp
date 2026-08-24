@@ -49,6 +49,39 @@ class CaptureError(RuntimeError):
     """Raised when a window cannot be located or captured."""
 
 
+_WINTYPES: Any = None
+
+
+def _wintypes() -> Any:
+    """``ctypes.wintypes``, fetched through a seam rather than imported inline.
+
+    The module imports only on Windows, so every call site used to import it
+    locally and the surrounding logic became unreachable everywhere else. That
+    logic is not Windows-specific and is where the real bugs have been: the
+    enumeration that stopped at the first failing window, the rectangle that came
+    back zero-filled for a window destroyed mid-enumeration. Routing the three
+    structures actually needed (DWORD, RECT, POINT) through here lets a test
+    substitute them and exercise all of it on any platform.
+    """
+    global _WINTYPES
+    if _WINTYPES is None:
+        import ctypes.wintypes as wintypes
+
+        _WINTYPES = wintypes
+    return _WINTYPES
+
+
+def _enum_callback(function: Any) -> Any:
+    """Wrap an EnumWindows callback in its stdcall thunk.
+
+    Split out for the same reason as :func:`_wintypes`: ``ctypes.WINFUNCTYPE``
+    exists only on Windows, and it is the single line that would otherwise keep
+    the whole of :func:`list_windows` off every other platform.
+    """
+    wintypes = _wintypes()
+    return ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(function)
+
+
 def _win32() -> tuple[Any, Any, Any]:
     """Return the bound ``(user32, gdi32, kernel32)`` libraries.
 
@@ -226,7 +259,7 @@ def _ensure_dpi_awareness() -> None:
 
 
 def _process_image_path(pid: int) -> str:
-    import ctypes.wintypes as wintypes
+    wintypes = _wintypes()
 
     _user32, _gdi32, kernel32 = _win32()
     handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -252,7 +285,7 @@ def list_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[WindowInfo]:
     _require_windows()
     _ensure_dpi_awareness()
 
-    import ctypes.wintypes as wintypes
+    wintypes = _wintypes()
 
     user32, _gdi32, _kernel32 = _win32()
     foreground = user32.GetForegroundWindow()
@@ -308,7 +341,7 @@ def list_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[WindowInfo]:
             pass
         return True
 
-    callback = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)(_collect)
+    callback = _enum_callback(_collect)
     user32.EnumWindows(callback, 0)
     windows.sort(key=lambda w: w.area, reverse=True)
     return windows
@@ -347,7 +380,7 @@ def _client_geometry(hwnd: int) -> tuple[int, int, tuple[int, int, int, int]]:
     both smaller than and offset from the window rectangle. Capturing it needs
     both numbers: the size for the bitmap, the screen rectangle for a screen grab.
     """
-    import ctypes.wintypes as wintypes
+    wintypes = _wintypes()
 
     user32, _gdi32, _kernel32 = _win32()
 
@@ -366,7 +399,7 @@ def _client_geometry(hwnd: int) -> tuple[int, int, tuple[int, int, int, int]]:
 
 def _capture_print_window(window: WindowInfo, client_only: bool):
     """Capture the window's own pixels via PrintWindow + GetDIBits."""
-    import ctypes.wintypes as wintypes
+    wintypes = _wintypes()
 
     from PIL import Image
 

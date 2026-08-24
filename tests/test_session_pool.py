@@ -101,7 +101,7 @@ def test_discover_accounts_uses_pool_for_default(monkeypatch):
     assert captured["default"] == "str::pooled-1"
 
 
-# --- runner retries a transient AuthKeyDuplicatedError -----------------------
+# --- a duplicated auth key is permanent, so the runner must not retry it -----
 
 
 class _FlakyClient:
@@ -133,22 +133,19 @@ def no_sleep(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_connect_recovers_after_transient_authkey_duplicated(no_sleep):
-    client = _FlakyClient(fail_times=2)
+async def test_connect_gives_up_on_a_duplicated_auth_key_immediately(no_sleep):
+    """Telegram invalidates the key permanently.
 
-    await runner._connect_authorized_client("default", client)
-
-    assert client.connects == 3
-    assert client.disconnects == 2
-
-
-@pytest.mark.asyncio
-async def test_connect_reraises_authkey_duplicated_after_max_attempts(no_sleep):
-    from telethon.errors import AuthKeyDuplicatedError
-
+    The old loop connected four times and slept 2+4+8 seconds first, then
+    surfaced the raw Telethon error - while connection.py had always treated
+    the same error as unrecoverable and carried the sentence that says how to
+    recover from it. One attempt, one actionable message.
+    """
     client = _FlakyClient(fail_times=99)
 
-    with pytest.raises(AuthKeyDuplicatedError):
+    with pytest.raises(RuntimeError, match="no longer usable"):
         await runner._connect_authorized_client("default", client)
 
-    assert client.connects == 4
+    assert client.connects == 1
+    assert client.disconnects == 1
+    assert "default" not in runner._session_locks, "the lock outlived the failed connect"

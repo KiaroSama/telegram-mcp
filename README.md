@@ -728,6 +728,16 @@ Proprietary, so this is the maintainer's own loop rather than a contribution gui
    - `uv run pre-commit run --hook-stage pre-push --all-files`
 6. Run the suite through the guarded runner, not raw `pytest` — an unbounded test run
    has no wall ceiling and no process-tree cleanup, so a hang cannot be proven cleaned up.
+   This project drives ffmpeg, ffprobe and a native rlottie decoder, any of which can wedge
+   without exiting, and a wedged child outlives the pytest that spawned it:
+
+   ```bash
+   uv run python scripts/run_tests_guarded.py -- -q
+   ```
+
+   It bounds the run by wall clock *and* by silence (a deadlock prints nothing while still
+   holding the CPU), terminates the whole process tree on either, and exits 124 on timeout
+   while otherwise returning pytest's own exit code. CI runs the same script.
 
 ## Visual and structured access
 

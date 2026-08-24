@@ -7,9 +7,12 @@ try:
 except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
+import math
+
 from telethon.errors import AuthKeyDuplicatedError
 
 from telegram_mcp import runtime as _runtime
+from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, parse_port
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
@@ -23,15 +26,53 @@ import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 # finally block so a lock is never held past this process's lifetime.
 _session_locks: dict[str, SessionLock] = {}
 
+# Every transport this server can actually run. Anything else is a typo.
+_TRANSPORTS = ("stdio", "http", "sse")
+
 
 def _lock_grace_seconds() -> float:
+    """The configured lock grace period, or a loud error for anything unusable.
+
+    ``nan`` used to sail straight through: every ``time.monotonic() >= nan``
+    comparison is false, so the "wait briefly, then give up" loop waited for
+    ever. A malformed value silently became the default, which hid the typo.
+    """
     raw = os.getenv("TELEGRAM_LOCK_GRACE_SECONDS")
     if not raw:
         return DEFAULT_GRACE_SECONDS
     try:
-        return float(raw)
-    except ValueError:
-        return DEFAULT_GRACE_SECONDS
+        value = float(raw)
+    except ValueError as exc:
+        raise ValidationError(
+            f"TELEGRAM_LOCK_GRACE_SECONDS must be a number of seconds, got {raw!r}."
+        ) from exc
+    if not math.isfinite(value) or value < 0:
+        raise ValidationError(
+            f"TELEGRAM_LOCK_GRACE_SECONDS must be finite and non-negative, got {raw!r}."
+        )
+    return value
+
+
+def _reject_duplicate_sessions(configured: dict) -> None:
+    """Refuse to start when two labels name the SAME Telegram session.
+
+    Two labels, one auth key is not a configuration that can work: Telegram
+    permanently invalidates a key used twice at once. Caught here it is a
+    one-line error naming both labels; caught by the session lock it is a
+    20-second stall followed by a message about "another process" that does
+    not exist.
+    """
+    by_identity: dict[str, str] = {}
+    for label, client in configured.items():
+        identity = session_identity(client)
+        first = by_identity.setdefault(identity, label)
+        if first != label:
+            raise RuntimeError(
+                f"Accounts '{first}' and '{label}' are configured with the same "
+                "Telegram session. One session is one auth key, and connecting it "
+                "twice makes Telegram invalidate it for both. Generate a separate "
+                "session per account with `uv run session_string_generator.py`."
+            )
 
 
 async def _connect_authorized_client(label, client) -> None:
@@ -39,38 +80,28 @@ async def _connect_authorized_client(label, client) -> None:
     # per-session lock means a second instance of this server never even
     # attempts to connect while another instance already holds the same
     # session (see telegram_mcp/singleton.py for why and how).
-    lock = SessionLock(label, session_identity(client))
+    lock = SessionLock(session_identity(client))
     await asyncio.to_thread(lock.acquire, grace_seconds=_lock_grace_seconds())
     _session_locks[label] = lock
 
-    # Once we hold the lock, still tolerate a transient AuthKeyDuplicatedError
-    # from Telegram itself (e.g. the same session briefly seen from two IPs
-    # during a VPN reconnect) with a bounded retry, since that's not caused by
-    # a second instance of this server and a blip shouldn't take the server
-    # down. Give each concurrent client its own session (TELEGRAM_SESSION_STRINGS
-    # pool or TELEGRAM_SESSION_STRING_<LABEL>) to avoid the collision entirely.
-    max_attempts = 4
-    for attempt in range(1, max_attempts + 1):
+    # No retry. Telegram invalidates an auth key used from two places at once
+    # permanently -- connection.py has said so on the reconnect path all along
+    # -- so the four attempts here only spent 2+4+8 seconds re-asking for a key
+    # that can never come back, and then reported the raw Telethon error
+    # instead of the sentence that says how to recover.
+    try:
+        await client.connect()
+    except AuthKeyDuplicatedError as exc:
         try:
-            await client.connect()
-            break
-        except AuthKeyDuplicatedError:
-            if attempt >= max_attempts:
-                raise
-            delay = min(2**attempt, 15)
-            print(
-                f"AuthKeyDuplicatedError connecting '{label}' (attempt "
-                f"{attempt}/{max_attempts}): session in use from another IP. "
-                f"Retrying in {delay}s. If this persists, give each concurrent "
-                "client its own session via TELEGRAM_SESSION_STRINGS or "
-                "TELEGRAM_SESSION_STRING_<LABEL>.",
-                file=sys.stderr,
-            )
-            try:
-                await client.disconnect()
-            except Exception:
-                pass
-            await asyncio.sleep(delay)
+            await client.disconnect()
+        except Exception:
+            pass
+        # Nothing is connected on this session, so nothing should still be
+        # holding its lock: a retry after fixing the config must not queue
+        # behind a lock this failed attempt left standing.
+        _session_locks.pop(label, None)
+        lock.release()
+        raise RuntimeError(f"[{label}] {_BURNED_SESSION_MESSAGE}") from exc
 
     if await client.is_user_authorized():
         return
@@ -115,10 +146,19 @@ async def _serve(transport: str) -> None:
     throttles/flags). "http" is streamable HTTP — the current MCP transport
     that Claude Code (`--transport http`) and Codex (`--url`) speak natively;
     "sse" is kept for clients that only support the legacy SSE transport.
+
+    An unrecognised name is refused rather than quietly falling back to stdio:
+    `MCP_TRANSPORT=htpp` used to produce a server that reported a healthy start
+    and an HTTP client that could never reach it.
     """
+    if transport not in _TRANSPORTS:
+        raise ValidationError(
+            f"Invalid MCP_TRANSPORT {transport!r}. Expected one of: "
+            f"{', '.join(sorted(_TRANSPORTS))}."
+        )
     if transport in ("http", "sse"):
         mcp.settings.host = os.getenv("MCP_HOST", "127.0.0.1")
-        mcp.settings.port = int(os.getenv("MCP_PORT", "8765"))
+        mcp.settings.port = parse_port(os.getenv("MCP_PORT", "8765"), "MCP_PORT")
         _configure_transport_security()
         if transport == "http":
             await mcp.run_streamable_http_async()
@@ -132,6 +172,7 @@ async def _serve(transport: str) -> None:
 async def _main() -> None:
     try:
         labels = ", ".join(clients.keys())
+        _reject_duplicate_sessions(clients)
         print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
         await asyncio.gather(
             *(_connect_authorized_client(label, cl) for label, cl in clients.items())
