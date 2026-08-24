@@ -305,6 +305,23 @@ e.g. `MCP_ALLOWED_HOSTS=mcp.example.com`. Comma-separated; a `:*` suffix allows 
 port. Leave it unset while changing `MCP_HOST` and the localhost allow-list stays in
 force, so the symptom is every request being **rejected** — not an unprotected server.
 
+**A bind beyond this machine has to say what authenticates it.** `MCP_ALLOWED_HOSTS`
+is not that: DNS-rebinding protection checks which *name* a request arrived under, which
+stops a browser on your own machine being tricked into calling the server — it asks
+nothing about *who* is calling. Every tool here acts as your Telegram account, so on a
+routable address, reaching the port is the authorization. The server therefore refuses to
+start on a non-loopback `MCP_HOST` unless one of these is set:
+
+| Variable | Meaning |
+|---|---|
+| *(neither)* | Default. Loopback only — nothing to configure. |
+| `MCP_TRUSTED_PROXY_AUTH=1` | A reverse proxy in front authenticates requests. The server cannot verify this; you are stating it. |
+| `MCP_ALLOW_UNAUTHENTICATED_REMOTE=1` | Deliberately open on a network you trust. Warns on every start. |
+
+This server implements no authentication of its own, and that is deliberate — a token
+scheme no real client had exercised would read as protection without being any. Put
+authentication in front of it, or keep it on localhost.
+
 Prefer `http` when more than one MCP client (or many coding-agent sessions)
 will use the server: a single long-lived process holds one Telegram
 connection, instead of every client spawning its own Telethon session —
