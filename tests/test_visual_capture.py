@@ -456,3 +456,63 @@ def test_repeated_captures_do_not_leak_gdi_objects():
     for _ in range(15):
         capture.capture_window()
     assert gdi_objects() - before <= 2
+
+
+# --- the Win32 seams have to behave the same on every host ---------------------
+
+
+def test_a_windows_process_path_splits_the_same_on_every_host():
+    """These paths come from the Win32 API, so they are Windows paths even when
+    the interpreter asking is not on Windows. `os.path.basename` follows the HOST's
+    separator rules: on Linux it treats the whole thing as one filename, the
+    process-name comparison never matches, and every window silently disappears
+    from the enumeration.
+
+    Asserting on the value rather than on `os.path.basename` is the point - the
+    old code passed on Windows for the same reason it failed everywhere else.
+    """
+    assert capture._process_basename(r"C:\T\Telegram.exe") == "Telegram.exe"
+    assert capture._process_basename(r"C:\Program Files\Telegram\Telegram.exe") == "Telegram.exe"
+    assert capture._process_basename("Telegram.exe") == "Telegram.exe"
+
+
+def test_the_process_filter_matches_a_windows_path_case_insensitively():
+    """The comparison the enumeration actually makes."""
+    assert capture._process_basename(r"C:\T\TELEGRAM.EXE").lower() == "telegram.exe"
+
+
+def test_reading_the_last_error_never_raises_off_windows():
+    """`ctypes.get_last_error` is imported under `if _os.name == "nt"` in CPython's
+    own ctypes, so touching it elsewhere raises AttributeError - which turned a
+    deliberate CaptureError about a refused SelectObject into an unhandled one."""
+    assert isinstance(capture._last_error(), int)
+
+
+def test_the_last_error_helper_falls_back_when_ctypes_lacks_it(monkeypatch):
+    """Simulates the non-Windows ctypes surface on a Windows host, which is the
+    only way to exercise this branch here at all."""
+    monkeypatch.delattr(capture.ctypes, "get_last_error", raising=False)
+
+    assert capture._last_error() == 0
+
+
+def test_a_refused_select_object_still_reports_a_capture_error(monkeypatch):
+    """The end-to-end shape of the bug: without the helper this raised
+    AttributeError from inside the error path instead of the error itself."""
+    monkeypatch.delattr(capture.ctypes, "get_last_error", raising=False)
+    _fake_win32_types(monkeypatch)
+
+    class _StubUser32:
+        def GetWindowDC(self, _hwnd):
+            return 303
+
+        def PrintWindow(self, _hwnd, _dc, _flags):
+            return 0
+
+        def ReleaseDC(self, _hwnd, _dc):
+            return 1
+
+    monkeypatch.setattr(capture, "_win32", lambda: (_StubUser32(), _FakeGdi32(), None))
+
+    with pytest.raises(capture.CaptureError, match="SelectObject"):
+        capture._capture_print_window(_telegram_window(), client_only=False)

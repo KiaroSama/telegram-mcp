@@ -26,6 +26,7 @@ message on other platforms so callers can degrade gracefully.
 from __future__ import annotations
 
 import ctypes
+import ntpath
 import os
 import sys
 from dataclasses import dataclass, field
@@ -223,9 +224,33 @@ class WindowInfo:
         if self.process_path:
             # Executable name only: the full path is host layout the model has no
             # use for, and it ends up in every window listing and capture result.
-            data["process"] = os.path.basename(self.process_path)
+            data["process"] = _process_basename(self.process_path)
         data.update(self.extra)
         return data
+
+
+def _process_basename(path: str) -> str:
+    """Last component of a WINDOWS path, whatever host is asking.
+
+    These paths come from the Win32 API, so they are Windows paths even when the
+    interpreter running this is not on Windows - and ``os.path.basename`` follows
+    the HOST's separator rules. On Linux it treats ``C:\\T\\Telegram.exe`` as one
+    long filename, the process-name comparison never matches, and every window is
+    filtered out of the enumeration with no error to show for it.
+    """
+    return ntpath.basename(path)
+
+
+def _last_error() -> int:
+    """``GetLastError()`` where it exists, and a harmless 0 where it does not.
+
+    ``ctypes.get_last_error`` is imported under ``if _os.name == "nt"`` in
+    CPython's own ``ctypes/__init__.py``, so touching it off Windows raises
+    AttributeError - which turned a deliberate CaptureError about a refused
+    SelectObject into an unhandled AttributeError instead.
+    """
+    getter = getattr(ctypes, "get_last_error", None)
+    return getter() if getter is not None else 0
 
 
 def _require_windows() -> None:
@@ -299,7 +324,7 @@ def list_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[WindowInfo]:
             pid = wintypes.DWORD()
             user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             path = _process_image_path(pid.value)
-            if not path or os.path.basename(path).lower() != target:
+            if not path or _process_basename(path).lower() != target:
                 return True
 
             length = user32.GetWindowTextLengthW(hwnd)
@@ -452,7 +477,7 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
             # blamed on PrintWindow.
             raise CaptureError(
                 "Could not select the capture bitmap into the device context "
-                f"(SelectObject failed, error {ctypes.get_last_error()})."
+                f"(SelectObject failed, error {_last_error()})."
             )
 
         flags = _PW_RENDERFULLCONTENT | (_PW_CLIENTONLY if client_only else 0)
