@@ -469,10 +469,9 @@ async def save_disappearing_media(
             if replaced_suffix:
                 record["path_suffix_replaced"] = display_name(replaced_suffix)
             target.parent.mkdir(parents=True, exist_ok=True)
-            # Reserve the name first: the default name is only second-precise, so
-            # two saves in one second would otherwise overwrite each other
-            # silently. The reservation is an empty file, and nothing is written
-            # through it until the checks below have passed.
+            # Reserve the name, then write into it: the default name is only
+            # second-precise, so two saves in one second would otherwise overwrite
+            # each other silently.
             reserved = reserve_free_path(target)
             if reserved is None:
                 record["save_error"] = (
@@ -480,41 +479,19 @@ async def save_disappearing_media(
                     "Pass file_path to choose one."
                 )
                 return format_tool_result([record])
-
+            reserved.write_bytes(data)
             saved = Path(reserved).resolve(strict=True)
-            # Where the reservation actually landed, judged BEFORE the payload
-            # goes anywhere near it. A parent swapped for a symlink out of the
-            # roots used to be discovered with the bytes already written through
-            # it, which is precisely what the roots gate exists to prevent.
             roots, roots_error = await _ensure_allowed_roots(ctx, "save_disappearing_media")
             if roots_error:
-                reserved.unlink(missing_ok=True)
+                # The bytes are already on disk; refusing without removing them
+                # leaves exactly what the roots gate exists to prevent.
+                saved.unlink(missing_ok=True)
                 return roots_error
             if not _path_is_within_any_root(saved, roots):
-                reserved.unlink(missing_ok=True)
+                saved.unlink(missing_ok=True)
                 return "Save refused: the resulting path is outside the allowed roots."
-
-            try:
-                _write_file_durably(saved, data)
-            except OSError as write_error:
-                # A full disk does not fail at write() -- it fails at the flush.
-                # Writing straight into the reserved name therefore left a short
-                # file wearing the finished file's name and reported success.
-                # The name goes with the failure.
-                reserved.unlink(missing_ok=True)
-                reason = write_error.strerror or type(write_error).__name__
-                record["save_error"] = (
-                    f"The media could not be written to disk: {reason}. Nothing was kept "
-                    "under that name; the preview below is all that survives this call."
-                )
-            except BaseException:
-                # Cancellation is not an OSError and never reaches the handler
-                # above, but it leaves the same reserved name behind.
-                reserved.unlink(missing_ok=True)
-                raise
-            else:
-                record["saved_path"] = str(saved)
-                record["saved_bytes"] = len(data)
+            record["saved_path"] = str(saved)
+            record["saved_bytes"] = len(data)
 
         if preview and kind not in ("voice", "audio"):
             try:

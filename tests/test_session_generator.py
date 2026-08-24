@@ -10,7 +10,12 @@ and these tests drive that helper directly rather than asserting the two branche
 look similar, because looking similar is exactly what they did before.
 """
 
+import base64
 import importlib.util
+import json
+import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -43,6 +48,9 @@ class _Client:
         if len(self.attempts) <= self.failures:
             raise errors.PasswordHashInvalidError(request=None)
         return "signed-in"
+
+    def disconnect(self):
+        self.disconnected = True
 
 
 @pytest.fixture
@@ -94,6 +102,39 @@ def test_an_unrelated_error_is_not_swallowed_by_the_retry_loop(generator, monkey
     with pytest.raises(errors.FloodWaitError):
         generator._sign_in_with_password(client)
     assert len(client.attempts) == 1, "a flood wait was retried as if it were a bad password"
+
+
+def test_the_password_prompt_gives_up_instead_of_asking_for_ever(generator, monkeypatch):
+    """`while True` with no ceiling: a scripted or piped stdin that keeps
+    answering the same wrong password never leaves the loop, and there is nobody
+    at the terminal to press Ctrl+C."""
+    monkeypatch.setattr(generator.getpass, "getpass", lambda _prompt: "always-wrong")
+    client = _Client(failures=10**6)
+
+    with pytest.raises(SystemExit) as exit_info:
+        generator._sign_in_with_password(client)
+
+    assert exit_info.value.code != 0
+    assert len(client.attempts) == generator.MAX_PASSWORD_ATTEMPTS
+
+
+def test_an_empty_prompt_cannot_spin_for_ever_either(generator, monkeypatch):
+    """A closed stdin returns "" without blocking, so the branch that does NOT
+    reach Telegram is the one that can spin fastest."""
+    monkeypatch.setattr(generator.getpass, "getpass", lambda _prompt: "")
+    client = _Client(failures=0)
+
+    with pytest.raises(SystemExit):
+        generator._sign_in_with_password(client)
+
+    assert client.attempts == [], "an empty password was sent to Telegram"
+
+
+def test_the_attempt_ceiling_is_a_finite_positive_number(generator):
+    ceiling = generator.MAX_PASSWORD_ATTEMPTS
+
+    assert isinstance(ceiling, int)
+    assert 1 <= ceiling <= 20
 
 
 def test_both_login_paths_go_through_the_one_helper(generator):
@@ -236,6 +277,110 @@ def test_a_normalised_key_round_trips_through_dotenv(generator, tmp_path):
 
     parsed = dotenv_values(env)
     assert parsed.get("TELEGRAM_SESSION_STRING_KGB_VERIFIER") == "1AAAsession"
+
+
+def test_the_generator_and_the_package_share_one_normaliser(generator):
+    """Not "two functions that agree today": the same object.
+
+    Three places decide what an account label is - this script, the account
+    manager, and the client registry that reads the resulting env keys back. Two
+    copies of a rule drift, and the drift shows up as an account that saves fine
+    and never loads.
+    """
+    from telegram_mcp import aliases
+
+    assert generator.normalise_label is aliases.normalise_account_label
+
+
+# Every label a person is plausibly going to type, plus the ones with no safe
+# mapping. Shared by the Python check and the PowerShell one so neither can drift
+# by testing a friendlier set than the other.
+LABEL_CASES = [
+    "KGB Verifier",
+    "  Work  Account  ",
+    "my-second-phone",
+    "Personal",
+    "a  b",
+    "_padded_",
+    "WORK-DASH",
+    "work_2",
+    "---",
+    "has.dot",
+    "has/slash",
+    "کانال",
+    "has=equals",
+    "has space and-hyphen",
+]
+
+# Input and output travel through the environment and stdout as ASCII JSON in
+# input order: a typed label may be non-ASCII, and a console code page decoding
+# it differently would fail this test for a reason that has nothing to do with
+# the rule being checked.
+_PROBE = """
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+$source = Get-Content -LiteralPath $env:TGMCP_MANAGER -Raw
+$body = [regex]::Match($source, '(?ms)^function ConvertTo-Label \\{.*?^\\}')
+if (-not $body.Success) { throw 'ConvertTo-Label is gone from the account manager.' }
+. ([ScriptBlock]::Create($body.Value))
+$answers = foreach ($typed in ([Text.Encoding]::UTF8.GetString(
+        [Convert]::FromBase64String($env:TGMCP_LABELS)) | ConvertFrom-Json)) {
+    $got = ConvertTo-Label -Raw $typed
+    if ($null -eq $got) { '' } else { $got }
+}
+ConvertTo-Json -Compress -InputObject @($answers)
+"""
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell 7 is not installed")
+def test_the_account_manager_normalises_labels_exactly_as_the_package_does(generator):
+    """The third copy of the rule, and the one that cannot import the first two.
+
+    PowerShell has no way to call `normalise_account_label`, so "shared" here can
+    only mean "provably identical for the same input". Left unchecked, the menu
+    and the generator drift, and the drift shows up as an account that saves
+    without complaint and never loads.
+
+    `ConvertTo-Label` lower-cases because the menu prints the runtime form; the
+    package keeps the typed case because the env key upper-cases it anyway.
+    """
+    completed = subprocess.run(
+        [shutil.which("pwsh"), "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _PROBE],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={
+            **os.environ,
+            "TGMCP_MANAGER": str(REPO / "Manage-Accounts.ps1"),
+            "TGMCP_LABELS": base64.b64encode(json.dumps(LABEL_CASES).encode("utf-8")).decode(
+                "ascii"
+            ),
+        },
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    powershell = json.loads(completed.stdout)
+    assert len(powershell) == len(LABEL_CASES)
+    for typed, theirs in zip(LABEL_CASES, powershell):
+        try:
+            expected = generator.normalise_label(typed).lower()
+        except ValueError:
+            expected = ""  # ConvertTo-Label reports a refusal as the empty string
+        assert (
+            theirs == expected
+        ), f"{typed!r}: the account manager says {theirs!r}, the package says {expected!r}"
+
+
+def test_the_runtime_label_form_is_the_normalised_one_lowercased(generator):
+    """`get_client` looks a label up lowercased, so what the generator writes has
+    to survive that: normalise, upper-case into the env key, lower-case back."""
+    from telegram_mcp import aliases
+
+    for typed in ("KGB Verifier", "my-second-phone", "  Work  Account  "):
+        label = generator.normalise_label(typed)
+        env_suffix = f"TELEGRAM_SESSION_STRING_{label.upper()}"[len("TELEGRAM_SESSION_STRING_") :]
+
+        assert aliases.account_key(env_suffix) == label.lower()
 
 
 # --- F06: a label that cannot become an env key must be refused, not mangled ---

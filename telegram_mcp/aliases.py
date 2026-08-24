@@ -151,6 +151,45 @@ def account_key(account: Optional[str]) -> Optional[str]:
     return str(account).strip().lower() or None
 
 
+# A label is a SUFFIX of an env key, so it may start with a digit; it may not
+# contain anything an env-var name cannot hold.
+_LABEL_RE = re.compile(r"\A[A-Za-z0-9_]+\Z")
+
+
+def normalise_account_label(raw: str) -> str:
+    r"""Turn a typed account label into one that can survive a round trip through `.env`.
+
+    The one rule, in the package rather than in the script that happened to need
+    it first: a label is decided by whoever types it, written into an environment
+    variable NAME by the generator and by the account manager, and read back by
+    the client registry. Three copies of a rule drift, and the drift shows up as
+    an account that saves without complaint and never loads.
+
+    python-dotenv refuses to parse a line whose key contains a space: it warns on
+    stderr and DROPS the line. "KGB Verifier" written literally produced
+    `TELEGRAM_SESSION_STRING_KGB VERIFIER=...` - an account that sat in the file,
+    looked correct, and could never load.
+
+    Spaces and hyphens become underscores; anything the result still cannot be is
+    refused, because there is no safe mapping to invent for it and refusing
+    loudly beats guessing. That promise used to be documented and not kept: `---`
+    collapsed to the empty label and `work=other` kept its `=`, which moves the
+    split point of the `.env` line and files the account under a key nobody
+    configured.
+
+    Note `account_key` is the OTHER half: this is what a label may be, that is
+    what a label already in use compares as.
+    """
+    label = re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+    if not _LABEL_RE.match(label):
+        raise ValueError(
+            f"{raw!r} is not a usable account label: a label becomes part of an "
+            "environment variable name, so it must be ASCII letters, digits and "
+            "underscores, and cannot be empty."
+        )
+    return label
+
+
 def sole_account_label() -> Optional[str]:
     """The only configured login's label, or None when there are none or several.
 
@@ -773,6 +812,7 @@ __all__ = [
     "load_aliases",
     "match_aliases",
     "migrate_legacy_rows",
+    "normalise_account_label",
     "restrict_to_owner",
     "save_aliases",
     "sole_account_label",

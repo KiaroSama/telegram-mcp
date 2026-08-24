@@ -133,7 +133,7 @@ def _wire(monkeypatch):
 
 async def _pressed(wire, url):
     wire(SimpleNamespace(message="done", alert=None, url=url))
-    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
+    payload = json.loads(await click_button(1, 7, 0, account="default"))
     return payload["results"][0]
 
 

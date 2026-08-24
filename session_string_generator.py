@@ -37,7 +37,7 @@ from telethon import errors
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telegram_mcp.client_identity import client_identity_kwargs
-from telegram_mcp.aliases import restrict_to_owner
+from telegram_mcp.aliases import normalise_account_label, restrict_to_owner
 from telegram_mcp.console_theme import default_hint, failure, heading, hint, note
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
 
@@ -48,36 +48,17 @@ load_dotenv()
 
 
 _ENV_KEY_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
-# A label is a SUFFIX of an env key, so it may start with a digit; it may not
-# contain anything an env-var name cannot hold.
-_LABEL_RE = re.compile(r"\A[A-Za-z0-9_]+\Z")
+
+# One normaliser, not a second copy of the rule: the account manager applies the
+# same one before it ever gets here, and the client registry reads back the env
+# keys this produces. See telegram_mcp.aliases.normalise_account_label.
+normalise_label = normalise_account_label
 
 
-def normalise_label(raw: str) -> str:
-    r"""Turn a typed label into one that can survive a round trip through `.env`.
-
-    A label becomes part of an environment variable NAME, and python-dotenv refuses
-    to parse a line whose key contains a space: it warns on stderr and DROPS the
-    line. "KGB Verifier" was written literally once and produced
-    `TELEGRAM_SESSION_STRING_KGB VERIFIER=...` - an account that sat in the file,
-    looked correct, and could never load.
-
-    Spaces and hyphens become underscores; anything the result still cannot be
-    is refused, because there is no safe mapping to invent for it and refusing
-    loudly beats guessing. That promise used to be documented and not kept:
-    `---` collapsed to the empty label and `work=other` kept its `=`, which
-    moves the split point of the `.env` line and files the account under a key
-    nobody configured. The account manager applies the same rule before it ever
-    gets here, so this is the guard for the standalone path.
-    """
-    label = re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
-    if not _LABEL_RE.match(label):
-        raise ValueError(
-            f"{raw!r} is not a usable account label: a label becomes part of an "
-            "environment variable name, so it must be ASCII letters, digits and "
-            "underscores, and cannot be empty."
-        )
-    return label
+# How many times the 2FA password is asked for before the run gives up. `while
+# True` had no ceiling at all, and "the user gives up" is not a condition that
+# exists when stdin is a script.
+MAX_PASSWORD_ATTEMPTS = 5
 
 
 ENV_BACKUP_RETENTION = 5
@@ -294,24 +275,42 @@ def _qr_login(client: TelegramClient) -> None:
 
 
 def _sign_in_with_password(client: TelegramClient) -> None:
-    """Ask for the 2FA password until it is accepted, or the user gives up.
+    """Ask for the 2FA password until it is accepted or the attempts run out.
 
     Shared by BOTH login paths on purpose. This loop used to exist only in the QR
     branch; the phone branch called sign_in once, so a single mistyped password
     raised PasswordHashInvalidError, escaped to the outer handler and killed the
     whole run with "Failed to generate session string" - after the code had
     already been used, which is the expensive part to redo.
+
+    Bounded, because it used to be `while True` and "the user gives up" is not a
+    condition that exists in automation: a scripted or piped stdin answering the
+    same wrong password - or answering nothing, which does not even reach
+    Telegram - never leaves the loop, and there is no one at the terminal to
+    interrupt it. Every remaining attempt is counted out loud so a person can see
+    the run ending before it does.
     """
-    while True:
+    for remaining in range(MAX_PASSWORD_ATTEMPTS, 0, -1):
         pw = getpass.getpass("\nTwo-factor authentication enabled. Please enter your password: ")
         if not pw:
-            print(note("No password entered. Press Ctrl+C to give up, or try again."))
+            print(note(f"No password entered. {remaining - 1} attempt(s) left."))
             continue
         try:
             client.sign_in(password=pw)
             return
         except errors.PasswordHashInvalidError:
-            print(failure("That password was not accepted. Try again."))
+            print(failure(f"That password was not accepted. {remaining - 1} attempt(s) left."))
+
+    print()
+    print(
+        failure(
+            f"The password was not accepted in {MAX_PASSWORD_ATTEMPTS} attempts, so nothing "
+            "was saved. Run the generator again when you have it to hand - the cost is one "
+            "more QR scan or login code."
+        )
+    )
+    client.disconnect()
+    sys.exit(1)
 
 
 def _phone_login(client: TelegramClient) -> None:
