@@ -137,7 +137,7 @@ source = [
 show_missing = true
 skip_covered = true
 # A measured floor, not an aspiration. Measured 2026-08-24: this list reports
-# 88.10% over 3513 statements and 1228 branches, on Windows where the Win32
+# 88.12% over 3519 statements and 1230 branches, on Windows where the Win32
 # capture tests run. CI measures lower because it runs ubuntu-latest, where the
 # genuinely Windows-only capture tests skip - that gap is the reason the floor is
 # 85 and not the measured number.
