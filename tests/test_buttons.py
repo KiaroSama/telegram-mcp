@@ -192,7 +192,7 @@ async def test_clicking_a_callback_button_sends_that_buttons_payload(_wire):
     rows = [[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]
     client = _wire(_message(rows), answer=SimpleNamespace(message="done", alert=None, url=None))
 
-    payload = json.loads(await click_button(1, 7, 1, account="default"))
+    payload = json.loads(await click_button(1, 7, 1, expect_text="No", account="default"))
 
     assert client.calls[0].data == b"NO", "pressed the wrong button"
     assert payload["results"][0]["button_index"] == 1
@@ -203,7 +203,7 @@ async def test_clicking_a_callback_button_sends_that_buttons_payload(_wire):
 async def test_clicking_a_non_callback_button_is_refused_without_a_request(_wire):
     client = _wire(_message([[_button("KeyboardButtonUrl", text="Open", url="u")]]))
 
-    result = await click_button(1, 7, 0, account="default")
+    result = await click_button(1, 7, 0, expect_text="Open", account="default")
 
     assert isinstance(result, str) and "not a callback button" in result
     assert client.calls == [], "a request was sent for a button that cannot be pressed"
@@ -213,7 +213,7 @@ async def test_clicking_a_non_callback_button_is_refused_without_a_request(_wire
 async def test_clicking_an_out_of_range_index_names_the_valid_range(_wire):
     client = _wire(_message([[_callback()]]))
 
-    result = await click_button(1, 7, 5, account="default")
+    result = await click_button(1, 7, 5, expect_text="Confirm", account="default")
 
     assert "no button 5" in result and "0-0" in result
     assert client.calls == []
@@ -223,7 +223,7 @@ async def test_clicking_an_out_of_range_index_names_the_valid_range(_wire):
 async def test_a_password_gated_button_is_never_pressed(_wire):
     client = _wire(_message([[_callback(requires_password=True)]]))
 
-    result = await click_button(1, 7, 0, account="default")
+    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
 
     assert "2FA" in result or "password" in result
     assert client.calls == [], "a 2FA-gated callback was attempted"
@@ -236,7 +236,7 @@ async def test_a_silent_answer_is_reported_as_delivered_not_as_empty(_wire):
         answer=SimpleNamespace(message=None, alert=None, url=None),
     )
 
-    payload = json.loads(await click_button(1, 7, 0, account="default"))
+    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
 
     assert payload["results"][0]["bot_message"] is None
     assert "delivered" in payload["results"][0]["note_no_answer"]
@@ -277,7 +277,7 @@ async def test_clicking_a_reply_keyboard_button_is_refused_without_a_request(_wi
     """Its buttons have callback-shaped fakes here, so only the markup type saves us."""
     client = _wire(_message([[_callback()]], inline=False))
 
-    result = await click_button(1, 7, 0, account="default")
+    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
 
     assert "REPLY keyboard" in result and "send_message" in result
     assert client.calls == [], "a callback was sent for a reply-keyboard button"
@@ -542,7 +542,9 @@ async def test_the_legacy_press_goes_through_the_index_checked_path(_wire_legacy
         _message(rows), answer=SimpleNamespace(message="done", alert=None, url=None)
     )
 
-    payload = json.loads(await press_inline_button(1, 7, button_index=1, account="default"))
+    payload = json.loads(
+        await press_inline_button(1, 7, button_index=1, button_text="No", account="default")
+    )
 
     assert client.calls[0].data == b"NO"
     assert payload["results"][0]["button_index"] == 1
@@ -585,3 +587,50 @@ async def test_the_legacy_listing_needs_a_message_id(_wire_legacy):
     _wire_legacy(_message([[_callback()]]))
 
     assert "message_id" in await list_inline_buttons(1, account="default")
+
+
+# --- an index is a position; the label is the identity ---------------------
+
+
+@pytest.mark.asyncio
+async def test_pressing_without_an_expected_label_is_refused_before_any_callback(_wire):
+    """expect_text was merely recommended, so an index taken from a listing made
+    at any point in the past still sent a real callback. A bot that edits its own
+    keyboard turns that into a press on whatever now sits at that position -- the
+    audit sent a DELETE payload through it with no guard at all."""
+    client = _wire(
+        _message([[_callback(text="Delete everything", data=b"DELETE")]]),
+        answer=SimpleNamespace(message="gone", alert=None, url=None),
+    )
+
+    result = await click_button(1, 7, 0, account="default")
+
+    assert "expect_text" in result
+    assert client.calls == [], "a callback was sent against an unverified index"
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_costs_nothing_not_even_a_read(_wire):
+    """Nothing about the message can change the answer, so nothing about the
+    message needs fetching."""
+    client = _wire(_message([[_callback()]]))
+
+    await click_button(1, 7, 0, account="default")
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_also_needs_the_label_it_was_listed_under(_wire_legacy):
+    """The older name must not be the weaker route to the same callback."""
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    client = _wire_legacy(
+        _message([[_callback(text="Delete everything", data=b"DELETE")]]),
+        answer=SimpleNamespace(message="gone", alert=None, url=None),
+    )
+
+    result = await press_inline_button(1, 7, button_index=0, account="default")
+
+    assert "button_text" in result
+    assert client.calls == [], "the legacy name pressed an unverified index"

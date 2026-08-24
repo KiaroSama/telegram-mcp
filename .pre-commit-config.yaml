@@ -40,7 +40,7 @@ repos:
         stages: [pre-push]
       - id: pytest-coverage-ci
         name: pytest with coverage (ci parity)
-        entry: uv run --env-file .env.example pytest --cov --cov-report=term-missing --cov-report=xml
+        entry: uv run --env-file .env.example python scripts/run_tests_guarded.py -- --cov --cov-report=term-missing --cov-report=xml
         language: system
         pass_filenames: false
         stages: [pre-push]

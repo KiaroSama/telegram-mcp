@@ -8,6 +8,7 @@ Win32 window capture guards live in test_visual_capture.py.
 
 import gzip
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -795,3 +796,234 @@ def test_the_batch_ceiling_leaves_room_for_the_rest_of_the_machine():
         batch_width(10, MAX_FRAME_SOURCE_BYTES) <= 2
     ), "a ten-item batch at the per-asset ceiling must not run ten wide"
     assert batch_width(10, 1024) == 10, "a small batch must still run fully concurrent"
+
+
+# --- an uninterruptible native render is a process, not a thread ---------------
+
+
+def _repeater_bomb_tgs(copies=150, nest=3):
+    """A sub-KB .tgs whose ONE frame renders for ~12 seconds.
+
+    A Lottie *repeater* multiplies its group at render time rather than in the
+    file, and repeaters nest, so the rasteriser's work grows as ``copies ** nest``
+    while the JSON stays a few hundred bytes. This is the shape that makes the
+    render cost attacker-chosen: Telegram hands .tgs bytes to whoever asks for the
+    sticker, and nothing in the file's size hints at what it costs to draw.
+    """
+    import json as _json
+
+    group = {
+        "ty": "gr",
+        "it": [
+            {"ty": "el", "p": {"a": 0, "k": [0, 0]}, "s": {"a": 0, "k": [220, 220]}},
+            {
+                "ty": "st",
+                "c": {"a": 0, "k": [0.9, 0.2, 0.4, 1]},
+                "o": {"a": 0, "k": 60},
+                "w": {"a": 0, "k": 40},
+                "lc": 2,
+                "lj": 2,
+            },
+            {
+                "ty": "tr",
+                "p": {"a": 0, "k": [0, 0]},
+                "a": {"a": 0, "k": [0, 0]},
+                "s": {"a": 0, "k": [100, 100]},
+                "r": {"a": 0, "k": 0},
+                "o": {"a": 0, "k": 100},
+            },
+        ],
+    }
+    for _ in range(nest):
+        group = {
+            "ty": "gr",
+            "it": [
+                group,
+                {
+                    "ty": "rp",
+                    "c": {"a": 0, "k": copies},
+                    "o": {"a": 0, "k": 0},
+                    "m": 1,
+                    "tr": {
+                        "p": {"a": 0, "k": [1, 1]},
+                        "a": {"a": 0, "k": [0, 0]},
+                        "s": {"a": 0, "k": [99, 99]},
+                        "r": {"a": 0, "k": 3},
+                        "so": {"a": 0, "k": 100},
+                        "eo": {"a": 0, "k": 100},
+                        "o": {"a": 0, "k": 100},
+                    },
+                },
+                {
+                    "ty": "tr",
+                    "p": {"a": 0, "k": [256, 256]},
+                    "a": {"a": 0, "k": [0, 0]},
+                    "s": {"a": 0, "k": [100, 100]},
+                    "r": {"a": 0, "k": 0},
+                    "o": {"a": 0, "k": 100},
+                },
+            ],
+        }
+    document = {
+        "v": "5.5.7",
+        "fr": 60,
+        "ip": 0,
+        "op": 60,
+        "w": 512,
+        "h": 512,
+        "nm": "bomb",
+        "layers": [
+            {
+                "ddd": 0,
+                "ind": 1,
+                "ty": 4,
+                "nm": "L",
+                "sr": 1,
+                "ks": {
+                    "o": {"a": 0, "k": 100},
+                    "r": {"a": 0, "k": 0},
+                    "p": {"a": 0, "k": [256, 256, 0]},
+                    "a": {"a": 0, "k": [0, 0, 0]},
+                    "s": {"a": 0, "k": [100, 100, 100]},
+                },
+                "ao": 0,
+                "ip": 0,
+                "op": 60,
+                "st": 0,
+                "bm": 0,
+                "shapes": [group],
+            }
+        ],
+    }
+    return gzip.compress(_json.dumps(document).encode())
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_a_tgs_that_renders_far_past_its_budget_is_killed_not_waited_out():
+    """rlottie is native code. Called in-process it runs on a worker thread, and
+    Python cannot interrupt a thread from outside - so a single render that does
+    not return held the decode past every deadline, with the caller's cancellation
+    event never read. Checking the budget between frames cannot help when control
+    never reaches the next frame.
+
+    Measured with rlottie 1.3.8 on this machine: this 332-byte payload holds one
+    512x512 frame for ~12 seconds, and one more nesting level reaches half an
+    hour. As a child process it is just a PID, and the deadline can end it.
+    """
+    payload = _repeater_bomb_tgs()
+    assert len(payload) < 1024, f"the point is that the FILE is tiny: {len(payload)} bytes"
+
+    with tempfile.NamedTemporaryFile(suffix=".tgs", delete=False) as handle:
+        handle.write(payload)
+        path = handle.name
+
+    budget = frames._Budget(deadline=time.monotonic() + 2.0)
+    started = time.monotonic()
+    try:
+        with pytest.raises(FrameExtractionError):
+            frames._frames_with_lottie(path, 3, budget)
+        elapsed = time.monotonic() - started
+    finally:
+        os.unlink(path)
+
+    # Well under the ~12s a single frame of this costs, which is what proves the
+    # render was ended rather than allowed to finish.
+    assert elapsed < 9, f"the render ran to completion instead of being killed ({elapsed:.1f}s)"
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_a_caller_that_stops_waiting_stops_the_tgs_render_too():
+    """The event is the only way a decode on a worker thread learns that the
+    coroutine awaiting it was cancelled. Before the render moved into a child
+    process there was nothing to tell: the native call held the thread.
+    """
+    payload = _repeater_bomb_tgs()
+    with tempfile.NamedTemporaryFile(suffix=".tgs", delete=False) as handle:
+        handle.write(payload)
+        path = handle.name
+
+    cancelled = threading.Event()
+    threading.Timer(1.0, cancelled.set).start()
+    budget = frames._Budget(deadline=time.monotonic() + 60, cancelled=cancelled)
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(frames.DecodingCancelled):
+            frames._frames_with_lottie(path, 3, budget)
+        elapsed = time.monotonic() - started
+    finally:
+        os.unlink(path)
+
+    assert elapsed < 9, f"cancellation did not reach the renderer ({elapsed:.1f}s)"
+
+
+# --- the worker itself, in-process ---------------------------------------------
+#
+# It only ever RUNS in a child process, which is the whole point, and coverage
+# cannot see into one. Calling it directly is not a workaround for that: the
+# protocol between the two halves is real logic, and a byte-count or exit-code
+# mistake in it would otherwise only ever show up as the parent's generic
+# "the render was cut short".
+
+
+def _write_tgs(tmp_path, payload, name="anim.tgs"):
+    path = tmp_path / name
+    path.write_bytes(payload)
+    return str(path)
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_the_worker_emits_a_header_and_exactly_one_frame_of_bytes_per_index(
+    tmp_path, capsysbinary
+):
+    from telegram_mcp.visual import lottie_worker
+    from telegram_mcp.visual.frames import LOTTIE_RENDER_SIZE
+
+    assert lottie_worker.render(_write_tgs(tmp_path, _animated_tgs()), 3, LOTTIE_RENDER_SIZE) == 0
+
+    stdout = capsysbinary.readouterr().out
+    header_line, _, payload = stdout.partition(b"\n")
+    header = json.loads(header_line)
+
+    assert header["total"] > 1
+    assert len(header["indexes"]) == 3
+    # The parent slices this by a fixed stride and refuses a short reply, so an
+    # off-by-one frame here has to fail loudly rather than silently drop a frame.
+    assert len(payload) == LOTTIE_RENDER_SIZE * LOTTIE_RENDER_SIZE * 4 * 3
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_the_worker_reports_an_unopenable_file_with_its_own_exit_code(tmp_path, capsysbinary):
+    """The parent turns exit 3 into "could not open" and anything else into "could
+    not render". Collapsing the two would tell a caller the animation is broken
+    when in fact the bytes were never a Lottie at all."""
+    from telegram_mcp.visual import lottie_worker
+
+    path = _write_tgs(tmp_path, b"not gzipped lottie at all")
+
+    assert lottie_worker.main([path, "3", "512"]) == lottie_worker.EXIT_CANNOT_OPEN
+    assert capsysbinary.readouterr().err.strip(), "the failure carried no diagnostic"
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_the_worker_reports_a_zero_frame_animation_rather_than_rendering_a_blank(
+    tmp_path, capsysbinary
+):
+    """rlottie does not raise on garbage that still gunzips: it reports totalframe=0.
+    The worker forwards that verbatim and lets the parent decide, because the parent
+    is where the error text explaining it lives."""
+    from telegram_mcp.visual import lottie_worker
+
+    path = _write_tgs(tmp_path, gzip.compress(b'{"not":"a lottie"}'))
+
+    assert lottie_worker.main([path, "3", "512"]) == 0
+    stdout = capsysbinary.readouterr().out
+    assert json.loads(stdout.partition(b"\n")[0])["total"] == 0
+    assert stdout.partition(b"\n")[2] == b"", "a zero-frame reply must carry no frames"
+
+
+def test_the_worker_refuses_the_wrong_number_of_arguments(capsysbinary):
+    from telegram_mcp.visual import lottie_worker
+
+    assert lottie_worker.main(["only-a-path"]) == 2
+    assert b"usage:" in capsysbinary.readouterr().err

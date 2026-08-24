@@ -24,12 +24,14 @@ coreutils `timeout` uses, so CI reads it without special-casing.
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import signal
 import subprocess
 import sys
 import threading
 import time
+from typing import Optional
 
 # `timeout(1)`'s convention. CI and humans both already know this one.
 TIMEOUT_EXIT_CODE = 124
@@ -45,6 +47,23 @@ GRACE_SECONDS = 10.0
 POLL_SECONDS = 0.25
 
 
+def _positive_seconds(name: str, value: float) -> float:
+    """A budget that is not a finite positive number is not a budget.
+
+    `nan` is the dangerous one: every comparison against it is False, so
+    `elapsed > wall` never fires and the ceiling silently does not exist -
+    which is worse than having no ceiling at all, because the output still
+    claims one. `inf` disables it honestly but pointlessly, and a negative
+    value fires instantly on a run that has not misbehaved.
+    """
+    if not math.isfinite(value) or value <= 0:
+        raise SystemExit(
+            f"GUARDED RUNNER: --{name.replace('_', '-')} must be a finite positive "
+            f"number of seconds, got {value!r}."
+        )
+    return value
+
+
 def _worker_ceiling() -> int:
     """One shared cap on parallelism, resource-aware rather than core-count-proud.
 
@@ -56,38 +75,67 @@ def _worker_ceiling() -> int:
     return max(2, min(8, cores - 2))
 
 
-def _terminate_tree(process: subprocess.Popen) -> None:
-    """Terminate the child and everything it spawned, on either platform."""
-    if process.poll() is not None:
-        return
+def _group_alive(pgid: int) -> bool:
+    """Whether ANY process remains in the group. Signal 0 only checks, never kills."""
+    try:
+        os.killpg(pgid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Something is there; this process just may not signal it.
+        return True
 
+
+def _terminate_tree(process: subprocess.Popen, pgid: Optional[int]) -> None:
+    """Terminate the child and everything it spawned, on either platform.
+
+    Three things here are deliberate, and each of them was wrong in the first
+    version of this script:
+
+    * The parent exiting is NOT the end. pytest can die while a decoder it
+      spawned keeps running, so returning early on `process.poll()` left exactly
+      the orphan this function exists to prevent.
+    * ``pgid`` is captured while the child is still alive and passed in.
+      ``os.getpgid(pid)`` raises once the parent is reaped, so looking it up here
+      would fail precisely when escalation is needed.
+    * The grace period waits on the GROUP, not the parent, and escalates to
+      SIGKILL if anything is still there - a grandchild that ignores SIGTERM
+      otherwise survives the whole run.
+    """
     if os.name == "nt":
-        # taskkill /T walks the tree; there is no process-group signal on
-        # Windows that reaches grandchildren reliably.
+        # taskkill /T walks the tree; no process-group signal on Windows reaches
+        # grandchildren reliably. /F because a graceful ask has already failed by
+        # the time we are here.
         subprocess.run(
             ["taskkill", "/PID", str(process.pid), "/T", "/F"],
             capture_output=True,
             check=False,
         )
-    else:
-        # The child was started in its own session, so one signal reaches the
-        # whole group - including decoders pytest spawned.
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
+        process.poll()
+        return
+
+    if pgid is None:
+        process.kill()
+        process.poll()
+        return
+
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
 
     deadline = time.monotonic() + GRACE_SECONDS
     while time.monotonic() < deadline:
-        if process.poll() is not None:
+        if not _group_alive(pgid):
+            process.poll()
             return
         time.sleep(POLL_SECONDS)
 
-    if os.name != "nt":
-        try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
-        except (ProcessLookupError, PermissionError):
-            pass
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
     process.poll()
 
 
@@ -100,6 +148,13 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
     else:
         popen_extras["start_new_session"] = True
 
+    # The ceiling is exported, not merely printed. Nothing in this suite runs
+    # parallel today (no xdist is installed), so this constrains whatever reads
+    # the documented variable rather than pretending to cap workers that do not
+    # exist - the previous version printed a number it never applied anywhere.
+    child_env = dict(os.environ)
+    child_env.setdefault("HOOKMAKER_MAX_TEST_WORKERS", str(_worker_ceiling()))
+
     process = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,
@@ -109,8 +164,18 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
         stdin=subprocess.DEVNULL,
         text=True,
         bufsize=1,
+        env=child_env,
         **popen_extras,
     )
+
+    # Read once, now, while the parent is certainly alive: os.getpgid raises
+    # after it is reaped, which is exactly when termination needs the group.
+    pgid: Optional[int] = None
+    if os.name != "nt":
+        try:
+            pgid = os.getpgid(process.pid)
+        except (ProcessLookupError, PermissionError):
+            pgid = None
 
     last_output = time.monotonic()
     lock = threading.Lock()
@@ -146,7 +211,7 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
     if reason:
         print(f"\nGUARDED RUNNER: {reason}", file=sys.stderr)
         print("Terminating the test process tree.", file=sys.stderr)
-        _terminate_tree(process)
+        _terminate_tree(process, pgid)
         reader.join(timeout=GRACE_SECONDS)
         print(f"GUARDED RUNNER: tree terminated; exiting {TIMEOUT_EXIT_CODE}.", file=sys.stderr)
         return TIMEOUT_EXIT_CODE
@@ -173,13 +238,15 @@ def main() -> int:
         help="abandon the run after this long with no output (default: %(default)s)",
     )
     known, passthrough = parser.parse_known_args()
+    _positive_seconds("wall_seconds", known.wall_seconds)
+    _positive_seconds("idle_seconds", known.idle_seconds)
 
     if passthrough and passthrough[0] == "--":
         passthrough = passthrough[1:]
 
     print(
         f"GUARDED RUNNER: wall {known.wall_seconds:.0f}s, idle {known.idle_seconds:.0f}s, "
-        f"worker ceiling {_worker_ceiling()}",
+        f"HOOKMAKER_MAX_TEST_WORKERS={_worker_ceiling()}",
         file=sys.stderr,
     )
     return run(passthrough, known.wall_seconds, known.idle_seconds)
