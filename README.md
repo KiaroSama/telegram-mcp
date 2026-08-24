@@ -80,10 +80,22 @@ By default, an agent waits for replies by calling `wait_for_settled_message`, wh
 
 Clients that can wake an agent on external output (Claude Code's persistent `Monitor` on `tail -f`) can switch to callback mode instead:
 
-1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created owner-only (0600). Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path and a ready-to-use watch command.
+1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created readable by its owner alone — mode `0600` on POSIX, and a real owner-only ACL on Windows, where `chmod` toggles nothing but the read-only flag. Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path and a ready-to-use watch command.
 2. The agent arms a persistent Monitor with the `watch_command` returned by the tool. Every new line re-invokes the agent with the burst summary; no blocking tool call is held open, and the chat stays free.
 
-`disable_incoming_feed` switches back; `incoming_feed_status` reports the current mode. While the feed is enabled it consumes settled bursts, so don't combine it with `wait_for_settled_message`. Feed lines contain user-generated `name` fields — treat them as untrusted data.
+`disable_incoming_feed` switches back and waits for the consumer to actually stop; `incoming_feed_status` reports the current mode. While the feed is enabled it consumes settled bursts, so don't combine it with `wait_for_settled_message`. Feed lines contain user-generated `name` fields — treat them as untrusted data.
+
+Nothing here grows without a ceiling, because a server that runs for weeks otherwise leaks disk, memory and context in three separate places:
+
+| Bound | Default | Override |
+|---|---|---|
+| Feed file size before rotation (one previous generation is kept, so disk is bounded by ~2×) | 8 MiB | `TELEGRAM_EVENT_FEED_MAX_BYTES` |
+| Age at which the rotated generation is deleted | 7 days | `TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS` |
+| Chats held in the pending-burst map | 500 | `TELEGRAM_EVENT_PENDING_MAX` |
+| Age at which an uncollected burst is forgotten | 1 hour | `TELEGRAM_EVENT_PENDING_TTL_SECONDS` |
+| Chats listed by one `wait_for_new_message` | 50 (`limit`, max 100) | — |
+
+An override that is not a usable number — zero, negative, `nan`, `inf`, or not a number at all — is logged and ignored rather than silently removing the ceiling. Dropping a burst is never silent: `wait_for_new_message` and `incoming_feed_status` both report `dropped_total`, a per-reason breakdown, and the most recent drops. `tail -F` follows the name rather than the descriptor, so it reads across a rotation.
 
 ## Requirements
 

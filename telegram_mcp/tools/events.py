@@ -7,11 +7,15 @@ debouncing a burst (several messages typed in a row) into a single settled event
 """
 
 import asyncio
+import getpass
 import json
+import math
 import os
 import shlex
 import stat
+import subprocess
 import time
+from collections import deque
 from functools import partial
 import logging
 from pathlib import Path
@@ -20,6 +24,7 @@ from typing import Any, Dict, Optional, Tuple, Union
 from telethon import events as _events
 from telethon import utils
 
+from telegram_mcp.paging import LIMITS, bounded, bounded_slice
 from telegram_mcp.runtime import *  # mcp, clients, ToolAnnotations, log_and_format_error
 
 # (account_label, chat_id) -> {first_ts, last_ts, count, first_id, last_id, name,
@@ -41,6 +46,126 @@ _FEED_FILE_ENV = "TELEGRAM_EVENT_FEED_FILE"
 _feed_task: Optional[asyncio.Task] = None
 _feed_settle_ms: int = 6000
 _feed_autostart_done: bool = False
+
+# --- what stops any of this from growing forever -----------------------------
+#
+# Three separate leaks share one cause: a server that runs for weeks was never
+# told when to stop keeping something. The feed file was append-only with a
+# comment saying to rotate it by hand; the pending map had no count and no
+# expiry, so a conversation nobody collected stayed resident for the life of the
+# process; and the wait serialized however many chats happened to be in it, which
+# is the model's context rather than the machine's memory but leaks just the
+# same. Every number below is a ceiling with a default, overridable by
+# environment, and validated -- an unusable override falls back rather than
+# silently removing the ceiling it was meant to set.
+_FEED_MAX_BYTES_DEFAULT = 8 * 1024 * 1024
+_FEED_MAX_AGE_SECONDS_DEFAULT = 7 * 24 * 60 * 60
+_PENDING_MAX_DEFAULT = 500
+_PENDING_TTL_SECONDS_DEFAULT = 60 * 60
+
+# How long a cancelled consumer gets to actually stop before the caller is told
+# it did not. Cancellation is a request, and returning before it lands leaves the
+# task holding the feed file open under a caller who believes it is closed.
+_FEED_STOP_TIMEOUT_SECONDS = 5.0
+
+# Enough dropped bursts to see a pattern, few enough that the ledger reporting
+# the leak is not itself one.
+_DROP_LEDGER_MAX = 20
+
+
+def _positive_env(name: str, default: int) -> int:
+    """A whole positive number from the environment, or ``default``.
+
+    ``nan`` is the value worth naming: every comparison against it is False, so a
+    size ceiling set to it does not fire and the status still reports a ceiling.
+    That is worse than no bound at all. ``inf`` disables it honestly but
+    pointlessly, and zero or a negative fires on everything.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = math.nan
+    if not math.isfinite(value) or value < 1:
+        logging.getLogger("telegram_mcp").warning(
+            "%s=%r is not a usable limit; using %d", name, raw, default
+        )
+        return default
+    return int(value)
+
+
+def feed_retention() -> Tuple[int, int]:
+    """``(max_bytes, max_age_seconds)`` for the feed file."""
+    return (
+        _positive_env("TELEGRAM_EVENT_FEED_MAX_BYTES", _FEED_MAX_BYTES_DEFAULT),
+        _positive_env("TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS", _FEED_MAX_AGE_SECONDS_DEFAULT),
+    )
+
+
+def pending_bounds() -> Tuple[int, int]:
+    """``(max_pending_chats, ttl_seconds)`` for the un-collected burst map."""
+    return (
+        _positive_env("TELEGRAM_EVENT_PENDING_MAX", _PENDING_MAX_DEFAULT),
+        _positive_env("TELEGRAM_EVENT_PENDING_TTL_SECONDS", _PENDING_TTL_SECONDS_DEFAULT),
+    )
+
+
+def _new_drop_ledger() -> Dict[str, Any]:
+    return {"total": 0, "reasons": {}, "recent": deque(maxlen=_DROP_LEDGER_MAX)}
+
+
+# A dropped burst is a message the agent will never answer. Once a ceiling is
+# reached, losing one may be unavoidable; losing it quietly is not, so every drop
+# is counted and the most recent few are named.
+_dropped: Dict[str, Any] = _new_drop_ledger()
+
+# Paths this process has already made owner-only. On Windows that costs a
+# subprocess, which is far too much to pay per burst; on POSIX the check is a
+# cheap fstat and runs every time, so an externally rotated file is still fixed.
+_owner_only_paths: set = set()
+
+
+def _record_drop(key: tuple, reason: str) -> None:
+    account, chat_id = key
+    _dropped["total"] += 1
+    _dropped["reasons"][reason] = _dropped["reasons"].get(reason, 0) + 1
+    _dropped["recent"].append(
+        {"account": account, "chat_id": chat_id, "reason": reason, "at": round(time.time(), 2)}
+    )
+
+
+def overflow_state() -> Dict[str, Any]:
+    """What was dropped, and why. Reported by the waits and by the status tool."""
+    return {
+        "dropped_total": _dropped["total"],
+        "dropped_reason_counts": dict(_dropped["reasons"]),
+        "recent_dropped": list(_dropped["recent"]),
+    }
+
+
+def _expire_pending() -> None:
+    """Forget bursts nobody came for. Called from the waits and the feed loop, so
+    the map shrinks on a quiet server too, not only when a message arrives."""
+    _max_count, ttl = pending_bounds()
+    cutoff = time.monotonic() - ttl
+    for key in [key for key, rec in _pending_msgs.items() if rec["last_ts"] < cutoff]:
+        _pending_msgs.pop(key, None)
+        _record_drop(key, "expired")
+
+
+def _enforce_pending_ceiling() -> None:
+    """Drop least-recently-active chats until the map fits.
+
+    Oldest first: the newest message is the one an agent still has a chance of
+    answering usefully.
+    """
+    max_count, _ttl = pending_bounds()
+    while len(_pending_msgs) > max_count:
+        oldest = min(_pending_msgs, key=lambda key: _pending_msgs[key]["last_ts"])
+        _pending_msgs.pop(oldest, None)
+        _record_drop(oldest, "overflow")
 
 
 def _get_activity_event() -> asyncio.Event:
@@ -128,22 +253,108 @@ def feed_enabled() -> bool:
     return _feed_task is not None and not _feed_task.done()
 
 
+def _rotated_feed_path(path: Path) -> Path:
+    """The one retained generation. One, not a numbered series: a series is the
+    same unbounded growth with more filenames."""
+    return path.with_name(path.name + ".1")
+
+
+def _restrict_to_owner(path, fd: Optional[int] = None) -> None:
+    """Make ``path`` readable by its owner alone, however this platform says that.
+
+    The feed holds contact names, usernames and chat ids, so this is a privacy
+    control and it fails closed: a caller who cannot be given a private file is
+    told, rather than handed a world-readable one.
+
+    Two implementations because the two systems do not express the same thing.
+    On POSIX the mode is the answer and `fchmod` on the open descriptor applies
+    it without a TOCTOU window. On Windows `os.chmod` toggles only the read-only
+    flag — it cannot clear the read bit for anyone — so a mode-only guard left
+    every local account able to read the feed. `icacls` is the real control
+    there: drop inherited ACEs, grant the current user and nobody else.
+    """
+    if os.name == "posix":
+        if fd is not None:
+            if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                os.fchmod(fd, 0o600)
+        else:
+            os.chmod(path, 0o600)
+        return
+
+    key = str(path)
+    if key in _owner_only_paths:
+        return
+    try:
+        completed = subprocess.run(
+            ["icacls", key, "/inheritance:r", "/grant:r", f"{getpass.getuser()}:(F)"],
+            capture_output=True,
+            text=True,
+            # A bound, because this runs on the event loop's thread: an icacls
+            # that never returns would stop the feed rather than slow it.
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise OSError(f"cannot restrict {key} to its owner: {error}") from error
+    if completed.returncode != 0:
+        raise OSError(
+            f"cannot restrict {key} to its owner: icacls exited {completed.returncode} "
+            f"({(completed.stderr or completed.stdout or '').strip()})"
+        )
+    _owner_only_paths.add(key)
+
+
+def _rotate_feed_if_needed(path: Path) -> None:
+    """Keep the feed inside its size and age budget, before anything is appended.
+
+    Checked at open time rather than mid-write, so a file can carry the one
+    record that took it over its ceiling. Two generations of that is the bound.
+    """
+    max_bytes, max_age = feed_retention()
+    rotated = _rotated_feed_path(path)
+
+    try:
+        if time.time() - rotated.stat().st_mtime > max_age:
+            rotated.unlink()
+            _owner_only_paths.discard(str(rotated))
+    except OSError:
+        pass  # no rotated generation, or it went away underneath us
+
+    try:
+        if path.stat().st_size < max_bytes:
+            return
+    except OSError:
+        return  # nothing to rotate yet
+
+    try:
+        # os.replace, not a copy: atomic, and it drops the previous generation in
+        # the same step rather than leaving a window with three of them.
+        os.replace(path, rotated)
+    except OSError:
+        logging.getLogger("telegram_mcp").exception("cannot rotate the event feed file")
+        return
+    # Both names now refer to different files than they did.
+    _owner_only_paths.discard(str(path))
+    _owner_only_paths.discard(str(rotated))
+    _restrict_to_owner(rotated)
+
+
 def _open_feed_append():
-    """Append-open the feed file, enforcing 0600 — it holds private contact metadata.
+    """Append-open the feed file, owner-only — it holds private contact metadata.
 
     `Path.touch(mode=...)` only applies its mode when creating, so an existing or
-    externally rotated 0644 file keeps its permissions; fchmod on the open
-    descriptor fixes that without a TOCTOU window.
+    externally rotated file keeps whatever permissions it had; the restriction is
+    therefore applied on every open rather than only on creation.
     """
     path = feed_file_path()
     if not os.getenv(_FEED_FILE_ENV):
         # Only auto-create the directory we own; an explicit path must exist so a
         # typo fails loudly instead of scattering directories.
         path.parent.mkdir(parents=True, exist_ok=True)
+    _rotate_feed_if_needed(path)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
-            os.fchmod(fd, 0o600)
+        _restrict_to_owner(path, fd)
     except OSError:
         os.close(fd)
         raise
@@ -151,7 +362,7 @@ def _open_feed_append():
 
 
 def _touch_feed_file() -> None:
-    """Create (or fix the mode of) the feed file before starting the consumer."""
+    """Create (or re-restrict, and rotate) the feed file before the consumer starts."""
     _open_feed_append().close()
 
 
@@ -161,12 +372,14 @@ async def _feed_loop(settle_ms: int) -> None:
     ev = _get_activity_event()
     while True:
         try:
+            _expire_pending()
             settled_key, soonest_remaining = _scan_settled(time.monotonic(), settle)
             if settled_key is not None:
                 rec = _pending_msgs[settled_key]
                 line = dict(_burst_summary(settled_key, rec), ts=round(time.time(), 2))
                 del line["event"]
-                # ponytail: append-only file; rotate it manually (tail -F survives rotation)
+                # Rotation happens inside the open, so `tail -F` (which follows the
+                # name, not the descriptor) keeps reading across it.
                 with _open_feed_append() as f:
                     f.write(json.dumps(line, ensure_ascii=False) + "\n")
                 # Pop only after a successful write (no await in between, so no
@@ -193,6 +406,28 @@ def _start_feed(settle_ms: int) -> None:
     # disable_incoming_feed cannot be resurrected by the next incoming message.
     _feed_autostart_done = True
     _feed_task = asyncio.get_running_loop().create_task(_feed_loop(settle_ms))
+
+
+async def _stop_feed(task: asyncio.Task) -> bool:
+    """Cancel the consumer and WAIT for it, bounded. True when it actually stopped.
+
+    `task.cancel()` schedules a cancellation; it does not perform one. Returning
+    at that point told the caller the feed was off while the task was still
+    running, still holding the feed file open and still consuming settled bursts
+    that `wait_for_settled_message` was about to be told it could have.
+
+    `asyncio.wait` rather than `await task`: awaiting a cancelled task re-raises
+    the CancelledError here, and swallowing that is how a cancellation aimed at
+    the caller gets eaten by mistake.
+    """
+    task.cancel()
+    done, _still_running = await asyncio.wait({task}, timeout=_FEED_STOP_TIMEOUT_SECONDS)
+    if not done:
+        logging.getLogger("telegram_mcp").warning(
+            "incoming feed task did not stop within %.0fs of being cancelled",
+            _FEED_STOP_TIMEOUT_SECONDS,
+        )
+    return bool(done)
 
 
 def _maybe_autostart_feed() -> None:
@@ -252,6 +487,11 @@ async def _on_new_incoming(account: str, event) -> None:
             rec["first_id"] = min(rec["first_id"], msg_id)
             rec["last_id"] = max(rec["last_id"], msg_id)
             rec["count"] += 1
+        # Both bounds, in this order: expiry first so a burst that has simply
+        # gone stale is dropped as stale, and only genuine pressure counts as
+        # overflow.
+        _expire_pending()
+        _enforce_pending_ceiling()
         _maybe_autostart_feed()
         _get_activity_event().set()
     except Exception:
@@ -284,6 +524,7 @@ def register_incoming_handlers() -> None:
 async def wait_for_new_message(
     timeout: float = 50.0,
     chat_id: Optional[Union[int, str]] = None,
+    limit: int = 50,
     account: Optional[str] = None,
 ) -> str:
     """
@@ -305,12 +546,24 @@ async def wait_for_new_message(
             any unrelated conversation wakes the call and you burn turns on
             messages you are not waiting for. Other chats keep accumulating and
             are still there when you ask for them.
+        limit: Most chats to list in one answer (default 50). The pending set is
+            bounded but not small, and every chat listed costs context; `total`
+            and `has_more` say what was left out. Ask for the rest by calling
+            again, or narrow with chat_id.
+
+    The answer also carries `dropped_total`: bursts the server had to forget
+    because the pending set hit its ceiling or its age limit. Anything counted
+    there is a message no wait will ever return.
     """
     try:
+        bound = bounded(limit, LIMITS["wait_for_new_message"])
+        if bound.error:
+            return bound.error
         target = await _wait_target(chat_id, account)
         ev = _get_activity_event()
         deadline = time.monotonic() + timeout
         while True:
+            _expire_pending()
             # Both halves of the key matter: `target` names a chat within a
             # login, so an unfiltered account would report another login's chat
             # under an id that means something different there.
@@ -331,12 +584,21 @@ async def wait_for_new_message(
                     }
                     for key, rec in pending.items()
                 ]
-                return json.dumps({"event": True, "pending_chats": chats}, ensure_ascii=False)
+                served, paging = bounded_slice(chats, bound)
+                return json.dumps(
+                    {"event": True, "pending_chats": served, **paging, **overflow_state()},
+                    ensure_ascii=False,
+                )
 
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return json.dumps(
-                    {"event": False, "reason": "timeout", "waiting_for": target},
+                    {
+                        "event": False,
+                        "reason": "timeout",
+                        "waiting_for": target,
+                        **overflow_state(),
+                    },
                     ensure_ascii=False,
                 )
             ev.clear()
@@ -346,7 +608,12 @@ async def wait_for_new_message(
                 await asyncio.wait_for(ev.wait(), timeout=remaining)
             except asyncio.TimeoutError:
                 return json.dumps(
-                    {"event": False, "reason": "timeout", "waiting_for": target},
+                    {
+                        "event": False,
+                        "reason": "timeout",
+                        "waiting_for": target,
+                        **overflow_state(),
+                    },
                     ensure_ascii=False,
                 )
     except Exception as e:
@@ -392,6 +659,7 @@ async def wait_for_settled_message(
         deadline = time.monotonic() + max_wait_ms / 1000.0
         ev = _get_activity_event()
         while True:
+            _expire_pending()
             now = time.monotonic()
             settled_key, soonest_remaining = _scan_settled(
                 now, settle, only=target, account=account
@@ -458,7 +726,9 @@ async def enable_incoming_feed(settle_ms: int = 6000) -> str:
         if feed_enabled():
             if settle_ms == _feed_settle_ms:
                 return json.dumps(incoming_feed_state(), ensure_ascii=False)
-            _feed_task.cancel()
+            # Awaited, so the replacement consumer is never briefly the second
+            # one racing for the same settled bursts.
+            await _stop_feed(_feed_task)
         _start_feed(settle_ms)
         return json.dumps(incoming_feed_state(), ensure_ascii=False)
     except Exception as e:
@@ -472,8 +742,14 @@ async def disable_incoming_feed() -> str:
         global _feed_task
         if not feed_enabled():
             return "Incoming feed is not enabled."
-        _feed_task.cancel()
-        _feed_task = None
+        task, _feed_task = _feed_task, None
+        if not await _stop_feed(task):
+            return (
+                "Incoming feed asked to stop, but the consumer was still running "
+                f"{_FEED_STOP_TIMEOUT_SECONDS:.0f}s later. It is no longer the registered "
+                "feed and will stop on its own; until it does it may still consume a "
+                "settled burst. Check the server log."
+            )
         return "Incoming feed disabled."
     except Exception as e:
         return log_and_format_error("disable_incoming_feed", e)
@@ -491,10 +767,24 @@ async def incoming_feed_status() -> str:
 
 def incoming_feed_state() -> Dict[str, Any]:
     path = feed_file_path()
+    max_bytes, max_age = feed_retention()
+    max_pending, pending_ttl = pending_bounds()
     return {
         "enabled": feed_enabled(),
         "feed_file": str(path),
         "settle_ms": _feed_settle_ms,
+        "rotated_file": str(_rotated_feed_path(path)),
+        "max_bytes": max_bytes,
+        "max_age_seconds": max_age,
+        "retention_note": (
+            "The feed rotates at max_bytes and keeps one previous generation, deleted "
+            "once it is older than max_age_seconds. Disk use is bounded by roughly "
+            "twice max_bytes. `tail -F` follows the name, so it survives a rotation."
+        ),
+        "max_pending_chats": max_pending,
+        "pending_ttl_seconds": pending_ttl,
+        "pending_chats": len(_pending_msgs),
+        **overflow_state(),
         # -F survives rotation/truncation and waits for a not-yet-created file.
         "watch_command": f"tail -n 0 -F {shlex.quote(str(path))}",
         "watch_command_for_one_chat": (
