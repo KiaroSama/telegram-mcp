@@ -1,6 +1,41 @@
 """Media MCP tools."""
 
+import secrets
+
 from telegram_mcp.runtime import *
+
+# What one download_media call may write before it is stopped. Telegram files run
+# to 2GB (4GB for premium), and the tool had no ceiling at all: a single call
+# could fill the disk. This matches the send_file ceiling the project already
+# chose for itself, and the caller can raise it per call with max_bytes.
+_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024
+
+# How many collision-avoiding suffixes to try before giving up. A download must
+# not overwrite a file that is already there, and the default name is only
+# second-precise, so two downloads in one second collide.
+_DOWNLOAD_NAME_ATTEMPTS = 100
+
+
+class _DownloadTooLarge(Exception):
+    """Raised out of the progress callback to stop an over-cap stream mid-flight."""
+
+
+def _reserve_free_path(target: Path) -> Optional[Path]:
+    """Create and return an unused path near ``target``, or None if there is none.
+
+    O_EXCL is the reservation: it fails if the name appeared between the check
+    and the create, so the caller owns the name it gets back rather than merely
+    having seen it free a moment ago.
+    """
+    stem, suffix, parent = target.stem, target.suffix, target.parent
+    for attempt in range(_DOWNLOAD_NAME_ATTEMPTS):
+        candidate = parent / (f"{stem}{suffix}" if attempt == 0 else f"{stem}-{attempt}{suffix}")
+        try:
+            os.close(os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            return candidate
+        except FileExistsError:
+            continue
+    return None
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
@@ -139,23 +174,45 @@ async def download_media(
     chat_id: Union[int, str],
     message_id: int,
     file_path: Optional[str] = None,
+    max_bytes: Optional[int] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
     """
     Download media from a message in a chat.
+
+    The bytes land in a temporary file first and are moved into place only once
+    the download has finished, been size-checked and been re-checked against the
+    allowed roots. A failure, a cancellation or an over-cap stream therefore
+    leaves nothing behind, and an existing file is never overwritten -- a
+    colliding name gets a `-1`, `-2` suffix.
+
     Args:
         chat_id: The chat ID or username.
         message_id: The message ID containing the media.
         file_path: Optional absolute or relative path under allowed roots.
             If omitted, saves into `<first_root>/downloads/`.
+        max_bytes: Ceiling for this download, in bytes. Defaults to 200 MB.
+            Telegram advertises the size up front, so an oversized file is
+            refused before anything is fetched; a stream that outgrows the cap
+            anyway is stopped mid-flight.
     """
+    cap = int(max_bytes) if max_bytes else _DOWNLOAD_MAX_BYTES
+    temp_stem: Optional[Path] = None
+    moved = False
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         msg = await cl.get_messages(entity, ids=message_id)
         if not msg or not msg.media:
             return "No media found in the specified message."
+
+        advertised = getattr(getattr(msg, "file", None), "size", None)
+        if advertised and advertised > cap:
+            return (
+                f"Download refused: the media is {advertised} bytes, over the "
+                f"{cap}-byte limit. Raise max_bytes to fetch it anyway."
+            )
 
         default_name = f"telegram_{chat_id}_{message_id}_{int(time.time())}"
         out_path, path_error = await _resolve_writable_file_path(
@@ -167,29 +224,59 @@ async def download_media(
         if path_error:
             return path_error
 
-        # Strip user-supplied extension so Telethon auto-detects the real media type.
-        # If a path with extension is passed (e.g. ticket.jpg), Telethon writes to that
-        # exact path even if the file is actually a PDF. Stripping the suffix lets
-        # Telethon append the correct extension based on the actual file content.
-        out_path_for_dl = out_path.with_suffix("")
-        downloaded = await cl.download_media(msg, file=str(out_path_for_dl))
+        # Telethon picks the extension from the content, so it is handed a STEM:
+        # passing ticket.jpg for a PDF would write a PDF called ticket.jpg. The
+        # stem is unpredictable and temporary, so a failed download cannot be
+        # mistaken for the real file and cannot be squatted on in advance.
+        temp_stem = out_path.parent / f".{out_path.stem}.{secrets.token_hex(8)}.part"
+
+        def _stop_at_cap(received, _total):
+            if received > cap:
+                raise _DownloadTooLarge(
+                    f"Download aborted: the stream passed the {cap}-byte limit "
+                    "(max_bytes). Nothing was kept."
+                )
+
+        downloaded = await cl.download_media(
+            msg, file=str(temp_stem), progress_callback=_stop_at_cap
+        )
         if not downloaded:
             return f"Download failed for message {message_id}."
 
-        final_path = Path(downloaded).resolve(strict=True)
+        temp_path = Path(downloaded).resolve(strict=True)
+        if temp_path.stat().st_size > cap:
+            return (
+                f"Download refused: the file turned out to be larger than the "
+                f"{cap}-byte limit (max_bytes). Nothing was kept."
+            )
+
         roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
-        # The file already exists by now, and it is not the path the pre-flight gate
-        # validated: out_path.with_suffix("") hands Telethon a stem and lets it pick
-        # the extension. A refusal that leaves those bytes outside the allowed roots
-        # has enforced nothing, so every refusing return takes the file with it.
+        # Re-checked against the roots as they are NOW, and against the path
+        # Telethon actually chose rather than the one the pre-flight gate saw.
         if roots_error:
-            final_path.unlink(missing_ok=True)
             return roots_error
+        if not _path_is_within_any_root(temp_path, roots):
+            return "Download refused: the resulting path is outside the allowed roots."
+
+        final_path = _reserve_free_path(out_path.with_suffix(temp_path.suffix))
+        if final_path is None:
+            return (
+                f"Download refused: {_DOWNLOAD_NAME_ATTEMPTS} names near "
+                f"{out_path.name} are already taken. Pass file_path to choose one."
+            )
         if not _path_is_within_any_root(final_path, roots):
             final_path.unlink(missing_ok=True)
             return "Download refused: the resulting path is outside the allowed roots."
 
+        # os.replace over the reserved placeholder: the name is already ours, so
+        # this cannot clobber a file that appeared in the meantime.
+        os.replace(temp_path, final_path)
+        moved = True
         return f"Media downloaded to {final_path}."
+    except _DownloadTooLarge as e:
+        # The caller's own limit, not a fault: say which one and how to raise it,
+        # rather than burying it in a generic error code.
+        return str(e)
     except Exception as e:
         return log_and_format_error(
             "download_media",
@@ -198,6 +285,18 @@ async def download_media(
             message_id=message_id,
             file_path=file_path,
         )
+    finally:
+        # Every exit that did not move the file into place -- a refusal, an
+        # exception, or a CancelledError, which is a BaseException and never
+        # reaches the handler above -- takes the partial bytes with it. Globbed on
+        # the stem because Telethon chooses the extension: when it raises before
+        # returning, the only thing known about the partial file is its prefix.
+        if temp_stem is not None and not moved:
+            for stray in temp_stem.parent.glob(f"{temp_stem.name}*"):
+                try:
+                    stray.unlink()
+                except OSError:
+                    logger.warning("could not remove the partial download at %s", stray)
 
 
 @mcp.tool(
