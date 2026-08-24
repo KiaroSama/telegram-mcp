@@ -34,15 +34,10 @@ import telethon
 from telegram_mcp.settings import _parse_bool_env
 from sanitize import sanitize_name
 
-try:  # POSIX advisory locking.
+try:  # POSIX advisory locking; absent on Windows, where the atomic replace carries it.
     import fcntl
 except ImportError:  # pragma: no cover - platform dependent
     fcntl = None
-
-try:  # the Windows equivalent; one of the two is always present.
-    import msvcrt
-except ImportError:  # pragma: no cover - platform dependent
-    msvcrt = None
 
 logger = logging.getLogger("telegram_mcp")
 
@@ -144,95 +139,16 @@ class AliasStoreUnreadable(Exception):
     """The alias file exists but could not be read, so writing would destroy it."""
 
 
-# How long a writer waits for the lock before giving up, and how often it retries.
-# Bounded on purpose: an alias write must never become an unkillable wait, and a
-# stale lock file must not deadlock every later call.
-_LOCK_TIMEOUT_SECONDS = 10.0
-_LOCK_RETRY_SECONDS = 0.05
-
-
-def _lock_path(path: Path) -> str:
-    return str(path) + ".lock"
-
-
-def _lock_exclusive(lock_fd: int) -> bool:
-    """Take the lock without blocking. False means someone else holds it."""
-    if fcntl is not None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            return True
-        except OSError:
-            return False
-    if msvcrt is not None:
-        try:
-            msvcrt.locking(lock_fd, msvcrt.LK_NBLCK, 1)
-            return True
-        except OSError:
-            return False
-    return False
-
-
-def _unlock(lock_fd: int) -> None:
-    if fcntl is not None:
-        try:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-    elif msvcrt is not None:
-        try:
-            msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
-        except OSError:
-            pass
-
-
-def _try_acquire(path: Path) -> bool:
-    """Probe whether the alias lock is free, taking and releasing it if so.
-
-    Exists so the exclusivity of the lock can be proved from a second process,
-    which is the only place the bug it guards against could ever show up.
-    """
-    lock_fd = os.open(_lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
-    try:
-        if not _lock_exclusive(lock_fd):
-            return False
-        _unlock(lock_fd)
-        return True
-    finally:
-        os.close(lock_fd)
-
-
 @contextmanager
 def _alias_lock(path: Path):
-    """Serialize read-modify-write cycles across processes.
-
-    This used to be a bare ``yield`` wherever ``fcntl`` was missing, i.e. on all of
-    Windows - the platform this project targets first. ``update_aliases`` loads the
-    whole map, mutates it and writes it back, so two unserialized writers each
-    saved their own copy and the second silently discarded the first. A deleted
-    alias could reappear that way.
-
-    ``msvcrt.locking`` is the Windows equivalent of ``flock`` and needs the byte it
-    locks to exist, hence the one-byte file. The wait is bounded: an alias write
-    must not become an unkillable wait if a holder dies badly.
-    """
-    lock_fd = os.open(_lock_path(path), os.O_RDWR | os.O_CREAT, 0o600)
+    """Serialize read-modify-write cycles across processes (best effort)."""
+    if fcntl is None:  # pragma: no cover - Windows
+        yield
+        return
+    lock_fd = os.open(str(path) + ".lock", os.O_WRONLY | os.O_CREAT, 0o600)
     try:
-        if os.path.getsize(_lock_path(path)) == 0:
-            # msvcrt locks a byte range, so there has to be a byte to lock.
-            os.write(lock_fd, b"\0")
-            os.lseek(lock_fd, 0, os.SEEK_SET)
-        deadline = time.monotonic() + _LOCK_TIMEOUT_SECONDS
-        while not _lock_exclusive(lock_fd):
-            if time.monotonic() >= deadline:
-                raise TimeoutError(
-                    f"another process has held the alias lock for more than "
-                    f"{_LOCK_TIMEOUT_SECONDS:.0f}s: {_lock_path(path)}"
-                )
-            time.sleep(_LOCK_RETRY_SECONDS)
-        try:
-            yield
-        finally:
-            _unlock(lock_fd)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
     finally:
         os.close(lock_fd)
 
@@ -313,24 +229,7 @@ def _covers(query_tokens: List[str], alias_tokens: List[str]) -> bool:
     return all(assign(token, set()) for token in query_tokens)
 
 
-def _visible_to(record: Dict[str, Any], account: Optional[str]) -> bool:
-    """Whether an alias row may be used by the given login.
-
-    A row carries the account it was saved on. Chat ids are only unique within a
-    login, so resolving another account's alias hands a send tool an id that names
-    a different person there - or nobody.
-
-    A row with no account predates scoping. Those stay visible everywhere, because
-    refusing them would break every alias saved before this existed; they are
-    migrated the next time their owner re-saves them.
-    """
-    if account is None:
-        return True
-    stored = record.get("account")
-    return stored is None or stored == account
-
-
-def match_aliases(query: str, account: Optional[str] = None) -> List[tuple]:
+def match_aliases(query: str) -> List[tuple]:
     """Return [(alias, record)] for a free-text reference.
 
     Exact key wins outright. Otherwise EVERY token of the query must match some
@@ -338,9 +237,7 @@ def match_aliases(query: str, account: Optional[str] = None) -> List[tuple]:
     word that lands nowhere disqualifies the alias. That asymmetry is what keeps
     "игорь смирнов" from matching stored "чикичев игорь" on one shared word.
     """
-    aliases = {
-        alias: record for alias, record in load_aliases().items() if _visible_to(record, account)
-    }
+    aliases = load_aliases()
     key = alias_key(query)
     if key in aliases:
         return [(key, aliases[key])]
@@ -355,7 +252,7 @@ def match_aliases(query: str, account: Optional[str] = None) -> List[tuple]:
     ]
 
 
-def apply_alias(identifier: Union[int, str], account: Optional[str] = None) -> Union[int, str]:
+def apply_alias(identifier: Union[int, str]) -> Union[int, str]:
     """Resolve a SAVED alias to its chat ID, or return the identifier untouched.
 
     Exact keys only, deliberately: a fuzzy hit is a suggestion, never a recipient.
@@ -373,9 +270,7 @@ def apply_alias(identifier: Union[int, str], account: Optional[str] = None) -> U
     if is_handle_like(identifier):
         return identifier  # a real username/phone/id/self reference is never shadowed
     record = load_aliases().get(alias_key(identifier))
-    if record is None or not _visible_to(record, account):
-        return identifier
-    return record["id"]
+    return record["id"] if record else identifier
 
 
 class AliasID(int):

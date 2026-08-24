@@ -38,11 +38,13 @@ def _isolate_session_locks(tmp_path, monkeypatch):
 
     original_init = singleton_module.SessionLock.__init__
 
-    def _init_with_tmp_dir(self, label, session_identity, *, lock_dir=tmp_path):
-        original_init(self, label, session_identity, lock_dir=lock_dir)
+    def _init_with_tmp_dir(self, session_identity, *, lock_dir=tmp_path):
+        original_init(self, session_identity, lock_dir=lock_dir)
 
     monkeypatch.setattr(singleton_module.SessionLock, "__init__", _init_with_tmp_dir)
-    monkeypatch.setattr(runner, "_lock_grace_seconds", lambda: 0.01)
+    # Set through the real env var rather than patching _lock_grace_seconds out:
+    # the parser is itself under test below, and a stub would hide it.
+    monkeypatch.setenv("TELEGRAM_LOCK_GRACE_SECONDS", "0.01")
     yield
     runner._session_locks.clear()
 
@@ -183,3 +185,106 @@ async def test_serve_http_configures_allowed_hosts(monkeypatch):
     assert security.enable_dns_rebinding_protection is True
     assert security.allowed_hosts == ["mcp.example.com", "localhost:8765"]
     assert security.allowed_origins == ["https://mcp.example.com"]
+
+
+# --- F05: the process lock must key on session identity, never on the label ---
+
+
+def test_two_labels_sharing_one_session_string_get_the_same_lock_file(tmp_path):
+    """One auth key, two labels: the lock has to be the SAME file.
+
+    `{label}-{digest}.lock` gave `work` and `personal` a lock each for one
+    StringSession, so both connected and Telegram burned the key with
+    AuthKeyDuplicatedError - the exact outcome this lock exists to prevent.
+    """
+    from telegram_mcp.singleton import SessionLock
+
+    first = SessionLock("string:SHARED", lock_dir=tmp_path)
+    second = SessionLock("string:SHARED", lock_dir=tmp_path)
+
+    assert first.path == second.path
+
+
+@pytest.mark.asyncio
+async def test_two_labels_on_one_session_are_refused_before_connecting():
+    """The second label must never reach connect() with the same auth key."""
+    first = _FakeClient(authorized=True, identity="one-and-only")
+    second = _FakeClient(authorized=True, identity="one-and-only")
+
+    await runner._connect_authorized_client("work", first)
+    with pytest.raises(runner.SessionLockError):
+        await runner._connect_authorized_client("personal", second)
+
+    assert second.connected is False
+
+
+def test_a_symlinked_file_session_is_the_same_identity(tmp_path):
+    """A symlink alias must not buy a second lock on the same session file."""
+    from telegram_mcp.singleton import session_identity
+
+    real = tmp_path / "real.session"
+    real.write_text("x", encoding="utf-8")
+    link = tmp_path / "alias.session"
+    try:
+        link.symlink_to(real)
+    except (OSError, NotImplementedError) as exc:  # pragma: no cover - unprivileged host
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+    class _FileSession:
+        def __init__(self, filename):
+            self.filename = filename
+
+    class _Client:
+        def __init__(self, filename):
+            self.session = _FileSession(filename)
+
+    assert session_identity(_Client(str(real))) == session_identity(_Client(str(link)))
+
+
+def test_lock_grace_refuses_a_non_finite_or_negative_value(monkeypatch):
+    """`nan` made the deadline comparison never true: the wait was unbounded."""
+    for raw in ("nan", "inf", "-1", "not-a-number"):
+        monkeypatch.setenv("TELEGRAM_LOCK_GRACE_SECONDS", raw)
+        with pytest.raises(ValueError, match="TELEGRAM_LOCK_GRACE_SECONDS"):
+            runner._lock_grace_seconds()
+
+
+def test_acquire_rejects_an_unbounded_grace_period_up_front(tmp_path):
+    """Validated before the wait loop, so a bad value can never hang the wait."""
+    from telegram_mcp.singleton import SessionLock
+
+    lock = SessionLock("string:grace-check", lock_dir=tmp_path)
+    with pytest.raises(ValueError, match="grace_seconds"):
+        lock.acquire(grace_seconds=float("nan"))
+    with pytest.raises(ValueError, match="grace_seconds"):
+        lock.acquire(grace_seconds=-1.0)
+    assert lock._fh is None
+
+
+@pytest.mark.asyncio
+async def test_a_duplicated_auth_key_is_not_retried(monkeypatch):
+    """Telegram invalidates the key permanently; four retries only burn 14s."""
+    from telethon.errors import AuthKeyDuplicatedError
+
+    slept: list[float] = []
+
+    async def _no_sleep(delay):
+        slept.append(delay)
+
+    monkeypatch.setattr(runner.asyncio, "sleep", _no_sleep)
+
+    class _Duplicated(_FakeClient):
+        def __init__(self):
+            super().__init__(authorized=True, identity="burned")
+            self.attempts = 0
+
+        async def connect(self):
+            self.attempts += 1
+            raise AuthKeyDuplicatedError(request=None)
+
+    client = _Duplicated()
+    with pytest.raises(RuntimeError, match="no longer usable"):
+        await runner._connect_authorized_client("default", client)
+
+    assert client.attempts == 1, "the burned key was retried"
+    assert slept == [], "the run slept waiting for a key that can never come back"
