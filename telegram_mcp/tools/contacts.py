@@ -67,7 +67,7 @@ async def search_contacts(query: str, account: Optional[str] = None) -> str:
                 "favorite": True,
                 "match": "exact" if alias == exact_key else "similar",
             }
-            for alias, record in match_aliases(query)
+            for alias, record in match_aliases(query, account=account)
         ]
         result = await cl(functions.contacts.SearchRequest(q=query, limit=50))
         users = result.users
@@ -677,7 +677,7 @@ async def set_contact_alias(
         # The target must be identified exactly. Resolving it through the same
         # lookalike matcher would let one wrong guess become a permanent mapping.
         if isinstance(chat_id, str) and not is_handle_like(chat_id):
-            target = apply_alias(chat_id)
+            target = apply_alias(chat_id, account=account)
             if not isinstance(target, int):
                 return format_tool_result(
                     {
@@ -690,7 +690,7 @@ async def set_contact_alias(
                         ),
                         "candidates": [
                             {"alias": a, "id": r["id"], "name": r.get("name")}
-                            for a, r in match_aliases(chat_id)[:5]
+                            for a, r in match_aliases(chat_id, account=account)[:5]
                         ],
                     }
                 )
