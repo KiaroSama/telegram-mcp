@@ -354,7 +354,7 @@ def test_extract_frames_refuses_a_suffix_it_cannot_decode(monkeypatch, hostile):
     real temp filename and the decoder selector."""
     seen = {}
 
-    def _fake_ffmpeg(path, count, cancelled=None):
+    def _fake_ffmpeg(path, count, budget=None, max_side=None):
         seen["path"] = path
         return [(b"\x89PNG", {"frame_index": 0})]
 
@@ -1027,3 +1027,64 @@ def test_the_worker_refuses_the_wrong_number_of_arguments(capsysbinary):
 
     assert lottie_worker.main(["only-a-path"]) == 2
     assert b"usage:" in capsysbinary.readouterr().err
+
+
+# --- the requested size has to lower the cost, not just the output -------------
+
+
+def test_the_requested_side_never_exceeds_the_hard_ceiling_or_falls_below_useful():
+    """A ceiling that a caller can raise is not a ceiling, and one they can drive to
+    zero produces an image nothing can read."""
+    assert frames._emitted_side(None) == frames.FFMPEG_MAX_EMITTED_SIDE
+    assert frames._emitted_side(0) == frames.FFMPEG_MAX_EMITTED_SIDE
+    assert frames._emitted_side(-100) == frames.FFMPEG_MAX_EMITTED_SIDE
+    assert frames._emitted_side(99999) == frames.FFMPEG_MAX_EMITTED_SIDE
+    assert frames._emitted_side(1) == frames.MIN_EMITTED_SIDE
+    assert frames._emitted_side(256) == 256
+
+
+@pytest.mark.skipif(not frames.ffmpeg_available(), reason="ffmpeg is not on PATH")
+def test_ffmpeg_decodes_to_the_requested_side_not_the_hard_ceiling(tmp_path):
+    """Extraction used to emit at FFMPEG_MAX_EMITTED_SIDE whatever the caller asked
+    for, and the tool layer shrank the result afterwards. A 128px preview therefore
+    paid for a 2048px decode, a 2048px PNG encode and a 2048px image held in a list,
+    then discarded almost all of it.
+    """
+    clip = _transparent_vp9(tmp_path)
+
+    small = frames._frames_with_ffmpeg(str(clip), 1, max_side=64)
+
+    assert small, "no frame came back"
+    rendered = Image.open(io.BytesIO(small[0][0]))
+    assert max(rendered.size) <= 64, f"decoded at {rendered.size} for a 64px request"
+
+
+@pytest.mark.skipif(not lottie_available(), reason="rlottie is not installed")
+def test_a_tgs_renders_at_the_requested_side(tmp_path):
+    """The worker renders at the size it is told and the parent slices its reply at
+    the SAME stride - get that pair wrong and every frame after the first is read
+    from the wrong offset, which is silent corruption rather than an error.
+    """
+    path = _write_tgs(tmp_path, _animated_tgs())
+
+    small = frames._frames_with_lottie(path, 2, max_side=128)
+
+    assert len(small) == 2
+    for data, _meta in small:
+        rendered = Image.open(io.BytesIO(data))
+        assert max(rendered.size) <= 128, f"rendered at {rendered.size} for a 128px request"
+
+
+def test_a_pillow_animation_is_encoded_at_the_requested_side(tmp_path):
+    """Pillow decodes at the source's own size - that part is not ours to bound -
+    but encoding a full-size PNG per frame and shrinking afterwards is."""
+    source = tmp_path / "big.gif"
+    frames_in = [Image.new("RGB", (600, 400), colour) for colour in ("red", "green", "blue")]
+    frames_in[0].save(source, save_all=True, append_images=frames_in[1:], duration=40, loop=0)
+
+    small = frames._frames_with_pillow(str(source), 2, max_side=96)
+
+    assert len(small) == 2
+    for data, _meta in small:
+        rendered = Image.open(io.BytesIO(data))
+        assert max(rendered.size) <= 96, f"encoded at {rendered.size} for a 96px request"

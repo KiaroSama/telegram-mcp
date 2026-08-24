@@ -8,6 +8,8 @@ those assets come from is covered in test_effects_tool_catalogue.py.
 
 import pytest
 
+from telegram_mcp import media_preview
+
 import telegram_mcp.tools.effects as effects_tool
 from helpers_effects import _Doc, _Effect, _ToolClient, _call, _payload, _use
 
@@ -242,14 +244,26 @@ class _GzipStaticAssetClient(_StaticAssetClient):
 
 
 def _records_encoder(monkeypatch):
-    """Replace the to_thread stub with one that remembers which encoder it got."""
+    """Remember which encoder the tool chose for the payload it was handed.
+
+    Two seams now, not one: the single-image path is still dispatched through
+    `to_thread`, while frame extraction moved to run_in_executor so a cancelled
+    decode can be waited on. Watching only the old dispatcher recorded an empty
+    list for the frame path and the assertion read as 'treated as static' - a
+    wrong diagnosis of a decoder choice that was actually correct.
+    """
     used = []
 
-    async def _record(fn, *args):
+    async def _record_still(fn, *args):
         used.append(fn.__name__)
         return [{"frame_index": 0}], ["image"]
 
-    monkeypatch.setattr(effects_tool.asyncio, "to_thread", _record)
+    def _record_frames(raw, suffix, count, max_dimension, cancelled=None):
+        used.append("_encode_frames")
+        return [{"frame_index": 0}], ["image"]
+
+    monkeypatch.setattr(effects_tool.asyncio, "to_thread", _record_still)
+    monkeypatch.setattr(media_preview, "_encode_frames", _record_frames)
     return used
 
 

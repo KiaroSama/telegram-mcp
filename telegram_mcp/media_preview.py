@@ -91,7 +91,9 @@ def _encode_frames(
     """
     deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
     metas, images = [], []
-    for png, meta in extract_frames(raw, suffix, count, cancelled, deadline=deadline):
+    for png, meta in extract_frames(
+        raw, suffix, count, cancelled, deadline=deadline, max_side=max_dimension
+    ):
         if cancelled is not None and cancelled.is_set():
             raise DecodingCancelled(
                 f"Encoding was cancelled after {len(images)} of {count} frames."
@@ -107,8 +109,53 @@ def _encode_frames(
     return metas, images
 
 
+# What ONE call may hand back in decoded previews, however many documents it
+# covers. The existing batch gate bounds concurrency by SOURCE bytes, which is a
+# different quantity: a 300 KB .tgs becomes ten 512x512 RGBA frames, and a small
+# video becomes ten PNGs at the emitted ceiling. Ten documents each inside the
+# per-request frame budget could therefore hold ten times it, so the per-request
+# ceiling was not a ceiling on the call.
+MAX_CALL_PREVIEW_BYTES = 128 * 1024 * 1024
+
+
+class PreviewLedger:
+    """A decoded-output allowance shared by everything in one call.
+
+    Deliberately not a lock or a queue: the batch already limits how many
+    downloads run at once, and this only has to stop the TOTAL handed back from
+    growing with the batch size. Charged after each document, so the document
+    that crosses the line is refused and the ones already done are kept.
+    """
+
+    __slots__ = ("total", "spent")
+
+    def __init__(self, total: int = MAX_CALL_PREVIEW_BYTES) -> None:
+        self.total = total
+        self.spent = 0
+
+    def charge(self, produced: int) -> None:
+        self.spent += produced
+        if self.spent > self.total:
+            raise FrameExtractionError(
+                f"This call has produced {self.spent} bytes of preview, above the "
+                f"{self.total}-byte budget for one request. Ask for fewer items, "
+                "fewer frames, or a smaller max_dimension."
+            )
+
+
+# How long a cancelled decode is given to unwind before the caller stops waiting
+# for it. The worker checks the flag every DECODER_POLL_SECONDS and kills its
+# subprocess on the way out, so this is generously above what unwinding costs -
+# it exists so a wedged decoder cannot hold the canceller either.
+CANCEL_DRAIN_SECONDS = 5.0
+
+
 async def encode_frames_cancellable(
-    raw: bytes, suffix: str, count: int, max_dimension: int
+    raw: bytes,
+    suffix: str,
+    count: int,
+    max_dimension: int,
+    ledger: Optional["PreviewLedger"] = None,
 ) -> tuple:
     """Extract and encode frames off the event loop, and let cancellation reach them.
 
@@ -119,18 +166,53 @@ async def encode_frames_cancellable(
     ffmpeg kept burning CPU - until their own timeouts fired, long after anyone was
     left to read the answer.
 
-    The event is how the thread gets told. Every caller goes through here rather
-    than reaching for ``asyncio.to_thread`` itself, so this exists once instead of
-    at six call sites each free to forget it.
+    The event is how the thread gets told, and the drain below is how the caller
+    learns it was heard. Setting the flag and re-raising immediately - which is what
+    this did - reports a cancellation that has not happened yet: the decoder is
+    still mid-frame and its ffmpeg child is still running, so 'cancelled' meant
+    'asked to stop', and anything that then counted processes or cleaned a
+    directory raced a worker that was still using it.
+
+    The wait is bounded and best-effort on purpose. A drain that could block
+    forever would hand a wedged decoder the power to hold up the canceller too,
+    which is the failure being cancelled in the first place.
+
+    Every caller goes through here rather than reaching for ``asyncio.to_thread``
+    itself, so this exists once instead of at six call sites each free to forget it.
     """
     cancelled = threading.Event()
+    loop = asyncio.get_running_loop()
+    # run_in_executor rather than to_thread: the future has to outlive the await,
+    # so that cancelling the await does not throw away the handle on the worker.
+    worker = loop.run_in_executor(
+        None, _encode_frames, raw, suffix, count, max_dimension, cancelled
+    )
     try:
-        return await asyncio.to_thread(
-            _encode_frames, raw, suffix, count, max_dimension, cancelled
-        )
+        metas, images = await asyncio.shield(worker)
+        if ledger is not None:
+            ledger.charge(sum(len(image.data) for image in images))
+        return metas, images
     except asyncio.CancelledError:
         cancelled.set()
+        await _drain(worker)
         raise
+
+
+async def _drain(worker) -> None:
+    """Wait, briefly, for a cancelled worker to finish unwinding.
+
+    Every await in a cancelled task raises ``CancelledError`` immediately, so the
+    wait cannot be an await on the worker itself. A callback plus a plain
+    ``threading.Event`` is not subject to that: the loop keeps running, and this
+    returns as soon as the worker really is done - or when the budget expires.
+    """
+    finished = threading.Event()
+    worker.add_done_callback(lambda _future: finished.set())
+    deadline = time.monotonic() + CANCEL_DRAIN_SECONDS
+    while not finished.is_set() and time.monotonic() < deadline:
+        # Yields to the loop without awaiting anything cancellable.
+        await asyncio.sleep(0)
+        finished.wait(0.02)
 
 
 async def _premium_effect_frames(
@@ -226,7 +308,12 @@ async def _premium_effect_frames(
 
 
 async def _custom_emoji_preview(
-    cl, document, count: int, max_dimension: int, max_bytes: int = DEFAULT_EMOJI_BYTES
+    cl,
+    document,
+    count: int,
+    max_dimension: int,
+    max_bytes: int = DEFAULT_EMOJI_BYTES,
+    ledger: Optional["PreviewLedger"] = None,
 ) -> tuple:
     """Metadata and preview image(s) for one custom emoji document."""
     mime = (getattr(document, "mime_type", None) or "").lower()
@@ -346,10 +433,13 @@ async def _custom_emoji_preview(
         if render_lottie or mime.startswith("video/"):
             suffix = ".tgs" if render_lottie else _MIME_SUFFIXES.get(mime, ".webm")
             record["preview"], images = await encode_frames_cancellable(
-                raw, suffix, count, max_dimension
+                raw, suffix, count, max_dimension, ledger
             )
         else:
             record["preview"], images = await asyncio.to_thread(_encode_one, raw, max_dimension)
+            if ledger is not None:
+                # A still costs the call too - ten large stickers add up the same way.
+                ledger.charge(sum(len(image.data) for image in images))
         record["preview_source"] = (
             "rlottie" if render_lottie else "thumbnail" if thumb_only else "document"
         )

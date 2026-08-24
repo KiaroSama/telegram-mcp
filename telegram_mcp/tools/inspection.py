@@ -22,6 +22,7 @@ from telegram_mcp.media_transfer import (  # noqa: F401  (re-exported for tests 
 )
 from telegram_mcp.media_preview import (  # noqa: F401  (re-exported for tests and tools)
     DEFAULT_EMOJI_BYTES,
+    PreviewLedger,
     _custom_emoji_preview,
     encode_frames_cancellable,
     _encode_one,
@@ -674,10 +675,15 @@ async def get_custom_emoji(
         # one buffer. The width comes from the byte budget so that product stays
         # under MAX_BATCH_BYTES whatever the caller passes.
         gate = asyncio.Semaphore(batch_width(len(documents), max_bytes))
+        # The gate bounds SOURCE bytes in flight; this bounds what the call hands
+        # back once decoded, which is a different and larger quantity.
+        ledger = PreviewLedger()
 
         async def _preview_within_budget(document):
             async with gate:
-                return await _custom_emoji_preview(cl, document, count, max_dimension, max_bytes)
+                return await _custom_emoji_preview(
+                    cl, document, count, max_dimension, max_bytes, ledger
+                )
 
         resolved = await asyncio.gather(
             *(_preview_within_budget(document) for document in documents),
