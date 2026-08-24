@@ -99,35 +99,97 @@ async def delete_profile_photo(account: str = None) -> str:
         return log_and_format_error("delete_profile_photo", e)
 
 
+# The privacy keys this server exposes, and the argument name each is reached
+# by. Telegram has more; these are the three that were already supported.
+_PRIVACY_KEYS = {
+    "status": "InputPrivacyKeyStatusTimestamp",
+    "phone": "InputPrivacyKeyPhoneNumber",
+    "profile_photo": "InputPrivacyKeyProfilePhoto",
+}
+
+# account.setPrivacy REPLACES every rule for a key; there is no patch form. So a
+# base policy is not optional -- omitting it just means the tool picks one, and
+# the one it used to pick was "everyone".
+_PRIVACY_BASE_POLICIES = {
+    "everyone": "InputPrivacyValueAllowAll",
+    "contacts": "InputPrivacyValueAllowContacts",
+    "nobody": "InputPrivacyValueDisallowAll",
+}
+
+# How Telegram's answering rules read back out. Anything not listed is reported
+# by its constructor name rather than guessed at.
+_PRIVACY_RULE_NAMES = {
+    "PrivacyValueAllowAll": "everyone_allowed",
+    "PrivacyValueAllowContacts": "contacts_allowed",
+    "PrivacyValueAllowCloseFriends": "close_friends_allowed",
+    "PrivacyValueAllowPremium": "premium_allowed",
+    "PrivacyValueDisallowAll": "everyone_disallowed",
+    "PrivacyValueDisallowContacts": "contacts_disallowed",
+    "PrivacyValueAllowUsers": "users_allowed",
+    "PrivacyValueDisallowUsers": "users_disallowed",
+    "PrivacyValueAllowChatParticipants": "chats_allowed",
+    "PrivacyValueDisallowChatParticipants": "chats_disallowed",
+    "PrivacyValueAllowBots": "bots_allowed",
+    "PrivacyValueDisallowBots": "bots_disallowed",
+}
+
+
+def _describe_privacy_rule(rule) -> dict:
+    """One answering rule as data, rather than as `str(TLObject)`."""
+    name = type(rule).__name__
+    described = {"rule": _PRIVACY_RULE_NAMES.get(name, name)}
+    for field in ("users", "chats"):
+        ids = getattr(rule, field, None)
+        if ids:
+            described[field] = list(ids)
+    return described
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Get Privacy Settings", openWorldHint=True, readOnlyHint=True
     )
 )
 @with_account(readonly=True)
-async def get_privacy_settings(account: str = None) -> str:
+async def get_privacy_settings(key: str = "status", account: str = None) -> str:
     """
-    Get your privacy settings for last seen status.
+    Read the privacy rules currently applied to one key.
+
+    The rules come back in the order Telegram applies them, which is the order
+    set_privacy_settings has to send them back in.
+
+    Args:
+        key: Which setting to read: 'status' (last seen), 'phone' or
+            'profile_photo'. Defaults to 'status'.
     """
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        # Import needed types directly
-        from telethon.tl.types import InputPrivacyKeyStatusTimestamp
+
+        from telethon.tl import types as tl_types
+
+        if key not in _PRIVACY_KEYS:
+            return (
+                f"Error: Unsupported privacy key '{key}'. Supported keys: "
+                f"{', '.join(_PRIVACY_KEYS)}."
+            )
+        privacy_key = getattr(tl_types, _PRIVACY_KEYS[key])()
 
         try:
-            settings = await cl(
-                functions.account.GetPrivacyRequest(key=InputPrivacyKeyStatusTimestamp())
-            )
-            return str(settings)
+            settings = await cl(functions.account.GetPrivacyRequest(key=privacy_key))
         except TypeError as e:
             if "TLObject was expected" in str(e):
-                return "Error: Privacy settings API call failed due to type mismatch. This is likely a version compatibility issue with Telethon."
-            else:
-                raise
+                return (
+                    "Error: Privacy settings API call failed due to type mismatch. This is "
+                    "likely a version compatibility issue with Telethon."
+                )
+            raise
+
+        rules = [_describe_privacy_rule(rule) for rule in getattr(settings, "rules", None) or []]
+        return format_tool_result(rules, {"key": key, "rule_count": len(rules)})
     except Exception as e:
         logger.exception("get_privacy_settings failed")
-        return log_and_format_error("get_privacy_settings", e)
+        return log_and_format_error("get_privacy_settings", e, key=key)
 
 
 @mcp.tool(
@@ -141,92 +203,125 @@ async def set_privacy_settings(
     key: str,
     allow_users: Optional[List[Union[int, str]]] = None,
     disallow_users: Optional[List[Union[int, str]]] = None,
+    base_policy: Optional[str] = None,
     account: str = None,
 ) -> str:
     """
-    Set privacy settings (e.g., last seen, phone, etc.).
+    Replace the privacy rules for one key.
+
+    This is a REPLACEMENT, not a patch: Telegram's account.setPrivacy discards
+    whatever was there and applies exactly the rules sent. base_policy is
+    therefore required -- with it omitted the tool would be choosing a policy on
+    the caller's behalf, and the choice it used to make was "everyone".
+
+    Read the current rules with get_privacy_settings first if the intent is to
+    adjust rather than replace.
 
     Args:
-        key: The privacy setting to modify ('status' for last seen, 'phone', 'profile_photo', etc.)
-        allow_users: List of user IDs or usernames to allow
-        disallow_users: List of user IDs or usernames to disallow
+        key: Which setting to change: 'status' (last seen), 'phone' or
+            'profile_photo'.
+        allow_users: Users allowed regardless of base_policy. Exceptions are sent
+            ahead of the base rule, which is the order Telegram applies them in.
+        disallow_users: Users denied regardless of base_policy.
+        base_policy: Required. 'everyone', 'contacts' or 'nobody' -- who the
+            setting is visible to before the exception lists are applied.
     """
     try:
         cl = get_client(account)
-        # Import needed types
-        from telethon.tl.types import (
-            InputPrivacyKeyStatusTimestamp,
-            InputPrivacyKeyPhoneNumber,
-            InputPrivacyKeyProfilePhoto,
-            InputPrivacyValueAllowUsers,
-            InputPrivacyValueDisallowUsers,
-            InputPrivacyValueAllowAll,
-            InputPrivacyValueDisallowAll,
-        )
+        await ensure_connected(cl)
 
-        # Map the simplified keys to their corresponding input types
-        key_mapping = {
-            "status": InputPrivacyKeyStatusTimestamp,
-            "phone": InputPrivacyKeyPhoneNumber,
-            "profile_photo": InputPrivacyKeyProfilePhoto,
-        }
+        from telethon import utils as telethon_utils
+        from telethon.tl import types as tl_types
 
-        # Get the appropriate key class
-        if key not in key_mapping:
-            return f"Error: Unsupported privacy key '{key}'. Supported keys: {', '.join(key_mapping.keys())}"
+        if key not in _PRIVACY_KEYS:
+            return (
+                f"Error: Unsupported privacy key '{key}'. Supported keys: "
+                f"{', '.join(_PRIVACY_KEYS)}."
+            )
+        if base_policy is None:
+            return (
+                "Error: base_policy is required. account.setPrivacy replaces the whole "
+                f"rule set for '{key}', so leaving it out would silently pick one. Choose "
+                f"{', '.join(_PRIVACY_BASE_POLICIES)}, or read the current rules with "
+                "get_privacy_settings and pass them back explicitly."
+            )
+        policy = str(base_policy).strip().lower()
+        if policy not in _PRIVACY_BASE_POLICIES:
+            return (
+                f"Error: Unknown base_policy '{base_policy}'. Valid values: "
+                f"{', '.join(_PRIVACY_BASE_POLICIES)}."
+            )
 
-        privacy_key = key_mapping[key]()
+        allow_list = list(allow_users or [])
+        disallow_list = list(disallow_users or [])
+        overlap = [user for user in allow_list if user in disallow_list]
+        if overlap:
+            return (
+                f"Error: {overlap} appear on both allow_users and disallow_users. Telegram "
+                "applies the first matching rule, so the result would depend on ordering."
+            )
 
-        # Prepare the rules
+        async def _input_users(identifiers):
+            """Resolve to InputUser, or name the one that could not be resolved.
+
+            Dropping an unresolvable name and sending the rest is fail-open: the
+            caller asked for a rule that would then not exist.
+            """
+            resolved = []
+            for identifier in identifiers:
+                try:
+                    entity = await resolve_entity(identifier, cl)
+                    # InputPrivacyValue*Users takes a vector of InputUser. A
+                    # resolved User is a different constructor and does not
+                    # serialise into that vector.
+                    resolved.append(telethon_utils.get_input_user(entity))
+                except Exception as error:
+                    return None, (
+                        f"Error: could not resolve '{identifier}' to a user "
+                        f"({type(error).__name__}); no privacy rule was changed."
+                    )
+            return resolved, None
+
         rules = []
+        if allow_list:
+            users, error = await _input_users(allow_list)
+            if error:
+                return error
+            rules.append(tl_types.InputPrivacyValueAllowUsers(users=users))
+        if disallow_list:
+            users, error = await _input_users(disallow_list)
+            if error:
+                return error
+            rules.append(tl_types.InputPrivacyValueDisallowUsers(users=users))
+        # Last: Telegram applies the rules in order, so a base policy placed ahead
+        # of its own exceptions would match first and swallow them.
+        rules.append(getattr(tl_types, _PRIVACY_BASE_POLICIES[policy])())
 
-        # Process allow rules
-        if allow_users is None or len(allow_users) == 0:
-            # If no specific users to allow, allow everyone by default
-            rules.append(InputPrivacyValueAllowAll())
-        else:
-            # Convert user IDs to InputUser entities
-            try:
-                allow_entities = []
-                for user_id in allow_users:
-                    try:
-                        user = await resolve_entity(user_id, cl)
-                        allow_entities.append(user)
-                    except Exception as user_err:
-                        logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
-
-                if allow_entities:
-                    rules.append(InputPrivacyValueAllowUsers(users=allow_entities))
-            except Exception as allow_err:
-                logger.error(f"Error processing allowed users: {allow_err}")
-                return log_and_format_error("set_privacy_settings", allow_err, key=key)
-
-        # Process disallow rules
-        if disallow_users and len(disallow_users) > 0:
-            try:
-                disallow_entities = []
-                for user_id in disallow_users:
-                    try:
-                        user = await resolve_entity(user_id, cl)
-                        disallow_entities.append(user)
-                    except Exception as user_err:
-                        logger.warning(f"Could not get entity for user ID {user_id}: {user_err}")
-
-                if disallow_entities:
-                    rules.append(InputPrivacyValueDisallowUsers(users=disallow_entities))
-            except Exception as disallow_err:
-                logger.error(f"Error processing disallowed users: {disallow_err}")
-                return log_and_format_error("set_privacy_settings", disallow_err, key=key)
-
-        # Apply the privacy settings
         try:
-            await cl(functions.account.SetPrivacyRequest(key=privacy_key, rules=rules))
-            return f"Privacy settings for {key} updated successfully."
+            await cl(
+                functions.account.SetPrivacyRequest(
+                    key=getattr(tl_types, _PRIVACY_KEYS[key])(), rules=rules
+                )
+            )
         except TypeError as type_err:
             if "TLObject was expected" in str(type_err):
-                return "Error: Privacy settings API call failed due to type mismatch. This is likely a version compatibility issue with Telethon."
-            else:
-                raise
+                return (
+                    "Error: Privacy settings API call failed due to type mismatch. This is "
+                    "likely a version compatibility issue with Telethon."
+                )
+            raise
+
+        return format_tool_result(
+            [
+                {
+                    "key": key,
+                    "base_policy": policy,
+                    "allowed_count": len(allow_list),
+                    "disallowed_count": len(disallow_list),
+                }
+            ],
+            {"replaced": True},
+        )
     except Exception as e:
         logger.exception(f"set_privacy_settings failed (key={key})")
         return log_and_format_error("set_privacy_settings", e, key=key)
