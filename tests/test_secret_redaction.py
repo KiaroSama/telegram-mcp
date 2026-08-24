@@ -193,3 +193,51 @@ def test_without_no_echo_the_session_is_still_shown(generator, capsys):
 def test_the_no_echo_flag_is_accepted(generator, monkeypatch):
     monkeypatch.setattr(sys, "argv", ["session_string_generator.py", "--no-echo"])
     assert generator._parse_args().no_echo is True
+
+
+class _AuthorizedClient:
+    """A client that is already signed in, so no login path is exercised."""
+
+    def __init__(self, *args, **kwargs):
+        self.session = object()
+        self.disconnected = False
+
+    def connect(self):
+        return None
+
+    def is_user_authorized(self):
+        return True
+
+    def disconnect(self):
+        self.disconnected = True
+
+
+def test_a_whole_no_echo_run_saves_the_session_without_showing_it(
+    generator, tmp_path, monkeypatch, capsys
+):
+    """End to end: the canary reaches `.env` and nothing else."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        sys, "argv", ["session_string_generator.py", "--qr", "--label", "work", "--no-echo"]
+    )
+    monkeypatch.setattr(generator, "_check_installation", lambda: None)
+    monkeypatch.setenv("TELEGRAM_API_ID", "12345")
+    monkeypatch.setenv("TELEGRAM_API_HASH", "dummy_hash")
+    monkeypatch.setattr(generator, "TelegramClient", _AuthorizedClient)
+    monkeypatch.setattr(
+        generator,
+        "StringSession",
+        type("_S", (), {"save": staticmethod(lambda _s: SESSION_CANARY)}),
+    )
+
+    def _no_input(_prompt=""):  # pragma: no cover - a prompt here is the failure
+        raise AssertionError("a --no-echo run must not stop to ask anything")
+
+    monkeypatch.setattr("builtins.input", _no_input)
+
+    generator.main()
+
+    printed = capsys.readouterr().out
+    assert SESSION_CANARY not in printed
+    saved = (tmp_path / ".env").read_text(encoding="utf-8")
+    assert saved.strip() == f"TELEGRAM_SESSION_STRING_WORK={SESSION_CANARY}"

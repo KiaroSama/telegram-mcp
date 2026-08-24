@@ -247,6 +247,27 @@ async def test_two_labels_on_one_session_are_refused_before_connecting():
     assert second.connected is False
 
 
+def test_duplicate_sessions_are_named_before_anything_connects():
+    """Two labels, one session: say so, rather than stall on the lock."""
+    shared = _FakeClient(authorized=True, identity="one-and-only")
+    other = _FakeClient(authorized=True, identity="one-and-only")
+
+    with pytest.raises(RuntimeError, match="same"):
+        runner._reject_duplicate_sessions({"work": shared, "personal": other})
+
+    assert shared.connected is False
+    assert other.connected is False
+
+
+def test_distinct_sessions_pass_the_duplicate_check():
+    runner._reject_duplicate_sessions(
+        {
+            "work": _FakeClient(authorized=True, identity="a"),
+            "personal": _FakeClient(authorized=True, identity="b"),
+        }
+    )
+
+
 def test_a_symlinked_file_session_is_the_same_identity(tmp_path):
     """A symlink alias must not buy a second lock on the same session file."""
     from telegram_mcp.singleton import session_identity
@@ -288,6 +309,51 @@ def test_acquire_rejects_an_unbounded_grace_period_up_front(tmp_path):
     with pytest.raises(ValueError, match="grace_seconds"):
         lock.acquire(grace_seconds=-1.0)
     assert lock._fh is None
+
+
+class _ServableClient(_FakeClient):
+    def __init__(self, identity):
+        super().__init__(authorized=True, identity=identity)
+        self.disconnected = False
+
+    async def get_dialogs(self):
+        return []
+
+    async def disconnect(self):
+        self.disconnected = True
+
+
+@pytest.mark.asyncio
+async def test_main_releases_every_session_lock_on_the_way_out(monkeypatch):
+    """A lock outliving the process it belongs to locks the operator out."""
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+    monkeypatch.delenv("MCP_TRANSPORT", raising=False)
+    accounts = {"work": _ServableClient("session-work"), "personal": _ServableClient("session-p")}
+    monkeypatch.setattr(runner, "clients", accounts)
+
+    await runner._main()
+
+    assert fake.ran == "stdio"
+    assert all(client.connected for client in accounts.values())
+    assert all(client.disconnected for client in accounts.values())
+    assert runner._session_locks == {}
+
+
+@pytest.mark.asyncio
+async def test_main_exits_when_two_accounts_share_one_session(monkeypatch, capsys):
+    monkeypatch.setattr(runner, "mcp", _FakeMcp())
+    monkeypatch.setattr(
+        runner,
+        "clients",
+        {"work": _ServableClient("shared"), "personal": _ServableClient("shared")},
+    )
+
+    with pytest.raises(SystemExit):
+        await runner._main()
+
+    assert "same" in capsys.readouterr().err
+    assert runner._session_locks == {}
 
 
 @pytest.mark.asyncio
