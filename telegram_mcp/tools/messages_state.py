@@ -36,6 +36,50 @@ _POLL_OPTION_LIMIT = 100
 _POLL_CLOSE_MIN_SECONDS = 5
 _POLL_CLOSE_MAX_SECONDS = 2_628_000
 
+# Telegram measures that 5-second floor against ITS clock at the moment the
+# request lands, and everything between the check and the landing costs time:
+# resolving the chat is a round trip of its own, then the Poll is built, the
+# InputMediaPoll serialised, and the whole thing put on the wire. A deadline that
+# was legal when parsed could therefore be under the floor on arrival, and the
+# poll came back refused AFTER the send. This is the slack that keeps a deadline
+# accepted here acceptable there; it is deliberately small, because it is only
+# covering serialisation and one hop, not user latency.
+_POLL_CLOSE_SEND_MARGIN_SECONDS = 2
+
+# The earliest close_date this server will send, floor plus slack. Public so a
+# test can pin the boundary to the rule rather than to a copied number.
+EARLIEST_POLL_CLOSE_SECONDS = _POLL_CLOSE_MIN_SECONDS + _POLL_CLOSE_SEND_MARGIN_SECONDS
+
+
+def _close_date_problem(close_date_obj) -> Optional[str]:
+    """Why this deadline cannot be sent right now, or ``None``.
+
+    Called twice on purpose: once from the arguments alone, so an impossible date
+    costs nothing, and once immediately before the request is built, because by
+    then the clock has moved and the first answer may no longer be true.
+    """
+    seconds = (close_date_obj - datetime.now(close_date_obj.tzinfo)).total_seconds()
+    if seconds <= 0:
+        return (
+            "Error: close_date is in the past; a poll cannot close before it opens. "
+            "Pick a later close_date. Nothing was sent."
+        )
+    if seconds < EARLIEST_POLL_CLOSE_SECONDS:
+        return (
+            f"Error: close_date is {seconds:.0f} seconds away. Telegram requires at least "
+            f"{_POLL_CLOSE_MIN_SECONDS} seconds measured when the request reaches it, and "
+            f"sending this one takes time it no longer has, so this server needs "
+            f"{EARLIEST_POLL_CLOSE_SECONDS} seconds. Pick a later close_date. Nothing was sent."
+        )
+    if seconds > _POLL_CLOSE_MAX_SECONDS:
+        return (
+            f"Error: close_date is {seconds:.0f} seconds away, and Telegram accepts "
+            f"{_POLL_CLOSE_MIN_SECONDS} to {_POLL_CLOSE_MAX_SECONDS} seconds "
+            "(5 seconds to about 30 days). Nothing was sent."
+        )
+    return None
+
+
 # How many answers a poll may carry. Telegram publishes this in the client
 # config as `poll_answers_max`, and a client is expected to read it there rather
 # than assume: the number written into this file was 10 and the real one has
@@ -332,8 +376,11 @@ async def create_poll(
             multiple-choice.
         public_votes: Whether votes are public
         close_date: Optional close date in ISO format (YYYY-MM-DD HH:MM:SS). It
-            must fall in Telegram's window: at least 5 seconds and at most
-            2,628,000 seconds (about 30 days) from now.
+            must fall in Telegram's window — at least 5 seconds and at most
+            2,628,000 seconds (about 30 days) — measured on Telegram's clock when
+            the request arrives, not on this one when you call. It is therefore
+            checked twice, and a deadline still in the future but too close to
+            survive the send is refused here rather than by Telegram afterwards.
         correct_option_index: Zero-based index into `options` of the one correct
             answer. Required for quiz_mode, rejected without it.
     """
@@ -391,18 +438,20 @@ async def create_poll(
                 close_date_obj = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
             except ValueError:
                 return "Invalid close_date format. Use YYYY-MM-DD HH:MM:SS format."
-            now = datetime.now(close_date_obj.tzinfo)
-            seconds = (close_date_obj - now).total_seconds()
-            if seconds <= 0:
-                return "Error: close_date is in the past; a poll cannot close before it opens."
-            if not _POLL_CLOSE_MIN_SECONDS <= seconds <= _POLL_CLOSE_MAX_SECONDS:
-                return (
-                    f"Error: close_date is {seconds:.0f} seconds away, and Telegram accepts "
-                    f"{_POLL_CLOSE_MIN_SECONDS} to {_POLL_CLOSE_MAX_SECONDS} seconds "
-                    "(5 seconds to about 30 days). Nothing was sent."
-                )
+            problem = _close_date_problem(close_date_obj)
+            if problem:
+                return problem
 
         entity = await resolve_entity(chat_id, cl)
+
+        # Again, now that resolving the chat has been paid for. The first check
+        # answered a question about a clock that has since moved; this one answers
+        # it about the request that is actually about to go out, and refuses
+        # before the send rather than letting Telegram refuse after it.
+        if close_date_obj is not None:
+            problem = _close_date_problem(close_date_obj)
+            if problem:
+                return problem
 
         # Create the poll using InputMediaPoll with SendMediaRequest
         from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities
