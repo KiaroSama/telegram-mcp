@@ -131,6 +131,26 @@ mcp = FastMCP("telegram", stateless_http=True)
 _USER_AUDIENCE = Annotations(audience=["user"])
 
 
+def _annotate_for_user(content: list) -> list:
+    """Mark every unannotated content block as user data.
+
+    Every block type MCP defines carries an ``annotations`` field - text,
+    image, audio, resource link and embedded resource alike - and a tool that
+    returns a screenshot is handing back user data exactly as much as one that
+    returns a message body. This used to test ``isinstance(block, TextContent)``,
+    so an image came back with nothing said about it at all. Asking the model
+    for the field instead of listing the classes also means a block type added
+    by a later MCP release is covered on arrival.
+    """
+    annotated = []
+    for block in content:
+        fields = getattr(type(block), "model_fields", {})
+        if "annotations" in fields and getattr(block, "annotations", None) is None:
+            block = block.model_copy(update={"annotations": _USER_AUDIENCE})
+        annotated.append(block)
+    return annotated
+
+
 def _install_annotation_hook() -> None:
     from mcp.types import CallToolRequest, ServerResult, CallToolResult
 
@@ -141,14 +161,7 @@ def _install_annotation_hook() -> None:
         if isinstance(response, ServerResult) and isinstance(response.root, CallToolResult):
             content = response.root.content
             if content:
-                response.root.content = [
-                    (
-                        block.model_copy(update={"annotations": _USER_AUDIENCE})
-                        if isinstance(block, TextContent) and block.annotations is None
-                        else block
-                    )
-                    for block in content
-                ]
+                response.root.content = _annotate_for_user(content)
         return response
 
     mcp._mcp_server.request_handlers[CallToolRequest] = annotated_handler
