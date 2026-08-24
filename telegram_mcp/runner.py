@@ -115,6 +115,69 @@ async def _connect_authorized_client(label, client) -> None:
     )
 
 
+def _binds_beyond_this_machine(host: str) -> bool:
+    """Whether ``host`` accepts connections from anywhere but this machine.
+
+    Unparseable names answer True. A hostname here is almost always a deliberate
+    public bind, and guessing "probably local" about an address that decides who
+    can reach a Telegram account is the wrong direction to be wrong in.
+    """
+    import ipaddress
+
+    candidate = (host or "").strip().strip("[]")
+    if candidate.lower() in {"localhost", ""}:
+        return False
+    try:
+        address = ipaddress.ip_address(candidate)
+    except ValueError:
+        return True
+    # 0.0.0.0 and :: are not "unspecified" in any harmless sense here - they mean
+    # every interface the machine has.
+    return not address.is_loopback
+
+
+def _refuse_unauthenticated_remote_bind(host: str) -> None:
+    """Stop a remote bind that nothing authenticates.
+
+    `MCP_ALLOWED_HOSTS` and the DNS-rebinding protection it enables are not
+    authentication. They check which name a request arrived under, which stops a
+    browser on the operator's own machine being tricked into calling this server
+    - it asks nothing about WHO is calling. Bound to a routable address without
+    something in front that does, every tool here is available to anyone who can
+    reach the port: read any conversation, send as the account, delete history.
+
+    This server implements no authentication of its own, and that is deliberate -
+    a hand-rolled token scheme that no real client has exercised would read as
+    protection without being any. So the safe configurations are the two where
+    something else is doing the work, and both have to be stated explicitly.
+    """
+    if not _binds_beyond_this_machine(host):
+        return
+    if _parse_bool_env(os.getenv("MCP_TRUSTED_PROXY_AUTH"), False):
+        return
+    if _parse_bool_env(os.getenv("MCP_ALLOW_UNAUTHENTICATED_REMOTE"), False):
+        print(
+            f"WARNING: serving on {host} with no authentication, because "
+            "MCP_ALLOW_UNAUTHENTICATED_REMOTE is set. Anyone who can reach this "
+            "port controls the configured Telegram account(s).",
+            file=sys.stderr,
+        )
+        return
+
+    raise ValidationError(
+        f"Refusing to serve on {host}: that address is reachable from outside this "
+        "machine and nothing here authenticates callers. Every tool on this server "
+        "acts as your Telegram account.\n"
+        "  - Keep it local (the default): unset MCP_HOST, or set it to 127.0.0.1.\n"
+        "  - Behind a reverse proxy that authenticates requests: set "
+        "MCP_TRUSTED_PROXY_AUTH=1 to state that it does.\n"
+        "  - Deliberately open, on a trusted private network: set "
+        "MCP_ALLOW_UNAUTHENTICATED_REMOTE=1.\n"
+        "MCP_ALLOWED_HOSTS is not an answer here - it checks which name a request "
+        "used, never who sent it."
+    )
+
+
 def _configure_transport_security() -> None:
     """Wire MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS into FastMCP's DNS-rebinding
     protection, e.g. when the server sits behind a reverse proxy on a public
@@ -157,7 +220,11 @@ async def _serve(transport: str) -> None:
             f"{', '.join(sorted(_TRANSPORTS))}."
         )
     if transport in ("http", "sse"):
-        mcp.settings.host = os.getenv("MCP_HOST", "127.0.0.1")
+        host = os.getenv("MCP_HOST", "127.0.0.1")
+        # Before the port is opened, not after: a refusal that arrives once the
+        # socket is already listening has already been too late.
+        _refuse_unauthenticated_remote_bind(host)
+        mcp.settings.host = host
         mcp.settings.port = parse_port(os.getenv("MCP_PORT", "8765"), "MCP_PORT")
         _configure_transport_security()
         if transport == "http":
