@@ -721,6 +721,9 @@ try {
         Write-Host 'does not manage - copy .env.example first, fill those in, then come back.'
         if (Read-Confirmation 'Create an empty .env now so accounts can be added?') {
             [IO.File]::WriteAllText($envPath, '', [Text.UTF8Encoding]::new($false))
+            # Before anything is put in it: this file ends up holding session
+            # strings, and a session string is the account.
+            [void] (Set-OwnerOnlyAcl -Path $envPath)
             Write-Log 'Created an empty .env'
         }
         else {

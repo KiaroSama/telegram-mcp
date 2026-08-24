@@ -205,6 +205,15 @@ foreach ($shipped in $scripts) {
         throw "$(Split-Path -Leaf $shipped) grants without removing inheritance."
     }
 }
+# Every .env this manager creates is restricted before anything is written into
+# it: the file ends up holding session strings, and a session string is the
+# account, with no password and no second factor.
+foreach ($creation in [regex]::Matches($manager, '(?ms)WriteAllText\(\$envPath.{0,300}')) {
+    if ($creation.Value -notmatch 'Set-OwnerOnlyAcl -Path \$envPath') {
+        throw 'Manage-Accounts.ps1 creates a .env without restricting it to its owner.'
+    }
+}
+
 if ($launcher -notmatch 'LogMaxBytes') {
     throw 'The launcher log has no size ceiling; a long-running server fills the disk.'
 }
