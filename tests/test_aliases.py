@@ -3,6 +3,9 @@
 import json
 import os
 import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -397,3 +400,90 @@ def test_unreadable_alias_file_does_not_raise(monkeypatch, tmp_path):
         assert runtime.load_aliases() == {}  # degraded, never an exception
     finally:
         os.chmod(path, 0o600)
+
+
+# --- an alias belongs to the login it was saved on -----------------------------
+
+REPO = Path(__file__).resolve().parents[1]
+
+_PROBE = """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[2])
+from telegram_mcp import aliases
+
+print("ACQUIRED" if aliases._try_acquire(Path(sys.argv[1])) else "BUSY")
+"""
+
+
+def _saved_on(account, alias="андрей", chat_id=12345):
+    runtime.save_aliases({alias: {"id": chat_id, "name": None, "account": account}})
+
+
+def test_an_alias_saved_on_one_account_does_not_resolve_on_another():
+    """Chat ids are per-login. Resolving a `work` alias while `personal` is the
+    active account hands a send tool an id that names a different person there -
+    or nobody - and nothing downstream can tell."""
+    _saved_on("work")
+
+    assert runtime.apply_alias("андрей", account="personal") == "андрей"
+
+
+def test_an_alias_still_resolves_on_the_account_that_saved_it():
+    _saved_on("work")
+
+    assert runtime.apply_alias("андрей", account="work") == 12345
+
+
+def test_a_legacy_alias_with_no_account_still_resolves_everywhere():
+    """Rows written before scoping carry no account. Refusing them would break
+    every alias saved to date, so they stay visible to whoever asks."""
+    runtime.save_aliases({"андрей": 12345})
+
+    assert runtime.apply_alias("андрей", account="personal") == 12345
+    assert runtime.apply_alias("андрей", account="work") == 12345
+    assert runtime.apply_alias("андрей") == 12345
+
+
+def test_matching_hides_another_account_s_aliases(monkeypatch):
+    """The candidate list is what the agent offers the user to confirm; offering a
+    name from a login they are not using is how the wrong person gets picked."""
+    monkeypatch.setenv("TELEGRAM_CONTACT_FUZZY", "1")
+    runtime.save_aliases(
+        {
+            "андрей бекендер": {"id": 111, "name": None, "account": "work"},
+            "андрей фронтендер": {"id": 222, "name": None, "account": "personal"},
+        }
+    )
+
+    matched = [alias for alias, _ in runtime.match_aliases("андрей", account="work")]
+
+    assert matched == ["андрей бекендер"]
+
+
+def test_the_alias_lock_is_exclusive_on_every_platform(tmp_path):
+    """On Windows the lock was a bare `yield`, so two writers each loaded the whole
+    map, changed their own entry and saved it back - and the second silently
+    dropped the first. A deleted alias could come back that way.
+
+    Proved across processes, because a same-process lock would pass a same-process
+    test while still losing exactly those writes.
+    """
+    path = aliases.aliases_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    probe = tmp_path / "probe.py"
+    probe.write_text(_PROBE, encoding="utf-8")
+    command = [sys.executable, str(probe), str(path), str(REPO)]
+
+    with aliases._alias_lock(path):
+        while_held = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    once_free = subprocess.run(command, capture_output=True, text=True, timeout=60)
+
+    assert "BUSY" in while_held.stdout, (
+        f"a second process took the lock while it was held: "
+        f"{while_held.stdout}{while_held.stderr}"
+    )
+    assert (
+        "ACQUIRED" in once_free.stdout
+    ), f"the lock was never released: {once_free.stdout}{once_free.stderr}"

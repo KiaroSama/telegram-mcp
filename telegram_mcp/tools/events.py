@@ -82,7 +82,7 @@ async def _wait_target(chat_id, account=None) -> Optional[int]:
     """Marked chat id to wait for, or None to wait for any chat."""
     if chat_id is None or chat_id == "":
         return None
-    resolved = apply_alias(chat_id)
+    resolved = apply_alias(chat_id, account=account)
     if isinstance(resolved, int):
         return resolved
     entity = await resolve_entity(resolved, get_client(account))
