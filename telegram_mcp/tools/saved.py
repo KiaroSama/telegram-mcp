@@ -15,6 +15,7 @@ decides when to send it.
 import os
 from typing import Any, List, Union
 
+from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 from telegram_mcp.message_view import describe_media_label, display_name, display_text
 
@@ -55,9 +56,12 @@ async def list_saved_dialogs(limit: int = 50, account: str = None) -> str:
     found in field values.
     """
     try:
+        bound = bounded(limit, LIMITS["list_saved_dialogs"])
+        if bound.error:
+            return bound.error
+        limit = bound.value
         cl = get_client(account)
         await ensure_connected(cl)
-        limit = max(1, min(int(limit), 100))
         result = await cl(
             functions.messages.GetSavedDialogsRequest(
                 offset_date=None, offset_id=0, offset_peer=InputPeerSelf(), limit=limit, hash=0
@@ -98,7 +102,15 @@ async def list_saved_dialogs(limit: int = 50, account: str = None) -> str:
                     "pinned": bool(getattr(dialog, "pinned", False)),
                 }
             )
-        return format_tool_result(records, {"count": len(records), "note": _UNTRUSTED})
+        return format_tool_result(
+            records,
+            dict(
+                bound.metadata,
+                count=len(records),
+                has_more=len(records) >= bound.value,
+                note=_UNTRUSTED,
+            ),
+        )
     except Exception as e:
         return log_and_format_error("list_saved_dialogs", e)
 
@@ -120,9 +132,12 @@ async def get_saved_history(peer_id: Union[int, str], limit: int = 30, account: 
     found in field values.
     """
     try:
+        bound = bounded(limit, LIMITS["get_saved_history"])
+        if bound.error:
+            return bound.error
+        limit = bound.value
         cl = get_client(account)
         await ensure_connected(cl)
-        limit = max(1, min(int(limit), 100))
         entity = await resolve_entity(peer_id, cl)
         result = await cl(
             functions.messages.GetSavedHistoryRequest(
@@ -154,7 +169,14 @@ async def get_saved_history(peer_id: Union[int, str], limit: int = 30, account: 
                 record["media"] = label
             records.append(record)
         return format_tool_result(
-            records, {"peer_id": str(peer_id), "count": len(records), "note": _UNTRUSTED}
+            records,
+            dict(
+                bound.metadata,
+                peer_id=str(peer_id),
+                count=len(records),
+                has_more=len(records) >= bound.value,
+                note=_UNTRUSTED,
+            ),
         )
     except Exception as e:
         return log_and_format_error("get_saved_history", e, peer_id=peer_id)

@@ -46,6 +46,12 @@ def _buttons_of(msg):
     return describe_keyboard(msg)["buttons"]
 
 
+# Well-formed and worthless: it authorizes nothing. Tests that assert a press is
+# refused for some OTHER reason pass this, so they also pin the order — a more
+# specific refusal must win over "that token does not authorize this button".
+_UNUSABLE_TOKEN = "b1:" + "0" * 32
+
+
 # --- what a button is -------------------------------------------------------
 
 
@@ -192,7 +198,10 @@ async def test_clicking_a_callback_button_sends_that_buttons_payload(_wire):
     rows = [[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]
     client = _wire(_message(rows), answer=SimpleNamespace(message="done", alert=None, url=None))
 
-    payload = json.loads(await click_button(1, 7, 1, expect_text="No", account="default"))
+    token = _tokens_of(await _inspect())[1]
+    payload = json.loads(
+        await click_button(1, 7, 1, expect_text="No", press_token=token, account="default")
+    )
 
     assert client.calls[0].data == b"NO", "pressed the wrong button"
     assert payload["results"][0]["button_index"] == 1
@@ -203,7 +212,9 @@ async def test_clicking_a_callback_button_sends_that_buttons_payload(_wire):
 async def test_clicking_a_non_callback_button_is_refused_without_a_request(_wire):
     client = _wire(_message([[_button("KeyboardButtonUrl", text="Open", url="u")]]))
 
-    result = await click_button(1, 7, 0, expect_text="Open", account="default")
+    result = await click_button(
+        1, 7, 0, expect_text="Open", press_token=_UNUSABLE_TOKEN, account="default"
+    )
 
     assert isinstance(result, str) and "not a callback button" in result
     assert client.calls == [], "a request was sent for a button that cannot be pressed"
@@ -213,7 +224,9 @@ async def test_clicking_a_non_callback_button_is_refused_without_a_request(_wire
 async def test_clicking_an_out_of_range_index_names_the_valid_range(_wire):
     client = _wire(_message([[_callback()]]))
 
-    result = await click_button(1, 7, 5, expect_text="Confirm", account="default")
+    result = await click_button(
+        1, 7, 5, expect_text="Confirm", press_token=_UNUSABLE_TOKEN, account="default"
+    )
 
     assert "no button 5" in result and "0-0" in result
     assert client.calls == []
@@ -223,7 +236,9 @@ async def test_clicking_an_out_of_range_index_names_the_valid_range(_wire):
 async def test_a_password_gated_button_is_never_pressed(_wire):
     client = _wire(_message([[_callback(requires_password=True)]]))
 
-    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=_UNUSABLE_TOKEN, account="default"
+    )
 
     assert "2FA" in result or "password" in result
     assert client.calls == [], "a 2FA-gated callback was attempted"
@@ -236,7 +251,10 @@ async def test_a_silent_answer_is_reported_as_delivered_not_as_empty(_wire):
         answer=SimpleNamespace(message=None, alert=None, url=None),
     )
 
-    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
+    token = _tokens_of(await _inspect())[0]
+    payload = json.loads(
+        await click_button(1, 7, 0, expect_text="Confirm", press_token=token, account="default")
+    )
 
     assert payload["results"][0]["bot_message"] is None
     assert "delivered" in payload["results"][0]["note_no_answer"]
@@ -277,7 +295,9 @@ async def test_clicking_a_reply_keyboard_button_is_refused_without_a_request(_wi
     """Its buttons have callback-shaped fakes here, so only the markup type saves us."""
     client = _wire(_message([[_callback()]], inline=False))
 
-    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=_UNUSABLE_TOKEN, account="default"
+    )
 
     assert "REPLY keyboard" in result and "send_message" in result
     assert client.calls == [], "a callback was sent for a reply-keyboard button"
@@ -291,7 +311,9 @@ async def test_a_changed_keyboard_refuses_the_press_instead_of_hitting_the_wrong
     """A bot can edit its own keyboard between the listing and the press."""
     client = _wire(_message([[_callback(text="Delete", data=b"DEL")]]))
 
-    result = await click_button(1, 7, 0, expect_text="Confirm", account="default")
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=_UNUSABLE_TOKEN, account="default"
+    )
 
     assert "now reads 'Delete'" in result and "nothing was pressed" in result
     assert client.calls == [], "pressed a button whose label had changed"
@@ -304,7 +326,10 @@ async def test_a_matching_expectation_presses_normally(_wire):
         answer=SimpleNamespace(message="ok", alert=None, url=None),
     )
 
-    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
+    token = _tokens_of(await _inspect())[0]
+    payload = json.loads(
+        await click_button(1, 7, 0, expect_text="Confirm", press_token=token, account="default")
+    )
 
     assert client.calls[0].data == b"OK"
     assert payload["results"][0]["button_text"] == "Confirm"
@@ -542,8 +567,11 @@ async def test_the_legacy_press_goes_through_the_index_checked_path(_wire_legacy
         _message(rows), answer=SimpleNamespace(message="done", alert=None, url=None)
     )
 
+    token = _tokens_of(await _inspect())[1]
     payload = json.loads(
-        await press_inline_button(1, 7, button_index=1, button_text="No", account="default")
+        await press_inline_button(
+            1, 7, button_index=1, button_text="No", press_token=token, account="default"
+        )
     )
 
     assert client.calls[0].data == b"NO"
@@ -557,7 +585,9 @@ async def test_the_legacy_press_uses_a_supplied_label_as_a_guard_not_a_selector(
 
     client = _wire_legacy(_message([[_callback(text="Delete", data=b"DEL")]]))
 
-    result = await press_inline_button(1, 7, button_text="Confirm", button_index=0, account="x")
+    result = await press_inline_button(
+        1, 7, button_text="Confirm", button_index=0, press_token=_UNUSABLE_TOKEN, account="x"
+    )
 
     assert "nothing was pressed" in result
     assert client.calls == []
@@ -634,3 +664,260 @@ async def test_the_legacy_press_also_needs_the_label_it_was_listed_under(_wire_l
 
     assert "button_text" in result
     assert client.calls == [], "the legacy name pressed an unverified index"
+
+
+# --- a label is not an identity: the press token ---------------------------
+#
+# expect_text compares the SANITIZED label of whatever now sits at the index. A
+# bot keeps the label and swaps the callback data and the guard sees nothing; two
+# different raw labels normalize to one display string and the guard cannot tell
+# them apart either. These press against an authenticated binding minted by the
+# listing instead.
+
+
+def _tokens_of(payload):
+    """index -> press_token, from an inspect_buttons payload."""
+    return {b["index"]: b.get("press_token") for b in payload["results"]}
+
+
+async def _inspect(chat_id=1, message_id=7, account="default"):
+    return json.loads(await inspect_buttons(chat_id, message_id, account=account))
+
+
+@pytest.mark.asyncio
+async def test_inspect_publishes_a_distinct_press_token_per_pressable_button(_wire):
+    _wire(
+        _message(
+            [
+                [_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")],
+                [_button("KeyboardButtonUrl", text="Open", url="https://e.example")],
+            ]
+        )
+    )
+
+    tokens = _tokens_of(await _inspect())
+
+    assert tokens[0] and tokens[1]
+    assert tokens[0] != tokens[1], "one token authorized two different buttons"
+    assert tokens[2] is None, "a token was minted for a button no press can reach"
+
+
+@pytest.mark.asyncio
+async def test_the_token_does_not_carry_the_callback_payload(_wire):
+    """The payload is opaque bot state; publishing it is what the index was for."""
+    import base64
+
+    secret = b"transfer:all:to:attacker"
+    _wire(_message([[_callback(text="Confirm", data=secret)]]))
+
+    blob = json.dumps(await _inspect())
+
+    assert secret.decode() not in blob
+    assert secret.hex() not in blob
+    assert base64.b64encode(secret).decode().rstrip("=") not in blob
+
+
+@pytest.mark.asyncio
+async def test_pressing_without_a_press_token_is_refused_before_any_callback(_wire):
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"DELETE")]]),
+        answer=SimpleNamespace(message="gone", alert=None, url=None),
+    )
+
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=_UNUSABLE_TOKEN, account="default"
+    )
+
+    assert "press_token" in result
+    assert client.calls == [], "a callback was sent against an unauthenticated index"
+
+
+@pytest.mark.asyncio
+async def test_a_label_kept_while_the_payload_changed_is_refused(_wire):
+    """THE defect: expect_text compares the label, so a bot that keeps the label
+    and swaps the callback data passed the guard and the press went through."""
+    client = _wire(_message([[_callback(text="Confirm", data=b"HARMLESS")]]))
+    token = _tokens_of(await _inspect())[0]
+
+    # Same visible label, different payload — an edit expect_text cannot see.
+    client._msg = _message([[_callback(text="Confirm", data=b"WIPE")]])
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=token, account="default"
+    )
+
+    assert "press_token" in result
+    assert client.calls == [], "pressed a button whose payload had been swapped"
+
+
+@pytest.mark.asyncio
+async def test_a_token_minted_for_another_button_does_not_authorize_this_one(_wire):
+    client = _wire(
+        _message([[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+    tokens = _tokens_of(await _inspect())
+
+    result = await click_button(
+        1, 7, 1, expect_text="No", press_token=tokens[0], account="default"
+    )
+
+    assert client.calls == [], "one button's token pressed another button"
+    assert "press_token" in result
+
+
+@pytest.mark.asyncio
+async def test_a_token_minted_for_another_message_or_chat_is_refused(_wire):
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"OK")]], message_id=7),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+    token = _tokens_of(await _inspect(chat_id=1, message_id=7))[0]
+
+    client._msg = _message([[_callback(text="Confirm", data=b"OK")]], message_id=8)
+    other_message = await click_button(
+        1, 8, 0, expect_text="Confirm", press_token=token, account="default"
+    )
+    client._msg = _message([[_callback(text="Confirm", data=b"OK")]], message_id=7)
+    other_chat = await click_button(
+        2, 7, 0, expect_text="Confirm", press_token=token, account="default"
+    )
+    other_account = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=token, account="second"
+    )
+
+    assert client.calls == [], "a token crossed a message, chat or account boundary"
+    for refusal in (other_message, other_chat, other_account):
+        assert "press_token" in refusal
+
+
+@pytest.mark.asyncio
+async def test_a_token_from_before_a_restart_is_refused(_wire, monkeypatch):
+    """The key is minted per process, so no token survives a restart. One that did
+    would be a durable authorization for a keyboard nobody re-read."""
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"OK")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+    stale = _tokens_of(await _inspect())[0]
+
+    monkeypatch.setattr(buttons_tool, "_PRESS_KEY", b"a-different-process-key")
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=stale, account="default"
+    )
+
+    assert client.calls == []
+    assert "press_token" in result
+
+
+@pytest.mark.asyncio
+async def test_a_forged_token_is_refused(_wire):
+    """A plain digest of the facts would be forgeable by anyone who can read the
+    listing; the binding is keyed, so only this process can mint one."""
+    import hashlib
+
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"OK")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+    forged = "b1:" + hashlib.sha256(b"default|1|7|0|callback|Confirm|OK").hexdigest()[:32]
+
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token=forged, account="default"
+    )
+
+    assert client.calls == []
+    assert "press_token" in result
+
+
+@pytest.mark.asyncio
+async def test_a_valid_token_presses_the_button_it_was_minted_for(_wire):
+    client = _wire(
+        _message([[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]),
+        answer=SimpleNamespace(message="done", alert=None, url=None),
+    )
+    tokens = _tokens_of(await _inspect())
+
+    payload = json.loads(
+        await click_button(1, 7, 1, expect_text="No", press_token=tokens[1], account="default")
+    )
+
+    assert client.calls[0].data == b"NO"
+    assert payload["results"][0]["button_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_two_raw_labels_that_normalize_to_one_display_string_are_refused(_wire):
+    """`Con<ZWSP>firm` and `Confirm` are different buttons that read identically.
+    expect_text compares the cleaned label, so it cannot separate them, and a
+    listing showing them as two identical rows was already misleading."""
+    client = _wire(
+        _message([[_callback(text="Con​firm", data=b"WIPE"), _callback(text="Confirm")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+
+    payload = await _inspect()
+    listed = payload["results"]
+
+    assert [b["text"] for b in listed] == ["Confirm", "Confirm"]
+    assert listed[0].get("text_collision") is True
+    assert listed[1].get("text_collision") is True
+    assert payload["pressable_indexes"] == [], "a colliding label stayed pressable"
+    assert _tokens_of(payload) == {0: None, 1: None}
+
+    result = await click_button(
+        1, 7, 0, expect_text="Confirm", press_token="b1:0" * 8, account="default"
+    )
+
+    assert client.calls == []
+    assert "same label" in result
+
+
+@pytest.mark.asyncio
+async def test_two_identical_raw_labels_are_still_separable_by_their_tokens(_wire):
+    """A genuine duplicate label is not a sanitizer collision: nothing was hidden,
+    and the binding still names exactly one button."""
+    client = _wire(
+        _message([[_callback(text="Confirm", data=b"A"), _callback(text="Confirm", data=b"B")]]),
+        answer=SimpleNamespace(message="ok", alert=None, url=None),
+    )
+    tokens = _tokens_of(await _inspect())
+
+    await click_button(1, 7, 1, expect_text="Confirm", press_token=tokens[1], account="default")
+
+    assert client.calls[0].data == b"B"
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_also_needs_the_binding(_wire_legacy):
+    """The older name must not be the route that skips the token."""
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    client = _wire_legacy(
+        _message([[_callback(text="Delete everything", data=b"DELETE")]]),
+        answer=SimpleNamespace(message="gone", alert=None, url=None),
+    )
+
+    result = await press_inline_button(
+        1, 7, button_index=0, button_text="Delete everything", account="default"
+    )
+
+    assert "press_token" in result
+    assert client.calls == [], "the legacy name pressed without the binding"
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_forwards_a_valid_binding(_wire_legacy):
+    from telegram_mcp.tools.messages_state import list_inline_buttons, press_inline_button
+
+    client = _wire_legacy(
+        _message([[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]),
+        answer=SimpleNamespace(message="done", alert=None, url=None),
+    )
+    listing = json.loads(await list_inline_buttons(1, 7, account="default"))
+    token = _tokens_of(listing)[1]
+
+    await press_inline_button(
+        1, 7, button_index=1, button_text="No", press_token=token, account="default"
+    )
+
+    assert client.calls[0].data == b"NO"

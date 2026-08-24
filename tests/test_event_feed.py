@@ -48,7 +48,16 @@ def _clean_state(monkeypatch, tmp_path):
     monkeypatch.setattr(events, "_activity_event", None)
     monkeypatch.setattr(events, "_feed_settle_ms", 6000)
     monkeypatch.setattr(events, "_feed_autostart_done", False)
-    monkeypatch.delenv("TELEGRAM_EVENT_FEED", raising=False)
+    monkeypatch.setattr(events, "_dropped", events._new_drop_ledger())
+    monkeypatch.setattr(events, "_owner_only_paths", set())
+    for name in (
+        "TELEGRAM_EVENT_FEED",
+        "TELEGRAM_EVENT_FEED_MAX_BYTES",
+        "TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS",
+        "TELEGRAM_EVENT_PENDING_MAX",
+        "TELEGRAM_EVENT_PENDING_TTL_SECONDS",
+    ):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TELEGRAM_EVENT_FEED_FILE", str(tmp_path / "feed.jsonl"))
     yield
     task = events._feed_task
@@ -416,3 +425,355 @@ async def test_a_burst_is_reported_with_the_account_it_arrived_on(monkeypatch):
 
     assert summary["account"] == "work"
     assert summary["chat_id"] == 777
+
+
+# --- nothing here may grow without a ceiling --------------------------------
+#
+# A server that runs for weeks kept an append-only feed file, a pending map with
+# no count and no expiry, and a wait that serialized however many chats happened
+# to be in it. Each of those is a slow leak of a different resource -- disk,
+# memory, and the model's context -- and none of them announced itself.
+
+
+async def _queue_burst(chat_id, tries=60):
+    """Hand the consumer one settled burst and wait for it to be written.
+
+    The activity event is what a real incoming message sets; a burst poked
+    straight into the map without it leaves the consumer asleep, which looks
+    exactly like a stall.
+    """
+    events._pending_msgs[(ACCOUNT, chat_id)] = _pending_record(_mono(1.0))
+    events._get_activity_event().set()
+    for _ in range(tries):
+        await asyncio.sleep(0.02)
+        if not events._pending_msgs:
+            return True
+    return False
+
+
+def _rotated_path():
+    path = events.feed_file_path()
+    return path.with_name(path.name + ".1")
+
+
+@pytest.mark.asyncio
+async def test_the_feed_rotates_instead_of_growing_without_end(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_BYTES", "400")
+    events._start_feed(settle_ms=20)
+
+    for chat in range(12):
+        assert await _queue_burst(chat), f"consumer stalled on chat {chat}"
+
+    live = events.feed_file_path()
+    assert live.exists() and _rotated_path().exists(), "nothing was rotated"
+    # The ceiling is checked when the file is opened, so a file can carry the one
+    # record that took it over. Two generations of that is the whole disk bound.
+    for generation in (live, _rotated_path()):
+        assert generation.stat().st_size <= 400 + 512, f"{generation} grew past its ceiling"
+
+
+@pytest.mark.asyncio
+async def test_rotation_keeps_one_generation_and_no_more(monkeypatch):
+    """Two files is a bound; a numbered series is the same unbounded growth with
+    more filenames."""
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_BYTES", "300")
+    events._start_feed(settle_ms=20)
+
+    for chat in range(20):
+        assert await _queue_burst(chat), f"consumer stalled on chat {chat}"
+
+    live = events.feed_file_path()
+    siblings = sorted(p.name for p in live.parent.iterdir())
+    assert siblings == sorted([live.name, _rotated_path().name]), siblings
+
+
+def test_a_rotated_generation_past_the_age_limit_is_deleted(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS", "60")
+    rotated = _rotated_path()
+    rotated.parent.mkdir(parents=True, exist_ok=True)
+    rotated.write_text("stale\n", encoding="utf-8")
+    old = time.time() - 3600
+    os.utime(rotated, (old, old))
+
+    events._touch_feed_file()
+
+    assert not rotated.exists(), "a rotated generation outlived its age limit"
+
+
+def test_a_rotated_generation_inside_the_age_limit_is_kept(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS", "3600")
+    rotated = _rotated_path()
+    rotated.parent.mkdir(parents=True, exist_ok=True)
+    rotated.write_text("recent\n", encoding="utf-8")
+
+    events._touch_feed_file()
+
+    assert rotated.read_text(encoding="utf-8") == "recent\n"
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "", "lots"])
+def test_a_retention_budget_that_is_not_a_budget_falls_back(monkeypatch, value):
+    """`nan` is the dangerous one: every comparison against it is False, so a
+    size ceiling set to it silently does not exist while the status still
+    reports one."""
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_BYTES", value)
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS", value)
+
+    max_bytes, max_age = events.feed_retention()
+
+    assert max_bytes == events._FEED_MAX_BYTES_DEFAULT
+    assert max_age == events._FEED_MAX_AGE_SECONDS_DEFAULT
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "nan", "inf", "many"])
+def test_a_pending_bound_that_is_not_a_bound_falls_back(monkeypatch, value):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", value)
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_TTL_SECONDS", value)
+
+    max_count, ttl = events.pending_bounds()
+
+    assert max_count == events._PENDING_MAX_DEFAULT
+    assert ttl == events._PENDING_TTL_SECONDS_DEFAULT
+
+
+# --- the pending map ---------------------------------------------------------
+
+
+def _incoming(chat_id, message_id=1, name="Dana"):
+    return _IncomingEvent(chat_id, message_id, name=name)
+
+
+@pytest.mark.asyncio
+async def test_the_pending_map_stops_at_its_ceiling(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "5")
+
+    for chat in range(9):
+        await events._on_new_incoming(ACCOUNT, _incoming(chat))
+
+    assert len(events._pending_msgs) == 5, events._pending_msgs
+
+
+@pytest.mark.asyncio
+async def test_an_overflow_drop_is_reported_rather_than_silent(monkeypatch):
+    """A dropped burst is a message the agent will never answer. Losing it may be
+    unavoidable once the ceiling is reached; losing it quietly is not."""
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "2")
+
+    for chat in range(5):
+        await events._on_new_incoming(ACCOUNT, _incoming(chat))
+
+    state = events.overflow_state()
+    assert state["dropped_total"] == 3
+    assert state["dropped_reason_counts"]["overflow"] == 3
+    assert state["recent_dropped"], "no record of which chats were dropped"
+    assert state["recent_dropped"][-1]["reason"] == "overflow"
+
+
+@pytest.mark.asyncio
+async def test_the_oldest_burst_is_the_one_dropped(monkeypatch):
+    """The newest message is the one an agent still has a chance of answering."""
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "2")
+
+    for chat in (1, 2, 3):
+        await events._on_new_incoming(ACCOUNT, _incoming(chat))
+
+    assert sorted(chat for _account, chat in events._pending_msgs) == [2, 3]
+
+
+@pytest.mark.asyncio
+async def test_a_burst_nobody_collected_expires(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_TTL_SECONDS", "30")
+    events._pending_msgs[(ACCOUNT, 1)] = _pending_record(_mono(3600))
+    events._pending_msgs[(ACCOUNT, 2)] = _pending_record(_mono(1))
+
+    events._expire_pending()
+
+    assert list(events._pending_msgs) == [(ACCOUNT, 2)]
+    assert events.overflow_state()["dropped_reason_counts"]["expired"] == 1
+
+
+@pytest.mark.asyncio
+async def test_an_expiry_does_not_take_a_burst_that_is_still_fresh(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_TTL_SECONDS", "3600")
+    events._pending_msgs[(ACCOUNT, 1)] = _pending_record(_mono(60))
+
+    events._expire_pending()
+
+    assert (ACCOUNT, 1) in events._pending_msgs
+
+
+@pytest.mark.asyncio
+async def test_the_drop_ledger_itself_is_bounded(monkeypatch):
+    """A ledger of unbounded drops is the leak it was added to report."""
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "1")
+
+    for chat in range(200):
+        await events._on_new_incoming(ACCOUNT, _incoming(chat))
+
+    state = events.overflow_state()
+    assert state["dropped_total"] == 199
+    assert len(state["recent_dropped"]) <= events._DROP_LEDGER_MAX
+
+
+# --- the wait's own answer ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_wait_for_new_message_bounds_the_list_it_serializes(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "500")
+    for chat in range(300):
+        events._pending_msgs[(ACCOUNT, chat)] = _pending_record(_mono(1))
+
+    result = json.loads(await events.wait_for_new_message(timeout=0.2))
+
+    assert len(result["pending_chats"]) == result["effective_limit"]
+    assert result["effective_limit"] <= 100
+    assert result["total"] == 300
+    assert result["has_more"] is True
+
+
+@pytest.mark.asyncio
+async def test_wait_for_new_message_refuses_a_limit_that_is_not_one(monkeypatch):
+    events._pending_msgs[(ACCOUNT, 1)] = _pending_record(_mono(1))
+
+    refusal = await events.wait_for_new_message(timeout=0.2, limit=0)
+
+    assert "limit" in refusal
+    assert "pending_chats" not in refusal
+
+
+@pytest.mark.asyncio
+async def test_a_short_pending_list_says_there_is_no_more():
+    events._pending_msgs[(ACCOUNT, 1)] = _pending_record(_mono(1))
+
+    result = json.loads(await events.wait_for_new_message(timeout=0.2))
+
+    assert result["total"] == 1
+    assert result["has_more"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_wait_reports_what_was_dropped_while_it_was_not_looking(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_EVENT_PENDING_MAX", "2")
+    for chat in range(5):
+        await events._on_new_incoming(ACCOUNT, _incoming(chat))
+
+    result = json.loads(await events.wait_for_new_message(timeout=0.2))
+
+    assert result["dropped_total"] == 3
+
+
+# --- shutdown -----------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_disabling_the_feed_awaits_the_task_it_cancelled():
+    """Cancellation is a request. Returning before it lands leaves the consumer
+    holding the feed file open while the caller is told it stopped."""
+    events._start_feed(settle_ms=50)
+    task = events._feed_task
+
+    assert await events.disable_incoming_feed() == "Incoming feed disabled."
+
+    assert task.done(), "disable returned before the consumer had stopped"
+
+
+@pytest.mark.asyncio
+async def test_restarting_with_a_new_settle_awaits_the_old_task():
+    await events.enable_incoming_feed(settle_ms=100)
+    first = events._feed_task
+
+    await events.enable_incoming_feed(settle_ms=200)
+
+    assert first.done(), "the previous consumer was left running"
+    assert events._feed_task is not first
+    assert events.feed_enabled()
+
+
+# --- owner-only, on this platform ---------------------------------------------
+
+
+def _owner_only(path):
+    """True when only the current user can read the file, checked the way the
+    platform actually expresses that."""
+    if os.name == "posix":
+        return stat.S_IMODE(path.stat().st_mode) == 0o600
+    import getpass
+    import subprocess
+
+    listing = subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, timeout=30
+    ).stdout
+    # icacls prints the path in front of the first ACE, and the path has a colon
+    # of its own -- splitting on ":" without removing it reads the drive letter
+    # as the trustee.
+    body = listing.split("Successfully processed")[0].replace(str(path), "")
+    trustees = [line.split(":(", 1)[0].strip() for line in body.splitlines() if ":(" in line]
+    user = getpass.getuser().lower()
+    return bool(trustees) and all(t.lower().split("\\")[-1] == user for t in trustees)
+
+
+def test_the_permission_check_can_actually_fail(tmp_path):
+    """Negative control. `_owner_only` asks the OS a question, and a helper that
+    answered True for everything would make every permission test below vacuous."""
+    open_to_all = tmp_path / "not-restricted.txt"
+    open_to_all.write_text("x", encoding="utf-8")
+    if os.name == "posix":
+        os.chmod(open_to_all, 0o644)
+
+    assert not _owner_only(open_to_all)
+
+
+def test_a_created_feed_file_is_readable_only_by_its_owner():
+    """`fchmod` is a no-op on Windows, so a mode-only guard left the feed -- which
+    holds contact names and chat ids -- readable by every local account."""
+    events._touch_feed_file()
+
+    assert _owner_only(events.feed_file_path())
+
+
+@pytest.mark.asyncio
+async def test_a_rotated_generation_is_restricted_too(monkeypatch):
+    """Rotation renames the file the restriction was applied to and creates a new
+    one; restricting only the first leaves the older half of the history open."""
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_BYTES", "300")
+    events._start_feed(settle_ms=20)
+
+    for chat in range(12):
+        assert await _queue_burst(chat), f"consumer stalled on chat {chat}"
+
+    assert _rotated_path().exists()
+    assert _owner_only(_rotated_path())
+    assert _owner_only(events.feed_file_path())
+
+
+def test_every_file_the_feed_creates_goes_through_the_restriction_seam(monkeypatch):
+    """Platform-independent half of the same guarantee: whatever the current OS
+    can express, no path the feed creates may skip the call that expresses it."""
+    seen = []
+    monkeypatch.setattr(events, "_restrict_to_owner", lambda path, fd=None: seen.append(str(path)))
+    monkeypatch.setenv("TELEGRAM_EVENT_FEED_MAX_BYTES", "1")
+
+    events._touch_feed_file()
+    live = str(events.feed_file_path())
+    assert seen == [live]
+
+    events.feed_file_path().write_text("x" * 64, encoding="utf-8")
+    events._touch_feed_file()  # over the ceiling, so this one rotates
+
+    assert str(_rotated_path()) in seen
+    assert seen[-1] == live
+
+
+def test_an_existing_feed_file_from_a_previous_run_is_appended_to_not_replaced():
+    """A restart must not lose the history, and must not leave the old file's
+    permissions as it found them either."""
+    path = events.feed_file_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"ts": 1, "chat_id": 5}\n', encoding="utf-8")
+
+    with events._open_feed_append() as handle:
+        handle.write('{"ts": 2, "chat_id": 6}\n')
+
+    assert len(path.read_text(encoding="utf-8").strip().splitlines()) == 2
+    assert _owner_only(path)

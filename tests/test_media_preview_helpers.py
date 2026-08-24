@@ -73,7 +73,7 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None, deadline=None: [
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [
             (png, {"frame_index": 0}),
             (png, {"frame_index": 1}),
         ],
@@ -90,7 +90,7 @@ def test_no_frames_extracted_yields_no_images_rather_than_an_error(monkeypatch):
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None, deadline=None: [],
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [],
     )
 
     metas, images = media_preview._encode_frames(b"", ".webp", count=4, max_dimension=64)
@@ -114,7 +114,7 @@ async def test_cancelling_the_caller_stops_the_decode(monkeypatch):
     running = threading.Event()
     noticed = threading.Event()
 
-    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None):
+    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
         running.set()
         for _ in range(200):
             if cancelled is not None and cancelled.is_set():
@@ -144,7 +144,7 @@ async def test_a_decode_that_is_not_cancelled_gets_no_signal(monkeypatch):
     """The event must stay clear on the happy path, or every decode would abort."""
     seen = {}
 
-    def _extract(raw, suffix, count, cancelled=None, deadline=None):
+    def _extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
         seen["set"] = cancelled is not None and cancelled.is_set()
         return []
 
@@ -156,3 +156,135 @@ async def test_a_decode_that_is_not_cancelled_gets_no_signal(monkeypatch):
 
     assert seen["set"] is False
     assert metas == [] and images == []
+
+
+@pytest.mark.asyncio
+async def test_cancellation_waits_for_the_worker_to_actually_stop(monkeypatch):
+    """Setting the flag is a request; the worker finishing is the event.
+
+    The old version set the event and re-raised in the same breath, so
+    `CancelledError` reached the caller while the decoder was still mid-frame with
+    its ffmpeg child running. Anything that then counted processes, removed a temp
+    directory or reported "nothing left running" was racing a worker still using
+    it. This asserts the worker has genuinely finished by the time the cancellation
+    surfaces.
+    """
+    running = threading.Event()
+    finished = threading.Event()
+
+    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+        running.set()
+        try:
+            for _ in range(400):
+                if cancelled is not None and cancelled.is_set():
+                    # Unwinding is not instant: a real decoder kills and reaps a
+                    # child here, and that is exactly what must complete first.
+                    time.sleep(0.05)
+                    raise media_preview.FrameExtractionError("cancelled")
+                time.sleep(0.01)
+            raise AssertionError("the decode ran to completion after being cancelled")
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(media_preview, "extract_frames", _slow_extract)
+
+    task = asyncio.create_task(
+        media_preview.encode_frames_cancellable(b"", ".webp", 4, max_dimension=64)
+    )
+    assert await asyncio.to_thread(running.wait, 5), "the worker never started"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert finished.is_set(), "cancellation surfaced while the worker was still running"
+
+
+@pytest.mark.asyncio
+async def test_a_wedged_worker_cannot_hold_the_canceller_forever(monkeypatch):
+    """The drain is bounded on purpose. A decoder that ignores the flag is the
+    failure being cancelled; letting it also pin the canceller would turn one stuck
+    request into two.
+    """
+    monkeypatch.setattr(media_preview, "CANCEL_DRAIN_SECONDS", 0.3)
+    started = threading.Event()
+    release = threading.Event()
+
+    def _wedged(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+        started.set()
+        release.wait(30)  # ignores the cancel flag entirely
+        return [], []
+
+    monkeypatch.setattr(media_preview, "extract_frames", _wedged)
+
+    task = asyncio.create_task(
+        media_preview.encode_frames_cancellable(b"", ".webp", 4, max_dimension=64)
+    )
+    assert await asyncio.to_thread(started.wait, 5), "the worker never started"
+
+    task.cancel()
+    began = time.monotonic()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    elapsed = time.monotonic() - began
+
+    assert elapsed < 3, f"the wedged worker held the canceller for {elapsed:.1f}s"
+    release.set()
+
+
+# --- one ceiling for the call, not one per document ---------------------------
+
+
+def test_the_call_ledger_refuses_once_the_whole_request_is_too_large():
+    """The per-request frame budget bounds ONE document. A batch of ten each staying
+    inside it holds ten times it, so the batch had no ceiling of its own - the
+    existing gate bounds SOURCE bytes in flight, which is a different and much
+    smaller quantity than what those bytes decode into.
+    """
+    ledger = media_preview.PreviewLedger(total=1000)
+
+    ledger.charge(600)
+    ledger.charge(300)  # 900, still inside
+
+    with pytest.raises(media_preview.FrameExtractionError) as caught:
+        ledger.charge(200)
+
+    message = str(caught.value)
+    assert "1100" in message and "1000" in message
+    # It has to say what to change, or the only move left is to stop using the tool.
+    assert "max_dimension" in message
+
+
+def test_the_ledger_keeps_what_was_already_produced():
+    """Charged after each document, so the one that crosses the line is the one
+    refused - the nine already decoded are not thrown away with it."""
+    ledger = media_preview.PreviewLedger(total=100)
+    ledger.charge(90)
+
+    with pytest.raises(media_preview.FrameExtractionError):
+        ledger.charge(50)
+
+    assert ledger.spent == 140, "the refused charge still has to be recorded"
+
+
+@pytest.mark.asyncio
+async def test_frames_are_charged_to_the_ledger_they_were_given(monkeypatch):
+    """The wiring, not just the arithmetic: a ledger nothing charges is decoration."""
+    png = _png_bytes()
+
+    monkeypatch.setattr(
+        media_preview,
+        "extract_frames",
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [
+            (png, {"frame_index": 0}),
+            (png, {"frame_index": 1}),
+        ],
+    )
+    ledger = media_preview.PreviewLedger(total=10_000_000)
+
+    _metas, images = await media_preview.encode_frames_cancellable(
+        b"", ".webp", 2, max_dimension=64, ledger=ledger
+    )
+
+    assert ledger.spent == sum(len(image.data) for image in images)
+    assert ledger.spent > 0

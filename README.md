@@ -74,16 +74,47 @@ Aliases live in `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/aliases.json` (o
 
 All tool results that include Telegram user-controlled content are sanitized and, where practical, returned as structured JSON.
 
+### How much a listing may return
+
+Every tool that takes a `limit`, `page_size` or `context_size` runs it through one shared rule, and
+every ceiling is declared in one table (`telegram_mcp/paging.py`) rather than decided per function —
+they used to disagree, and several tools passed whatever arrived straight into RPC iteration and then
+into the response.
+
+- A count that is not a whole number — `0`, a negative, `2.5`, `nan`, `inf`, `true`, `"lots"` — is
+  **refused** before anything is fetched. Zero and negative matter most: Telethon reads a
+  non-positive limit as *no* limit, so the value that looks like "none" is the one that asks for
+  everything.
+- A count above the tool's ceiling is **clamped**, not refused, and the reply says so:
+  `requested_limit`, `effective_limit`, a `limit_note`, and `has_more` so a short page is
+  distinguishable from a trimmed one. Each tool's docstring names its own ceiling.
+- Page-numbered listings (`get_chats`, `get_messages`, `search_global`, `get_participants`) validate
+  the page number too and stop at 100,000 records in. `(page - 1) * page_size` does not overflow in
+  Python — it just asks Telegram to skip past an arbitrary number of records — so the bound is
+  explicit.
+
 ### Incoming Event Feed (callback mode, Claude Code only)
 
 By default, an agent waits for replies by calling `wait_for_settled_message`, which blocks up to the MCP tool timeout and must be re-called — that works everywhere (Codex, Cursor, etc.) and is unchanged.
 
 Clients that can wake an agent on external output (Claude Code's persistent `Monitor` on `tail -f`) can switch to callback mode instead:
 
-1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created owner-only (0600). Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path and a ready-to-use watch command.
+1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created readable by its owner alone — mode `0600` on POSIX, and a real owner-only ACL on Windows, where `chmod` toggles nothing but the read-only flag. Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path and a ready-to-use watch command.
 2. The agent arms a persistent Monitor with the `watch_command` returned by the tool. Every new line re-invokes the agent with the burst summary; no blocking tool call is held open, and the chat stays free.
 
-`disable_incoming_feed` switches back; `incoming_feed_status` reports the current mode. While the feed is enabled it consumes settled bursts, so don't combine it with `wait_for_settled_message`. Feed lines contain user-generated `name` fields — treat them as untrusted data.
+`disable_incoming_feed` switches back and waits for the consumer to actually stop; `incoming_feed_status` reports the current mode. While the feed is enabled it consumes settled bursts, so don't combine it with `wait_for_settled_message`. Feed lines contain user-generated `name` fields — treat them as untrusted data.
+
+Nothing here grows without a ceiling, because a server that runs for weeks otherwise leaks disk, memory and context in three separate places:
+
+| Bound | Default | Override |
+|---|---|---|
+| Feed file size before rotation (one previous generation is kept, so disk is bounded by ~2×) | 8 MiB | `TELEGRAM_EVENT_FEED_MAX_BYTES` |
+| Age at which the rotated generation is deleted | 7 days | `TELEGRAM_EVENT_FEED_MAX_AGE_SECONDS` |
+| Chats held in the pending-burst map | 500 | `TELEGRAM_EVENT_PENDING_MAX` |
+| Age at which an uncollected burst is forgotten | 1 hour | `TELEGRAM_EVENT_PENDING_TTL_SECONDS` |
+| Chats listed by one `wait_for_new_message` | 50 (`limit`, max 100) | — |
+
+An override that is not a usable number — zero, negative, `nan`, `inf`, or not a number at all — is logged and ignored rather than silently removing the ceiling. Dropping a burst is never silent: `wait_for_new_message` and `incoming_feed_status` both report `dropped_total`, a per-reason breakdown, and the most recent drops. `tail -F` follows the name rather than the descriptor, so it reads across a rotation.
 
 ## Requirements
 
@@ -289,6 +320,23 @@ server is reached through a reverse proxy or any name other than localhost, set
 e.g. `MCP_ALLOWED_HOSTS=mcp.example.com`. Comma-separated; a `:*` suffix allows any
 port. Leave it unset while changing `MCP_HOST` and the localhost allow-list stays in
 force, so the symptom is every request being **rejected** — not an unprotected server.
+
+**A bind beyond this machine has to say what authenticates it.** `MCP_ALLOWED_HOSTS`
+is not that: DNS-rebinding protection checks which *name* a request arrived under, which
+stops a browser on your own machine being tricked into calling the server — it asks
+nothing about *who* is calling. Every tool here acts as your Telegram account, so on a
+routable address, reaching the port is the authorization. The server therefore refuses to
+start on a non-loopback `MCP_HOST` unless one of these is set:
+
+| Variable | Meaning |
+|---|---|
+| *(neither)* | Default. Loopback only — nothing to configure. |
+| `MCP_TRUSTED_PROXY_AUTH=1` | A reverse proxy in front authenticates requests. The server cannot verify this; you are stating it. |
+| `MCP_ALLOW_UNAUTHENTICATED_REMOTE=1` | Deliberately open on a network you trust. Warns on every start. |
+
+This server implements no authentication of its own, and that is deliberate — a token
+scheme no real client had exercised would read as protection without being any. Put
+authentication in front of it, or keep it on localhost.
 
 Prefer `http` when more than one MCP client (or many coding-agent sessions)
 will use the server: a single long-lived process holds one Telegram
@@ -824,7 +872,12 @@ silently drops an out-of-range timer and would send permanent media instead.
 a button label is written by whoever sent the message and can carry a bidi override that makes
 it read as a different button, so `inspect_buttons` cleans every label, flags one that changed,
 and publishes a stable index — and `click_button` presses by that index rather than by text.
-`expect_text` is required: pass the label you saw at that index, and a press whose keyboard changed underneath it becomes a refusal instead of a wrong button.
+`expect_text` is required as the readable guard — pass the label you saw at that index — but it is
+not the identity: a bot can keep the label and swap the callback payload, and two raw labels can
+clean to the same display string. So `inspect_buttons` also publishes a `press_token` per pressable
+button and `click_button` requires it. It is an HMAC under a per-process key over the account, chat,
+message, position, kind, raw label and raw payload; it reveals none of them, cannot be forged, and
+stops verifying on any keyboard edit or a server restart.
 
 See **[docs/visual-structured-access.md](docs/visual-structured-access.md)** for the tool
 reference, requirements and limitations.

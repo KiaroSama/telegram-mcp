@@ -414,8 +414,8 @@ sticker effect at once, so only `get_telegram_frames`, captured while it plays, 
 ## Glass buttons: reading one, and pressing one
 
 `inspect_buttons(chat_id, message_id, resolve_icons=True)` lists a message's inline keyboard;
-`click_button(chat_id, message_id, button_index, expect_text)` presses one. Everything about the pair follows from
-two facts about the data.
+`click_button(chat_id, message_id, button_index, expect_text, press_token)` presses one. Everything
+about the pair follows from two facts about the data.
 
 **A label is written by the sender.** It is also the thing an agent reads to decide which button
 to press, which makes it a security surface rather than a display string: a bidi override can
@@ -427,10 +427,19 @@ worth treating as a reason not to press.
 **An index is a position, not an identity.** Pressing by label would mean selecting by the
 attacker-controlled string, so `click_button` takes the index `inspect_buttons` published. But a
 bot can edit its own keyboard between the two calls, and the index would still resolve —
-silently, to a different button. `expect_text` closes that, and it is **required** rather than offered: an
-optional guard is one an agent in a hurry omits, and the press it omits it on is the one that needed
-it. Supply the label `inspect_buttons` reported, and a mismatch -- or an omission -- becomes a
-refusal before any callback is sent.
+silently, to a different button.
+
+**A label is not an identity either.** `expect_text` is still **required**, but only as the
+readable half: it records what a human reading the transcript believed was being pressed. It
+compares the *cleaned* label, and that comparison is blind twice over — a bot can keep the label
+and swap the callback payload, and two different raw labels (`Con<ZWSP>firm` and `Confirm`) clean
+to one display string. So `inspect_buttons` also publishes a `press_token` beside every pressable
+button, and `click_button` requires it. The token is an HMAC, under a key minted per process and
+never written anywhere, over the account, chat, message, position, button kind, **raw** label and
+**raw** callback payload. It exposes none of them; it cannot be constructed by a caller; it stops
+verifying the moment any of those facts changes, and it does not survive a restart. A keyboard
+where two raw labels clean to the same display string is refused outright — both buttons are
+reported `text_collision` and neither is pressable, because no label can name either of them.
 
 Not every button can be pressed, and the tool says which rather than pretending:
 
