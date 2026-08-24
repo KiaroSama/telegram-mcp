@@ -141,3 +141,82 @@ def test_the_child_runs_in_its_own_process_group(tmp_path):
     result = _run_guarded(tmp_path, "--wall-seconds", "120")
 
     assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+
+
+# --- the runner's own budgets have to be budgets ------------------------------
+
+
+@pytest.mark.parametrize("bad", ["nan", "inf", "-5", "0"])
+def test_a_budget_that_is_not_a_finite_positive_number_is_refused(tmp_path, bad):
+    """`nan` is the dangerous one: every comparison against it is False, so
+    `elapsed > wall` never fires and the ceiling silently does not exist while
+    the banner still claims one. `inf` disables it pointlessly and a negative
+    value fires instantly on a run that has not misbehaved."""
+    _write_case(tmp_path, "def test_passes():\n    assert True\n")
+
+    result = _run_guarded(tmp_path, "--wall-seconds", bad)
+
+    assert result.returncode != 0, f"{bad} was accepted as a wall budget"
+    assert "must be a finite positive" in result.stderr
+    assert "1 passed" not in result.stdout, "pytest ran despite an invalid budget"
+
+
+@pytest.mark.parametrize("bad", ["nan", "-1"])
+def test_an_invalid_idle_budget_is_refused_too(tmp_path, bad):
+    _write_case(tmp_path, "def test_passes():\n    assert True\n")
+
+    result = _run_guarded(tmp_path, "--wall-seconds", "60", "--idle-seconds", bad)
+
+    assert result.returncode != 0
+    assert "must be a finite positive" in result.stderr
+
+
+def test_the_reported_worker_ceiling_is_one_the_child_can_actually_see(tmp_path):
+    """The banner used to print a 'worker ceiling' that was computed and then
+    applied to nothing. A number in the output that constrains nothing is worse
+    than no number, because it reads as a guarantee."""
+    _write_case(
+        tmp_path,
+        "import os\n"
+        "\n"
+        "def test_sees_the_ceiling():\n"
+        "    assert os.environ['HOOKMAKER_MAX_TEST_WORKERS'].isdigit()\n",
+    )
+
+    result = _run_guarded(tmp_path, "--wall-seconds", "120")
+
+    assert result.returncode == 0, f"{result.stdout}\n{result.stderr}"
+    assert "HOOKMAKER_MAX_TEST_WORKERS=" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups and signals")
+def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
+    """pytest can exit while something it spawned keeps running. The first
+    version of this runner returned as soon as the PARENT died, so a grandchild
+    that ignores SIGTERM outlived the whole run - and `os.getpgid` on the reaped
+    parent then raised, so the SIGKILL escalation could not even find the group.
+    """
+    marker = tmp_path / "grandchild-finished.marker"
+    stubborn = tmp_path / "stubborn.py"
+    stubborn.write_text(
+        "import signal, time\n"
+        "from pathlib import Path\n"
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+        f"time.sleep({CHILD_SLEEP_SECONDS})\n"
+        f"Path({str(marker)!r}).write_text('finished', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _write_case(
+        tmp_path,
+        "import subprocess, sys, time\n"
+        "\n"
+        "def test_spawns_a_stubborn_grandchild():\n"
+        f"    subprocess.Popen([sys.executable, {str(stubborn)!r}])\n"
+        # pytest itself finishes quickly; the grandchild is what must be reaped.
+        "    time.sleep(1)\n",
+    )
+
+    result = _run_guarded(tmp_path, "--wall-seconds", str(WALL_BUDGET))
+
+    assert result.returncode == 124, f"{result.stdout}\n{result.stderr}"
+    assert not marker.exists(), "the SIGTERM-ignoring grandchild outlived the run"

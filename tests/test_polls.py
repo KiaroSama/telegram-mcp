@@ -7,7 +7,7 @@ Telegram identifies an answer by.
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -541,3 +541,205 @@ async def test_poll_text_stays_out_of_the_error_report(_wire_state, monkeypatch)
     await messages_state.create_poll("me", "secret question", ["secret option"], account="a")
 
     assert "question" not in seen and "options" not in seen
+
+
+# --- close_date lives inside a window, not merely in the future -------------
+
+_FROZEN = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def _in(monkeypatch):
+    """An ISO close_date N seconds from a frozen `now`, as a caller writes one.
+
+    Frozen because the boundaries are exact: measured against the wall clock, a
+    date built as "now + 5s" is a few microseconds under five seconds by the time
+    the tool subtracts, and the boundary case would fail for a reason that has
+    nothing to do with the boundary.
+    """
+    from telegram_mcp.tools import messages_state
+
+    class _Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _FROZEN if tz is None else _FROZEN.astimezone(tz)
+
+    monkeypatch.setattr(messages_state, "datetime", _Clock)
+    return lambda seconds: (_FROZEN + timedelta(seconds=seconds)).isoformat()
+
+
+@pytest.mark.asyncio
+async def test_a_hundred_day_close_date_is_refused_before_the_poll_is_sent(_wire_state, _in):
+    """Only "is it in the future" was checked, so a deadline three months out
+    travelled all the way to the RPC to be refused there. Telegram's window ends
+    at 2,628,000 seconds."""
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "q?", ["a", "b"], close_date=_in(100 * 86400), account="a"
+    )
+
+    assert "close_date" in result
+    assert "2628000" in result.replace(",", "")
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [1, 4, 2628001])
+async def test_a_close_date_outside_telegrams_window_is_refused(_wire_state, _in, seconds):
+    """The window starts at 5 seconds and ends at 2,628,000. Either side of it is
+    a round trip spent learning a documented limit."""
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "q?", ["a", "b"], close_date=_in(seconds), account="a"
+    )
+
+    assert "close_date" in result
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_a_close_date_in_the_past_still_says_so_plainly(_wire_state, _in):
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "q?", ["a", "b"], close_date=_in(-60), account="a"
+    )
+
+    assert "past" in result
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seconds", [5, 2628000])
+async def test_the_ends_of_the_close_window_are_accepted(_wire_state, _in, seconds):
+    """Both boundaries are legal values, and an off-by-one here refuses a poll
+    Telegram would have taken."""
+    from telegram_mcp.tools import messages_state
+
+    await messages_state.create_poll("me", "q?", ["a", "b"], close_date=_in(seconds), account="a")
+
+    assert _wire_state.sent("SendMediaRequest") is not None
+
+
+# --- how many options Telegram actually accepts ----------------------------
+
+
+@pytest.mark.asyncio
+async def test_twelve_options_are_accepted_because_telegram_accepts_twelve(_wire_state):
+    """`poll_answers_max` is 12 in Telegram's published client config; the tool
+    refused anything past a hard-coded 10 and blamed the caller for it."""
+    from telegram_mcp.tools import messages_state
+
+    messages_state._poll_answers_max_cache.clear()
+    options = [f"option {n}" for n in range(12)]
+
+    await messages_state.create_poll("me", "q?", options, account="a")
+
+    media = _wire_state.sent("SendMediaRequest")
+    assert media is not None, "twelve options were refused locally"
+    assert len(media.media.poll.answers) == 12
+
+
+class _ConfigClient:
+    """A client that answers help.getAppConfig with a real AppConfig, or blows up."""
+
+    def __init__(self, answers_max=None, explode=False):
+        self.requests = []
+        self.answers_max = answers_max
+        self.explode = explode
+
+    async def __call__(self, request):
+        self.requests.append(request)
+        if type(request).__name__ == "GetAppConfigRequest":
+            if self.explode:
+                raise RuntimeError("no config today")
+            from telethon.tl.types import JsonNumber, JsonObject, JsonObjectValue
+            from telethon.tl.types.help import AppConfig
+
+            return AppConfig(
+                hash=1,
+                config=JsonObject(
+                    value=[
+                        JsonObjectValue(
+                            key="poll_answers_max",
+                            value=JsonNumber(value=float(self.answers_max)),
+                        )
+                    ]
+                ),
+            )
+        return SimpleNamespace(updates=[SimpleNamespace(message=SimpleNamespace(id=4242))])
+
+    def sent(self, name):
+        return next((r for r in self.requests if type(r).__name__ == name), None)
+
+
+@pytest.fixture
+def _wire_config(monkeypatch):
+    from telegram_mcp.tools import messages_state
+
+    def use(client):
+        messages_state._poll_answers_max_cache.clear()
+        monkeypatch.setattr(messages_state, "get_client", lambda account=None: client)
+
+        async def _ensure(_client):
+            return None
+
+        async def _resolve(chat_id, _client):
+            return SimpleNamespace(id=chat_id)
+
+        monkeypatch.setattr(messages_state, "ensure_connected", _ensure, raising=False)
+        monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
+        return client
+
+    return use
+
+
+@pytest.mark.asyncio
+async def test_the_option_ceiling_comes_from_telegrams_own_config(_wire_config):
+    """A number written into the source goes stale the next time Telegram moves
+    it -- which is exactly how the tool came to refuse 11 and 12. The limit is
+    read from the config Telegram publishes for the purpose."""
+    from telegram_mcp.tools import messages_state
+
+    client = _wire_config(_ConfigClient(answers_max=6))
+
+    result = await messages_state.create_poll(
+        "me", "q?", [f"o{n}" for n in range(7)], account="cfg"
+    )
+
+    assert "6 options" in result
+    assert client.sent("GetAppConfigRequest") is not None, "the published limit was never read"
+    assert client.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_the_published_limit_is_read_once_per_account(_wire_config):
+    """A config lookup on every poll is a round trip bought for nothing."""
+    from telegram_mcp.tools import messages_state
+
+    client = _wire_config(_ConfigClient(answers_max=12))
+
+    await messages_state.create_poll("me", "q?", ["a", "b"], account="cfg")
+    await messages_state.create_poll("me", "q?", ["a", "b"], account="cfg")
+
+    lookups = [r for r in client.requests if type(r).__name__ == "GetAppConfigRequest"]
+    assert len(lookups) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_config_falls_back_to_the_documented_current_limit(_wire_config):
+    """A config lookup that fails must not block poll creation, and must not
+    silently allow more than Telegram takes."""
+    from telegram_mcp.tools import messages_state
+
+    _wire_config(_ConfigClient(explode=True))
+
+    ok = await messages_state.create_poll("me", "q?", [f"o{n}" for n in range(12)], account="z")
+    too_many = await messages_state.create_poll(
+        "me", "q?", [f"o{n}" for n in range(13)], account="z"
+    )
+
+    assert "created" in ok
+    assert "12 options" in too_many

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,7 +10,8 @@ readme = "README.md"
 authors = [
     {name = "KiaroSama"}
 ]
-license = {text = "Proprietary"}
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
 # "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
 # upload carrying it. That is deliberate: the telegram-mcp name on PyPI belongs to a
 # different project, and install_guard.py already refuses a PyPI-installed copy at
@@ -18,7 +19,6 @@ license = {text = "Proprietary"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
     "Private :: Do Not Upload",
     # The floor is 3.11 because the suite needs it: tests/test_packaging.py imports
     # tomllib with no fallback. Nothing in the runtime forces it, so this is a
@@ -136,13 +136,12 @@ source = [
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# A measured floor, not an aspiration. Measured 2026-08-23: this list reports
-# 85.57% over 3015 statements and 1088 branches. The floor stays 85, but it now
-# means something: the previous 85 was justified by a 2026-08-16 measurement of
-# 2053 statements, and three refactors had since moved ~1678 lines out of the
-# measured set without removing a single test, so the gate was scoring a
-# shrinking fraction of the code it claimed to cover.
-# Raising the floor is a separate, deliberate change once the largest Missing
-# ranges get tests. Worst first: session_string_generator.py (52%),
-# runner.py (57%), media_preview.py (68%), visual/capture.py (75%).
+# A measured floor, not an aspiration. Measured 2026-08-24: this list reports
+# 88.10% over 3513 statements and 1228 branches, on Windows where the Win32
+# capture tests run. CI measures lower because it runs ubuntu-latest, where the
+# genuinely Windows-only capture tests skip - that gap is the reason the floor is
+# 85 and not the measured number.
+# The floor is not raised to match: it would then fail on Linux while passing
+# here, which is how a gate stops meaning anything. Raise it only with a Linux
+# measurement in hand.
 fail_under = 85
