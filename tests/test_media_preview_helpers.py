@@ -73,7 +73,7 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None: [
+        lambda raw, suffix, count, cancelled=None, deadline=None: [
             (png, {"frame_index": 0}),
             (png, {"frame_index": 1}),
         ],
@@ -88,7 +88,9 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
 
 def test_no_frames_extracted_yields_no_images_rather_than_an_error(monkeypatch):
     monkeypatch.setattr(
-        media_preview, "extract_frames", lambda raw, suffix, count, cancelled=None: []
+        media_preview,
+        "extract_frames",
+        lambda raw, suffix, count, cancelled=None, deadline=None: [],
     )
 
     metas, images = media_preview._encode_frames(b"", ".webp", count=4, max_dimension=64)
@@ -112,7 +114,7 @@ async def test_cancelling_the_caller_stops_the_decode(monkeypatch):
     running = threading.Event()
     noticed = threading.Event()
 
-    def _slow_extract(raw, suffix, count, cancelled=None):
+    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None):
         running.set()
         for _ in range(200):
             if cancelled is not None and cancelled.is_set():
@@ -142,7 +144,7 @@ async def test_a_decode_that_is_not_cancelled_gets_no_signal(monkeypatch):
     """The event must stay clear on the happy path, or every decode would abort."""
     seen = {}
 
-    def _extract(raw, suffix, count, cancelled=None):
+    def _extract(raw, suffix, count, cancelled=None, deadline=None):
         seen["set"] = cancelled is not None and cancelled.is_set()
         return []
 

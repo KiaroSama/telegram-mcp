@@ -225,3 +225,50 @@ def test_requirements_txt_matches_the_declared_dependencies():
         f"former. Only in requirements.txt: {sorted(listed - expected)}. "
         f"Only in pyproject.toml: {sorted(expected - listed)}."
     )
+
+
+def test_license_metadata_uses_the_form_setuptools_will_still_accept():
+    """setuptools deprecated both the `license` table and the `License ::` classifiers,
+    with builds failing after 2027-02-18. The replacement is a PEP 639 SPDX expression -
+    and "Proprietary" is not an SPDX identifier, so it takes the `LicenseRef-` prefix
+    reserved for licences that are not on the SPDX list.
+
+    Declaring both an expression and a `License ::` classifier is an error, not a
+    warning: they are two answers to one question.
+    """
+    project = _pyproject()["project"]
+
+    assert isinstance(
+        project["license"], str
+    ), "`license` is a TOML table again; setuptools removes support 2027-02-18."
+    assert project["license"].startswith("LicenseRef-"), project["license"]
+    assert project["license-files"], "the LICENCE text is no longer shipped in the dist"
+
+    license_classifiers = [c for c in project["classifiers"] if c.startswith("License ::")]
+    assert (
+        license_classifiers == []
+    ), f"a License:: classifier alongside an SPDX expression is rejected: {license_classifiers}"
+
+
+def test_the_no_public_pypi_guard_survives_the_license_migration():
+    """`Private :: Do Not Upload` is not a registered trove prefix, so PyPI rejects any
+    upload carrying it. It reads like a license classifier and sits in the same list,
+    which is exactly how it would get deleted alongside one.
+    """
+    classifiers = _pyproject()["project"]["classifiers"]
+
+    assert "Private :: Do Not Upload" in classifiers, (
+        "the classifier that makes a PyPI upload fail has been removed; the "
+        "telegram-mcp name there belongs to a different project."
+    )
+
+
+def test_the_build_backend_is_new_enough_to_understand_the_license_expression():
+    """setuptools below 77 does not read the SPDX string form. It would not fail - it
+    would build a wheel with no licence metadata at all, which is worse.
+    """
+    requires = _pyproject()["build-system"]["requires"]
+    setuptools_pin = next(r for r in requires if r.startswith("setuptools"))
+
+    floor = int(setuptools_pin.split(">=")[1].split(",")[0].strip())
+    assert floor >= 77, f"{setuptools_pin} predates SPDX `license` support"
