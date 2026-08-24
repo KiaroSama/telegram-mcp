@@ -26,6 +26,7 @@ import sys
 import tempfile
 import time
 from functools import wraps
+from logging.handlers import RotatingFileHandler
 from typing import Any, List, Optional
 
 from pythonjsonlogger import jsonlogger
@@ -550,6 +551,109 @@ async def ensure_connected(cl: TelegramClient = None):
         _last_conn_verified[key] = now
 
 
+# --- Logging: bounded, owner-only, and redacted ------------------------------
+#
+# The log used to be a plain append-only FileHandler: whatever mode the umask
+# gave it (0644 on a normal host), no size ceiling, and every byte a caller
+# passed written out verbatim. A planted canary came straight back out of it.
+
+LOG_MAX_BYTES = 1_000_000
+LOG_BACKUP_COUNT = 3
+_REDACTED = "[REDACTED]"
+
+# Values that are secrets by shape, wherever in a line they appear. This is the
+# net for text we do not construct ourselves -- a Telethon exception quoting the
+# session, an invite link echoed back by Telegram. Context this project builds
+# is redacted by key in `runtime.log_and_format_error`, which does not have to
+# guess.
+_SECRET_SHAPES = (
+    # Telethon StringSession: '1' + a long base64 run.
+    re.compile(r"\b1[A-Za-z0-9+/=_-]{40,}"),
+    # Invite links and bare joinchat/+ hashes: bearer credentials for a chat.
+    re.compile(r"(?:https?://)?t\.me/(?:joinchat/|\+)[A-Za-z0-9_-]+", re.IGNORECASE),
+    # Bot tokens.
+    re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"),
+)
+
+# Environment variables whose VALUE is a secret. Scrubbing the literal value
+# catches it however it got into the text.
+_SECRET_ENV_MARKERS = ("SESSION_STRING", "API_HASH", "PASSWORD", "SECRET", "TOKEN")
+
+
+def _secret_env_values() -> list:
+    """The literal secrets this process was configured with, longest first."""
+    values = [
+        value
+        for key, value in os.environ.items()
+        if value and len(value) >= 8 and any(m in key.upper() for m in _SECRET_ENV_MARKERS)
+    ]
+    return sorted(set(values), key=len, reverse=True)
+
+
+def redact(text: str) -> str:
+    """Replace anything that is a secret by shape or by configured value."""
+    for value in _secret_env_values():
+        text = text.replace(value, _REDACTED)
+    for pattern in _SECRET_SHAPES:
+        text = pattern.sub(_REDACTED, text)
+    return text
+
+
+class RedactingFilter(logging.Filter):
+    """Scrub every record -- message, arguments and traceback -- before it lands.
+
+    Attached to the HANDLERS rather than the logger so it also covers records
+    that propagate up from a child logger, and so no formatter can re-render an
+    exception this filter has already cleaned: the rendered traceback is folded
+    into the message and ``exc_info`` is dropped.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            message = record.getMessage()
+        except Exception:  # pragma: no cover - a broken %-format is not a leak
+            message = str(record.msg)
+        if record.exc_info:
+            message = f"{message}\n{logging.Formatter().formatException(record.exc_info)}"
+        record.msg = redact(message)
+        record.args = ()
+        record.exc_info = None
+        record.exc_text = None
+        return True
+
+
+class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
+    """Rotating handler that re-asserts 0600 on the file it just opened.
+
+    Applied on every rollover too: a fresh log created after a rotation is as
+    sensitive as the first one, and the umask would have given it 0644.
+    """
+
+    def _open(self):
+        stream = super()._open()
+        try:
+            os.chmod(self.baseFilename, 0o600)
+        except OSError:  # pragma: no cover - filesystem without POSIX modes
+            pass
+        return stream
+
+
+def _make_file_handler(path: str) -> logging.Handler:
+    """A bounded, owner-only, redacting JSON handler for ``path``."""
+    handler = _OwnerOnlyRotatingFileHandler(
+        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
+    )
+    handler.setLevel(logging.ERROR)
+    handler.setFormatter(
+        jsonlogger.JsonFormatter(
+            "%(asctime)s %(name)s %(levelname)s %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S%z",
+        )
+    )
+    handler.addFilter(RedactingFilter())
+    return handler
+
+
 # Setup robust logging with both file and console output
 logger = logging.getLogger("telegram_mcp")
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
@@ -557,6 +661,12 @@ logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debuggin
 # Create console handler
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
+console_handler.setFormatter(
+    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+)
+# stderr is captured by the MCP client and often by a shell log, so it needs the
+# same treatment as the file.
+console_handler.addFilter(RedactingFilter())
 
 # Create file handler with absolute path. Keep the legacy location next to
 # top-level main.py, even though runtime code now lives inside telegram_mcp/.
@@ -564,30 +674,14 @@ package_dir = os.path.dirname(os.path.abspath(__file__))
 script_dir = os.path.dirname(package_dir)
 log_file_path = os.path.join(script_dir, "mcp_errors.log")
 
+logger.addHandler(console_handler)
 try:
-    file_handler = logging.FileHandler(log_file_path, mode="a")  # Append mode
-    file_handler.setLevel(logging.ERROR)
-
-    # Create formatters
-    # Console formatter remains in the old format
-    console_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
-    console_handler.setFormatter(console_formatter)
-
-    # File formatter is now JSON
-    json_formatter = jsonlogger.JsonFormatter(
-        "%(asctime)s %(name)s %(levelname)s %(message)s",
-        datefmt="%Y-%m-%dT%H:%M:%S%z",
-    )
-    file_handler.setFormatter(json_formatter)
-
-    # Add handlers to logger
-    logger.addHandler(console_handler)
+    file_handler = _make_file_handler(log_file_path)
     logger.addHandler(file_handler)
     logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
     print(f"WARNING: Error setting up log file: {log_error}", file=sys.stderr)
-    # Fallback to console-only logging
-    logger.addHandler(console_handler)
+    # Console-only logging; the console handler is already attached.
     logger.error(f"Failed to set up log file handler: {log_error}")
 
 

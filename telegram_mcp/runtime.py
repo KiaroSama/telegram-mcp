@@ -290,6 +290,26 @@ def _telegram_refusal(error: Exception) -> Optional[str]:
     return TELEGRAM_REFUSALS.get(type(error).__name__)
 
 
+def _safe_context_value(value: Any) -> Any:
+    """What may be written about one context value.
+
+    Numbers, booleans and None are structural: chat ids, message ids, limits and
+    flags are what make a log line actionable and none of them is content. Every
+    other value is replaced by its type, its size and a short digest -- enough to
+    see that two reports are about the same input, and not enough to read it.
+
+    This is the half of the redaction that does not have to guess: the call
+    sites pass search queries, phone numbers, contact names, aliases, chat
+    titles, file paths, poll questions and captions under keys of their own
+    choosing, and the old code interpolated every one of them with a bare `str`.
+    """
+    if value is None or isinstance(value, (bool, int, float)):
+        return value
+    text = value if isinstance(value, str) else repr(value)
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+    return f"<{type(value).__name__} len={len(text)} #{digest}>"
+
+
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -338,7 +358,7 @@ def log_and_format_error(
         error_code = f"{prefix_str}-ERR-{zlib.crc32(function_name.encode('utf-8')) % 1000:03d}"
 
     # Format the additional context parameters
-    context = ", ".join(f"{k}={v}" for k, v in kwargs.items())
+    context = ", ".join(f"{k}={_safe_context_value(v)}" for k, v in kwargs.items())
 
     # Log the full technical error
     logger.error(f"Error in {function_name} ({context}) - Code: {error_code}", exc_info=True)
