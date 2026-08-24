@@ -589,8 +589,8 @@ erroring, so the tool refuses that range itself and verifies the timer on what a
 not (`composite_fidelity`, `color_fidelity`, `preview_source`); `tools/effects.py` takes its
 encoders from there rather than reaching into `tools/inspection.py`.
 
-The root `conftest.py` is a test-only file, and it is at the root rather than in `tests/`
-for the same merge reason: `tests/conftest.py` belongs to upstream. It neutralises the
+The root `conftest.py` is a test-only file, and it is separate from `tests/conftest.py`
+so the environment guard stays distinct from the test fixtures. It neutralises the
 `TELEGRAM_*` environment before anything imports `runtime.py`, whose import-time
 `load_dotenv()` otherwise lets the operator's own `.env` decide test results — two
 `test_file_path_security.py` assertions failed on exactly that.
