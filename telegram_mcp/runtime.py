@@ -252,6 +252,12 @@ from telegram_mcp.settings import (  # noqa: F401,E402
 )
 from telegram_mcp.connection import *  # noqa: F401,F403,E402
 
+# The module, not the star-imported `clients` dict: the registry is rebound (by a
+# test, by a reload), and a name bound here at import time would keep pointing at
+# whatever it held then. Underscored so `from runtime import *` does not push a
+# module named `connection` into every tool's namespace.
+from telegram_mcp import connection as _connection  # noqa: E402
+
 
 class ErrorCategory(str, Enum):
     CHAT = "CHAT"
@@ -406,6 +412,10 @@ def validate_id(*param_names_to_validate):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            # The login this call runs as, so a saved alias is resolved against the
+            # account that saved it. @with_account has already filled this in for a
+            # read-only fan-out; an omitted one means the sole configured login.
+            account = effective_account(kwargs.get("account"))
             for param_name in param_names_to_validate:
                 if param_name not in kwargs or kwargs[param_name] is None:
                     continue
@@ -436,7 +446,7 @@ def validate_id(*param_names_to_validate):
                             # Saved aliases are free text ("андрей бекендер"), so they must
                             # be resolved here: this decorator runs before the tool body
                             # ever reaches resolve_entity.
-                            resolved = apply_alias(value)
+                            resolved = apply_alias(value, account)
                             if isinstance(resolved, int):
                                 # Keep the wording: if the mapping turns out to be
                                 # stale, the resolver must name it, not the bare id.
@@ -445,7 +455,7 @@ def validate_id(*param_names_to_validate):
                                 return value, None
                             # Unknown or ambiguous reference: hand the agent an
                             # instruction to ask the user instead of a dead end.
-                            return None, alias_ask_payload(value)
+                            return None, alias_ask_payload(value, account=account)
 
                     # Handle other invalid types
                     return (
@@ -599,16 +609,38 @@ async def _resolve_with_retries(
     ) from last_error
 
 
-async def _resolve(getter: str, identifier: Union[int, str], client, label: str) -> Any:
+def _account_for_client(client) -> Optional[str]:
+    """Which login a client belongs to, for callers that hold only the client.
+
+    Most tools call `resolve_entity(chat_id, cl)` and never pass their label on.
+    Reverse-looking the client up is what makes every one of them scope its
+    aliases correctly without touching a single call site - and a client from
+    nowhere (a test fake, a hand-built one) resolves nothing rather than
+    borrowing another account's contacts.
+    """
+    for label, candidate in _connection.clients.items():
+        if candidate is client:
+            return label
+    return None
+
+
+async def _resolve(
+    getter: str,
+    identifier: Union[int, str],
+    client,
+    label: str,
+    account: Optional[str] = None,
+) -> Any:
     """Resolve an identifier, turning a failed free-text reference into a question.
 
     A saved alias resolves here as well as in @validate_id, so tools without that
     decorator understand nicknames too.
     """
     original = identifier
-    identifier = apply_alias(identifier)
     if client is None:
         client = get_client()
+    account = effective_account(account) or _account_for_client(client)
+    identifier = apply_alias(identifier, account)
     try:
         # An id that came from a saved alias is exact; guessing marked variants of
         # it could deliver to a completely unrelated chat.
@@ -619,23 +651,26 @@ async def _resolve(getter: str, identifier: Union[int, str], client, label: str)
     except (ValueError, *_PEER_ERRORS) as error:
         # An unknown or stale nickname is a question for the user, not a dead end:
         # report the wording they used, never the opaque stored id.
-        needs_user = alias_failure(original, identifier)
+        needs_user = alias_failure(original, identifier, account)
         if needs_user:
             raise needs_user from error
         raise
 
 
-async def resolve_entity(identifier: Union[int, str], client=None) -> Any:
+async def resolve_entity(identifier: Union[int, str], client=None, account: str = None) -> Any:
     """Resolve an entity, warming the cache and retrying as needed.
 
-    Accepts IDs, usernames, phone numbers, and saved contact aliases.
+    Accepts IDs, usernames, phone numbers, and saved contact aliases. `account`
+    is optional: it is inferred from `client` when a caller does not pass it.
     """
-    return await _resolve("get_entity", identifier, client, "entity")
+    return await _resolve("get_entity", identifier, client, "entity", account)
 
 
-async def resolve_input_entity(identifier: Union[int, str], client=None) -> Any:
+async def resolve_input_entity(
+    identifier: Union[int, str], client=None, account: str = None
+) -> Any:
     """Like resolve_entity() but returns an InputPeer."""
-    return await _resolve("get_input_entity", identifier, client, "input entity")
+    return await _resolve("get_input_entity", identifier, client, "input entity", account)
 
 
 def get_sender_name(message) -> str:

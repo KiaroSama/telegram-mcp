@@ -1,6 +1,6 @@
 """Media MCP tools."""
 
-import shutil
+import secrets
 
 from telegram_mcp.runtime import *
 from telegram_mcp.media_transfer import NAME_ATTEMPTS, reserve_free_path
@@ -159,12 +159,11 @@ async def download_media(
     """
     Download media from a message in a chat.
 
-    The transfer runs inside a private directory this call creates for itself
-    under the resolved destination, and the file is moved into place only once it
-    has finished, been size-checked and been flushed to storage. A failure, a
-    cancellation or an over-cap stream therefore leaves nothing behind, and an
-    existing file is never overwritten -- a colliding name gets a `-1`, `-2`
-    suffix.
+    The bytes land in a temporary file first and are moved into place only once
+    the download has finished, been size-checked and been re-checked against the
+    allowed roots. A failure, a cancellation or an over-cap stream therefore
+    leaves nothing behind, and an existing file is never overwritten -- a
+    colliding name gets a `-1`, `-2` suffix.
 
     Args:
         chat_id: The chat ID or username.
@@ -176,22 +175,10 @@ async def download_media(
             refused before anything is fetched; a stream that outgrows the cap
             anyway is stopped mid-flight.
     """
-    temp_dir: Optional[Path] = None
+    cap = int(max_bytes) if max_bytes else _DOWNLOAD_MAX_BYTES
+    temp_stem: Optional[Path] = None
+    moved = False
     try:
-        # A ceiling that is zero, negative or not a number is not a smaller
-        # ceiling, it is a broken one: zero used to be falsy enough to fall
-        # through to the default, and a negative one became a cap nothing could
-        # satisfy. Both are argument errors and are answered as such.
-        if max_bytes is None:
-            cap = _DOWNLOAD_MAX_BYTES
-        else:
-            try:
-                cap = int(max_bytes)
-            except (TypeError, ValueError):
-                return "max_bytes must be a whole number of bytes."
-            if cap <= 0:
-                return f"max_bytes must be a positive number of bytes, not {cap}."
-
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         msg = await cl.get_messages(entity, ids=message_id)
@@ -215,29 +202,11 @@ async def download_media(
         if path_error:
             return path_error
 
-        # The roots are consulted BEFORE a single byte is fetched. Checking after
-        # the write only reports where the bytes already went; the gate exists to
-        # stop them going there.
-        roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
-        if roots_error:
-            return roots_error
-
-        # The transfer gets a directory of its own, created through the resolved
-        # parent. mkdtemp is the reservation -- it fails on a name that exists,
-        # so this call owns what it gets back and nothing can be squatting there
-        # already. Resolving it afterwards is what catches a parent swapped for a
-        # symlink out of the roots: the check sees where the directory REALLY
-        # landed, while it is still empty.
-        temp_dir = Path(tempfile.mkdtemp(dir=out_path.parent, prefix=".download-"))
-        if not _path_is_within_any_root(temp_dir.resolve(strict=True), roots):
-            return (
-                "Download refused: the destination directory resolves outside the "
-                "allowed roots. Nothing was fetched."
-            )
-
         # Telethon picks the extension from the content, so it is handed a STEM:
-        # passing ticket.jpg for a PDF would write a PDF called ticket.jpg.
-        temp_stem = temp_dir / "part"
+        # passing ticket.jpg for a PDF would write a PDF called ticket.jpg. The
+        # stem is unpredictable and temporary, so a failed download cannot be
+        # mistaken for the real file and cannot be squatted on in advance.
+        temp_stem = out_path.parent / f".{out_path.stem}.{secrets.token_hex(8)}.part"
 
         def _stop_at_cap(received, _total):
             if received > cap:
@@ -259,13 +228,13 @@ async def download_media(
                 f"{cap}-byte limit (max_bytes). Nothing was kept."
             )
 
-        # Checked once more against the path Telethon actually chose, rather than
-        # the stem it was handed.
+        roots, roots_error = await _ensure_allowed_roots(ctx, "download_media")
+        # Re-checked against the roots as they are NOW, and against the path
+        # Telethon actually chose rather than the one the pre-flight gate saw.
+        if roots_error:
+            return roots_error
         if not _path_is_within_any_root(temp_path, roots):
             return "Download refused: the resulting path is outside the allowed roots."
-
-        # The bytes reach storage before the name that promises them does.
-        _fsync_file(temp_path)
 
         final_path = reserve_free_path(out_path.with_suffix(temp_path.suffix))
         if final_path is None:
@@ -279,15 +248,8 @@ async def download_media(
 
         # os.replace over the reserved placeholder: the name is already ours, so
         # this cannot clobber a file that appeared in the meantime.
-        try:
-            os.replace(temp_path, final_path)
-        except OSError:
-            # The reservation is a real, empty file. Leaving it behind wearing the
-            # name the caller was about to be given is the defect this whole path
-            # exists to avoid.
-            final_path.unlink(missing_ok=True)
-            raise
-        _fsync_dir(final_path.parent)
+        os.replace(temp_path, final_path)
+        moved = True
         return f"Media downloaded to {final_path}."
     except _DownloadTooLarge as e:
         # The caller's own limit, not a fault: say which one and how to raise it,
@@ -302,15 +264,17 @@ async def download_media(
             file_path=file_path,
         )
     finally:
-        # Every exit -- success, refusal, exception, or the CancelledError that is
-        # a BaseException and never reaches the handler above -- takes the whole
-        # transfer directory with it. A tree rather than a name because Telethon
-        # chooses the extension, so on a failure the only thing known about the
-        # partial file is which directory it is in.
-        if temp_dir is not None:
-            shutil.rmtree(temp_dir, ignore_errors=True)
-            if temp_dir.exists():
-                logger.warning("could not remove the download directory at %s", temp_dir)
+        # Every exit that did not move the file into place -- a refusal, an
+        # exception, or a CancelledError, which is a BaseException and never
+        # reaches the handler above -- takes the partial bytes with it. Globbed on
+        # the stem because Telethon chooses the extension: when it raises before
+        # returning, the only thing known about the partial file is its prefix.
+        if temp_stem is not None and not moved:
+            for stray in temp_stem.parent.glob(f"{temp_stem.name}*"):
+                try:
+                    stray.unlink()
+                except OSError:
+                    logger.warning("could not remove the partial download at %s", stray)
 
 
 @mcp.tool(

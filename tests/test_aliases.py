@@ -27,7 +27,13 @@ def _tmp_aliases(monkeypatch, tmp_path):
 
 
 def _ids(aliases):
-    return {alias: record["id"] for alias, record in aliases.items()}
+    """{alias: id}, dropping the account half of the key.
+
+    The store is keyed by (account, alias) - see aliases.load_aliases - and most
+    of the tests here are about the file, the matcher and the ask loop rather
+    than about scoping, which tests/test_alias_account_scope.py owns.
+    """
+    return {alias: record["id"] for (_account, alias), record in aliases.items()}
 
 
 def test_apply_alias_returns_saved_id():
@@ -70,7 +76,11 @@ def test_legacy_flat_file_is_upgraded_on_read():
     runtime.save_aliases({"чикичев игорь": 719969066})
     records = runtime.load_aliases()
 
-    assert records["чикичев игорь"] == {"id": 719969066, "name": None, "account": None}
+    assert records[(None, "чикичев игорь")] == {
+        "id": 719969066,
+        "name": None,
+        "account": None,
+    }
 
 
 def test_alias_key_folds_yo_case_and_whitespace():
@@ -322,7 +332,7 @@ def test_temp_file_name_is_unpredictable():
 def test_non_string_name_in_file_does_not_raise():
     runtime.aliases_file_path().write_text('{"андрей": {"id": 1, "name": 42}}', encoding="utf-8")
 
-    assert runtime.load_aliases()["андрей"]["name"] == "42"
+    assert runtime.load_aliases()[(None, "андрей")]["name"] == "42"
 
 
 def test_handle_shaped_key_in_the_file_cannot_hijack_a_real_identifier():
@@ -436,14 +446,19 @@ def test_an_alias_still_resolves_on_the_account_that_saved_it():
     assert runtime.apply_alias("андрей", account="work") == 12345
 
 
-def test_a_legacy_alias_with_no_account_still_resolves_everywhere():
-    """Rows written before scoping carry no account. Refusing them would break
-    every alias saved to date, so they stay visible to whoever asks."""
+def test_a_legacy_alias_resolves_only_where_it_is_not_a_guess():
+    """Rows written before scoping carry no account. With one login configured
+    there is only one account they can have come from, so refusing them would
+    break every alias saved to date for no safety gained - but a label that is
+    not that login is still someone else's contact.
+
+    The several-logins half of this contract lives in
+    tests/test_alias_account_scope.py, which can configure them."""
     runtime.save_aliases({"андрей": 12345})
 
-    assert runtime.apply_alias("андрей", account="personal") == 12345
-    assert runtime.apply_alias("андрей", account="work") == 12345
     assert runtime.apply_alias("андрей") == 12345
+    assert runtime.apply_alias("андрей", account=aliases.sole_account_label()) == 12345
+    assert runtime.apply_alias("андрей", account="personal") == "андрей"
 
 
 def test_matching_hides_another_account_s_aliases(monkeypatch):

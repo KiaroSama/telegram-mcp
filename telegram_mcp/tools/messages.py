@@ -643,28 +643,24 @@ async def edit_message(
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def delete_message(
-    chat_id: Union[int, str], message_id: int, revoke: bool = False, account: str = None
+    chat_id: Union[int, str], message_id: int, revoke: bool = True, account: str = None
 ) -> str:
     """
-    Delete a message by ID, from this account's view unless told otherwise.
+    Delete a message by ID.
 
     Args:
         chat_id: Chat ID or username.
         message_id: The message to delete.
-        revoke: Pass True to delete the message for EVERYONE in the chat, wherever
-            Telegram still permits it. The default removes it from this account's
-            view only, because that is the one of the two that can be lived with
-            if it was the wrong message. Ignored for channels, which always delete
-            for everyone.
+        revoke: If True (default, matching delete_messages_bulk), the message is
+            deleted for EVERYONE in the chat wherever Telegram still permits it,
+            not only from this account's view. Pass False to remove it from this
+            account only. Ignored for channels, which always delete for everyone.
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        # Telethon's friendly method defaults to revoke=True, and so did this,
-        # which made the least alarming-sounding call the most destructive one on
-        # offer: an agent tidying its own view took the message out of the
-        # recipient's chat as well. Reaching the other party is now something the
-        # caller asks for.
+        # Telethon's friendly method defaults to revoke=True, so this was already
+        # deleting for both sides -- it just never said so.
         await cl.delete_messages(entity, message_id, revoke=revoke)
         scope = "for both parties" if revoke else "for you only"
         return f"Message {message_id} deleted {scope}."
@@ -707,28 +703,10 @@ async def delete_chat_history(
         passes = 0
         deadline = time.monotonic() + _DELETE_HISTORY_DEADLINE_SECONDS
         stalled = False
-        timed_out = False
         while passes < _DELETE_HISTORY_MAX_PASSES:
-            budget_left = deadline - time.monotonic()
-            if budget_left <= 0:
-                break
-            try:
-                # The budget bounds the CALL, not merely the gap between calls.
-                # Checked only afterwards, a single request that never returned
-                # sat past the deadline for as long as Telegram felt like, and
-                # only cancellation from outside ever ended it. wait_for cancels
-                # the request it is waiting on, so nothing is left running.
-                result = await asyncio.wait_for(
-                    cl(
-                        functions.messages.DeleteHistoryRequest(
-                            peer=entity, max_id=max_id, revoke=revoke
-                        )
-                    ),
-                    timeout=budget_left,
-                )
-            except (asyncio.TimeoutError, TimeoutError):
-                timed_out = True
-                break
+            result = await cl(
+                functions.messages.DeleteHistoryRequest(peer=entity, max_id=max_id, revoke=revoke)
+            )
             passes += 1
             deleted += getattr(result, "pts_count", 0) or 0
             remaining = getattr(result, "offset", 0) or 0
@@ -743,25 +721,20 @@ async def delete_chat_history(
                 stalled = True
                 break
             offset = remaining
+            if time.monotonic() >= deadline:
+                break
 
         scope = "for both parties" if revoke else "for you"
         if offset == 0:
             return f"Chat {chat_id} history cleared {scope}: {deleted} messages deleted."
-        if stalled:
-            reason = "the server stopped reporting progress"
-        elif timed_out:
-            reason = (
-                f"a delete call did not answer inside the "
-                f"{_DELETE_HISTORY_DEADLINE_SECONDS:g}s budget and was abandoned"
-            )
-        else:
-            reason = f"the {passes}-pass/{_DELETE_HISTORY_DEADLINE_SECONDS:g}s budget ran out"
-        # An unanswered first call leaves no offset to quote; saying "unknown" is
-        # the honest form of "Telegram never told us".
-        left = "unknown" if offset is None else offset
+        reason = (
+            "the server stopped reporting progress"
+            if stalled
+            else f"the {passes}-pass/{_DELETE_HISTORY_DEADLINE_SECONDS:g}s budget ran out"
+        )
         return (
             f"Chat {chat_id} history deletion is INCOMPLETE {scope}: {deleted} messages "
-            f"deleted over {passes} pass(es), and Telegram still reports offset={left} "
+            f"deleted over {passes} pass(es), and Telegram still reports offset={offset} "
             f"left because {reason}. Run delete_chat_history again to continue."
         )
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
@@ -867,7 +840,6 @@ async def reply_to_message(
 __all__ = [
     "send_message",
     "forward_message",
-    "forward_messages",
     "edit_message",
     "delete_message",
     "delete_chat_history",

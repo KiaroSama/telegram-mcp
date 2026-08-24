@@ -27,7 +27,7 @@ import unicodedata
 from contextlib import contextmanager
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import telethon
 
@@ -73,10 +73,74 @@ def alias_key(text: str) -> str:
     return " ".join(key.split())
 
 
-def load_aliases(strict: bool = False) -> Dict[str, Dict[str, Any]]:
-    """Return {key: {"id": int, "name": str|None, "account": str|None}}.
+def account_key(account: Optional[str]) -> Optional[str]:
+    """Canonical form of an account label, matching what `get_client` looks up.
 
-    Legacy `{alias: id}` files upgrade on read. Never raises: this runs inside
+    Deliberately the SAME rule as the client registry rather than the stricter
+    one the generator applies to a new label: a stored row has to match the label
+    the running server actually resolved, or an account's own aliases stop
+    resolving for it.
+    """
+    if account is None:
+        return None
+    return str(account).strip().lower() or None
+
+
+def sole_account_label() -> Optional[str]:
+    """The only configured login's label, or None when there are none or several.
+
+    Imported lazily and defensively: this module depends on nothing else in the
+    package by design - an alias lookup must not need a connection - and
+    `connection` builds its clients at import time, exiting when nothing is
+    configured.
+    """
+    try:
+        from telegram_mcp.connection import clients
+    except (ImportError, SystemExit):  # pragma: no cover - unconfigured install
+        return None
+    return next(iter(clients)) if len(clients) == 1 else None
+
+
+def effective_account(account: Optional[str] = None) -> Optional[str]:
+    """The login an alias operation belongs to.
+
+    An omitted `account` is not "no account": with one login configured it is
+    that login, whatever it is called. Substituting the literal "default" there
+    filed a row under a label no tool ever passes, so the account that saved it
+    could not find it again.
+    """
+    return account_key(account) or sole_account_label()
+
+
+# A stored row is keyed by (account, alias). The file needs one string per row,
+# and `alias_key` collapses every run of whitespace, so a newline is a separator
+# a normalized alias provably cannot contain - unlike any printable character.
+_ACCOUNT_SEPARATOR = "\n"
+
+AliasKey = Tuple[Optional[str], str]
+
+
+def _store_key(account: Optional[str], alias: str) -> str:
+    """The single string a (account, alias) pair is stored under."""
+    return f"{account}{_ACCOUNT_SEPARATOR}{alias}" if account else alias
+
+
+def _split_store_key(raw: str) -> AliasKey:
+    account, separator, alias = raw.partition(_ACCOUNT_SEPARATOR)
+    if not separator:
+        return None, alias_key(raw)
+    return account_key(account), alias_key(alias)
+
+
+def load_aliases(strict: bool = False) -> Dict[AliasKey, Dict[str, Any]]:
+    """Return {(account, key): {"id": int, "name": str|None, "account": str|None}}.
+
+    Keyed by the pair, not the alias: chat ids are unique only within a login, so
+    two logins must be able to call two different people "мама". The flat map this
+    replaced let the second save delete the first.
+
+    Legacy `{alias: id}` files, and rows that carried their account in the value
+    rather than the key, upgrade on read. Never raises: this runs inside
     resolve_entity on every call, so a damaged file must not take chat tools down.
     """
     path = aliases_file_path()
@@ -96,20 +160,40 @@ def load_aliases(strict: bool = False) -> Dict[str, Dict[str, Any]]:
             raise AliasStoreUnreadable(str(error)) from error
         return {}
 
-    records: Dict[str, Dict[str, Any]] = {}
-    for alias, value in raw.items():
+    records: Dict[AliasKey, Dict[str, Any]] = {}
+    for stored, value in raw.items():
         record = {"id": value} if not isinstance(value, dict) else dict(value)
         try:
             record["id"] = int(record["id"])
         except (KeyError, TypeError, ValueError):
             continue  # skip the bad row, keep every good one
         record["name"] = sanitize_name(str(record["name"])) if record.get("name") else None
-        record.setdefault("account", None)  # uniform shape for legacy rows
-        records[alias_key(str(alias))] = record
+        keyed_account, alias = _split_store_key(str(stored))
+        # The value wins over the key: that is what upgrades a row written by the
+        # version that scoped in the value and keyed flat.
+        record["account"] = account_key(record.get("account")) or keyed_account
+        records[(record["account"], alias)] = record
     return records
 
 
-def save_aliases(aliases: Dict[str, Any]) -> None:
+def _stored_row(key: Union[AliasKey, str], value: Any) -> tuple:
+    """One (file key, record) pair, from either shape a caller may hold.
+
+    Accepts a `(account, alias)` key or a bare alias, and a record or a bare id,
+    so the store can be written by the tools, by a migration, or by a test that
+    only cares about ids.
+    """
+    account, alias = key if isinstance(key, tuple) else (None, key)
+    record = dict(value) if isinstance(value, dict) else {"id": int(value)}
+    account = account_key(record.get("account")) or account_key(account)
+    if account:
+        record["account"] = account
+    else:
+        record.pop("account", None)
+    return _store_key(account, alias_key(str(alias))), record
+
+
+def save_aliases(aliases: Dict[Any, Any]) -> None:
     """Atomically persist aliases 0600 — the file maps nicknames to real people."""
     path = aliases_file_path()
     if not os.getenv(_ALIASES_ENV):
@@ -124,10 +208,7 @@ def save_aliases(aliases: Dict[str, Any]) -> None:
             # Never overwrite a file we could not parse; it may be hand-recoverable.
             path.replace(path.with_suffix(f".corrupt-{int(time.time())}"))
 
-    payload = {
-        alias_key(str(k)): (v if isinstance(v, dict) else {"id": int(v)})
-        for k, v in aliases.items()
-    }
+    payload = dict(_stored_row(key, value) for key, value in aliases.items())
     # mkstemp creates a fresh 0600 file with an unpredictable name: a fixed
     # ".tmp" is both a symlink target and a collision point between processes.
     fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
@@ -237,6 +318,28 @@ def _alias_lock(path: Path):
         os.close(lock_fd)
 
 
+def migrate_legacy_rows(aliases: Dict[AliasKey, Dict[str, Any]]) -> int:
+    """Stamp pre-scoping rows with the login they can only have come from.
+
+    Only ever runs where the answer is not a guess: with one login configured,
+    a row saved before scoping existed was saved on that one. With several, the
+    row stays as it is and `_resolvable` refuses it - see there.
+
+    An explicit row for the same alias wins, so re-running this can never
+    overwrite a scoped mapping with an older unscoped one.
+    """
+    sole = sole_account_label()
+    if not sole:
+        return 0
+    migrated = 0
+    for account, alias in [key for key in aliases if key[0] is None]:
+        record = aliases.pop((account, alias))
+        record["account"] = sole
+        if aliases.setdefault((sole, alias), record) is record:
+            migrated += 1
+    return migrated
+
+
 def update_aliases(mutate):
     """Apply `mutate(aliases)` to the alias file under an exclusive lock.
 
@@ -248,6 +351,9 @@ def update_aliases(mutate):
         path.parent.mkdir(parents=True, exist_ok=True)
     with _alias_lock(path):
         aliases = load_aliases(strict=True)
+        # Under the lock, before the caller sees the map: a mutate() that keys by
+        # (account, alias) must not be handed rows it cannot address.
+        migrate_legacy_rows(aliases)
         result = mutate(aliases)
         save_aliases(aliases)
         return result
@@ -313,34 +419,57 @@ def _covers(query_tokens: List[str], alias_tokens: List[str]) -> bool:
     return all(assign(token, set()) for token in query_tokens)
 
 
-def _visible_to(record: Dict[str, Any], account: Optional[str]) -> bool:
-    """Whether an alias row may be used by the given login.
+def _resolvable(record: Dict[str, Any], account: Optional[str]) -> bool:
+    """Whether an alias row may be turned into a RECIPIENT for the given login.
 
     A row carries the account it was saved on. Chat ids are only unique within a
     login, so resolving another account's alias hands a send tool an id that names
-    a different person there - or nobody.
+    a different person there - or nobody - and nothing downstream can tell.
 
-    A row with no account predates scoping. Those stay visible everywhere, because
-    refusing them would break every alias saved before this existed; they are
-    migrated the next time their owner re-saves them.
+    A row with no account predates scoping. With one login configured that is not
+    ambiguous and it resolves (and `migrate_legacy_rows` stamps it on the next
+    write). With several, which login saved it is unknowable, and an unknowable
+    recipient is exactly what this refuses to guess: it stays a candidate to
+    confirm, never a peer to send to.
     """
-    if account is None:
-        return True
     stored = record.get("account")
-    return stored is None or stored == account
+    if stored is not None:
+        return stored == account
+    return account is not None and account == sole_account_label()
+
+
+def _offerable(record: Dict[str, Any], account: Optional[str]) -> bool:
+    """Whether a row may be SHOWN to the given login as something to confirm.
+
+    Wider than `_resolvable` by exactly one case: an unmigrated legacy row. Hiding
+    those would make "saved, but not yet scoped" indistinguishable from "never
+    saved", and the user would be asked to identify someone they already named.
+    """
+    return _resolvable(record, account) or record.get("account") is None
+
+
+def visible_aliases(account: Optional[str]) -> Dict[str, Dict[str, Any]]:
+    """{alias: record} for one login, its own rows shadowing unmigrated ones."""
+    rows: Dict[str, Dict[str, Any]] = {}
+    for (_stored, alias), record in load_aliases().items():
+        if not _offerable(record, account):
+            continue
+        if alias in rows and _resolvable(rows[alias], account):
+            continue
+        rows[alias] = record
+    return rows
 
 
 def match_aliases(query: str, account: Optional[str] = None) -> List[tuple]:
-    """Return [(alias, record)] for a free-text reference.
+    """Return [(alias, record)] for a free-text reference, scoped to one login.
 
     Exact key wins outright. Otherwise EVERY token of the query must match some
     token of the alias: word order and extra stored words are free, but a query
     word that lands nowhere disqualifies the alias. That asymmetry is what keeps
     "игорь смирнов" from matching stored "чикичев игорь" on one shared word.
     """
-    aliases = {
-        alias: record for alias, record in load_aliases().items() if _visible_to(record, account)
-    }
+    account = effective_account(account)
+    aliases = visible_aliases(account)
     key = alias_key(query)
     if key in aliases:
         return [(key, aliases[key])]
@@ -372,8 +501,13 @@ def apply_alias(identifier: Union[int, str], account: Optional[str] = None) -> U
         return identifier
     if is_handle_like(identifier):
         return identifier  # a real username/phone/id/self reference is never shadowed
-    record = load_aliases().get(alias_key(identifier))
-    if record is None or not _visible_to(record, account):
+    account = effective_account(account)
+    rows = load_aliases()
+    key = alias_key(identifier)
+    # The login's own row first; an unmigrated legacy one only as a fallback, and
+    # only where _resolvable says it is not a guess.
+    record = rows.get((account, key)) or rows.get((None, key))
+    if record is None or not _resolvable(record, account):
         return identifier
     return record["id"]
 
@@ -425,23 +559,52 @@ class AliasNeedsUser(Exception):
         self.payload = payload
 
 
-def alias_ask_payload(reference: str, kind: str = "unknown", stored_id: Optional[int] = None):
+def alias_ask_payload(
+    reference: str,
+    kind: str = "unknown",
+    stored_id: Optional[int] = None,
+    account: Optional[str] = None,
+):
     """Build the ask-the-user instruction returned instead of a blind send.
 
     Server-authored text interpolating only the caller's own reference; any
     Telegram-supplied name stays quarantined inside the candidates list.
+
+    Scoped to `account`: the candidates are what the agent reads out for
+    confirmation, and a name from a login the user is not on is how the wrong
+    person gets picked.
     """
-    matches = match_aliases(reference)
-    known = sorted(load_aliases())[:20]
+    account = effective_account(account)
+    matches = match_aliases(reference, account)
+    known = sorted(visible_aliases(account))[:20]
     candidates = [
-        {"alias": alias, "id": record["id"], "name": record.get("name")}
+        {
+            "alias": alias,
+            "id": record["id"],
+            "name": record.get("name"),
+            **({} if _resolvable(record, account) else {"needs_migration": True}),
+        }
         for alias, record in matches[:5]
     ]
     if kind == "unknown" and candidates:
-        # It resembled something saved: one lookalike is a yes/no confirmation,
-        # several are a genuine choice.
-        kind = "ambiguous" if len({c["id"] for c in candidates}) > 1 else "confirm"
-    if kind == "stale":
+        if all(c.get("needs_migration") for c in candidates):
+            # Saved before aliases were scoped, and more than one login is
+            # configured now, so nothing on disk says whose contact this is.
+            kind = "unmigrated"
+        else:
+            # It resembled something saved: one lookalike is a yes/no confirmation,
+            # several are a genuine choice.
+            kind = "ambiguous" if len({c["id"] for c in candidates}) > 1 else "confirm"
+    if kind == "unmigrated":
+        instruction = (
+            f"Nothing was sent. «{reference}» was saved before aliases recorded which "
+            f"account they belong to, and several accounts are configured now, so it is "
+            f"not known whose contact it is - the id means a different person on each "
+            f"login. Ask the user which account this contact is on, then call "
+            f"set_contact_alias(alias='{reference}', chat_id=<the id in candidates>, "
+            f"account=<that account>, replace=True) and retry this call once."
+        )
+    elif kind == "stale":
         instruction = (
             f"Nothing was sent. The saved contact for «{reference}» (id {stored_id}) no longer "
             f"resolves — the account may be deleted or the ID changed. Ask the user who "
@@ -496,7 +659,9 @@ def _marked_id_candidates(identifier: Union[int, str]) -> list[int]:
     ]
 
 
-def alias_failure(original: Any, identifier: Any) -> Optional[AliasNeedsUser]:
+def alias_failure(
+    original: Any, identifier: Any, account: Optional[str] = None
+) -> Optional[AliasNeedsUser]:
     """Ask-the-user error for a reference that failed to resolve, or None."""
     wording = alias_wording(original)
     if not wording:
@@ -507,6 +672,7 @@ def alias_failure(original: Any, identifier: Any) -> Optional[AliasNeedsUser]:
             wording,
             kind="stale" if stale else "unknown",
             stored_id=int(identifier) if stale else None,
+            account=account,
         )
     )
 
@@ -523,17 +689,24 @@ __all__ = [
     "_alias_lock",
     "_covers",
     "_marked_id_candidates",
+    "_offerable",
+    "_resolvable",
     "_same_word",
+    "account_key",
     "alias_ask_payload",
     "alias_failure",
     "alias_key",
     "alias_wording",
     "aliases_file_path",
     "apply_alias",
+    "effective_account",
     "fuzzy_aliases_enabled",
     "is_handle_like",
     "load_aliases",
     "match_aliases",
+    "migrate_legacy_rows",
     "save_aliases",
+    "sole_account_label",
     "update_aliases",
+    "visible_aliases",
 ]
