@@ -478,3 +478,110 @@ def test_a_url_carrying_a_direction_override_is_cleaned_and_flagged():
 
     assert "\u202e" not in described["url"]
     assert described["url_altered"] is True, "a changed URL was asserted as the real one"
+
+
+# --- the legacy pair must not be a second, weaker way in --------------------
+
+
+@pytest.fixture
+def _wire_legacy(monkeypatch, _wire):
+    """The legacy tools live in messages_state; they must reach the safe path
+    here, so both modules are wired onto the same fake client."""
+    from telegram_mcp.tools import messages_state
+
+    def use(msg, answer=None):
+        client = _wire(msg, answer)
+        monkeypatch.setattr(messages_state, "get_client", lambda account=None: client)
+
+        async def _connect(cl):
+            return None
+
+        async def _resolve(chat_id, cl):
+            return SimpleNamespace(id=chat_id)
+
+        monkeypatch.setattr(messages_state, "ensure_connected", _connect, raising=False)
+        monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
+        return client
+
+    return use
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_refuses_to_choose_a_button_by_its_label(_wire_legacy):
+    """Two buttons can render identically with different payloads; the legacy
+    tool matched the first label and pressed it without a word."""
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    rows = [[_callback(text="Confirm", data=b"HARMLESS"), _callback(text="Confirm", data=b"WIPE")]]
+    client = _wire_legacy(_message(rows), answer=SimpleNamespace(message="ok", alert=None))
+
+    result = await press_inline_button(1, 7, button_text="Confirm", account="default")
+
+    assert "button_index" in result
+    assert client.calls == [], "a callback was sent for a label-chosen button"
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_needs_a_message_id_not_the_latest_message(_wire_legacy):
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    client = _wire_legacy(_message([[_callback()]]))
+
+    result = await press_inline_button(1, button_index=0, account="default")
+
+    assert "message_id" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_goes_through_the_index_checked_path(_wire_legacy):
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    rows = [[_callback(text="Yes", data=b"YES"), _callback(text="No", data=b"NO")]]
+    client = _wire_legacy(
+        _message(rows), answer=SimpleNamespace(message="done", alert=None, url=None)
+    )
+
+    payload = json.loads(await press_inline_button(1, 7, button_index=1, account="default"))
+
+    assert client.calls[0].data == b"NO"
+    assert payload["results"][0]["button_index"] == 1
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_press_uses_a_supplied_label_as_a_guard_not_a_selector(_wire_legacy):
+    """button_text alongside an index is the expectation click_button checks."""
+    from telegram_mcp.tools.messages_state import press_inline_button
+
+    client = _wire_legacy(_message([[_callback(text="Delete", data=b"DEL")]]))
+
+    result = await press_inline_button(1, 7, button_text="Confirm", button_index=0, account="x")
+
+    assert "nothing was pressed" in result
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_listing_is_the_safe_listing(_wire_legacy):
+    """The old listing returned the raw URL and no button kind."""
+    from telegram_mcp.tools.messages_state import list_inline_buttons
+
+    _wire_legacy(
+        _message(
+            [[_callback(), _button("KeyboardButtonUrl", text="Open", url="https://e.example")]]
+        )
+    )
+
+    payload = json.loads(await list_inline_buttons(1, 7, account="default"))
+
+    assert payload["pressable_indexes"] == [0]
+    assert payload["results"][1]["kind"] == "url"
+
+
+@pytest.mark.asyncio
+async def test_the_legacy_listing_needs_a_message_id(_wire_legacy):
+    from telegram_mcp.tools.messages_state import list_inline_buttons
+
+    _wire_legacy(_message([[_callback()]]))
+
+    assert "message_id" in await list_inline_buttons(1, account="default")
