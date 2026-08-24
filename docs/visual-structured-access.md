@@ -518,8 +518,16 @@ have checked the title yourself.
   multi-frame tools default to 900px, because the cost is paid once per frame. Images are
   never upscaled, so a 96×96 thumbnail stays 96×96. Lower `max_dimension`, crop with
   `get_telegram_region`, or pass `image_format="jpeg"`/`"webp"` when the budget matters.
-* ffmpeg is invoked with bounded timeouts; a slow or corrupt video yields an error rather
-  than a hang. Its diagnostics are passed through with filesystem paths redacted to
+* Decoding is bounded four ways, and each one can be the thing you see in an error.
+  Every subprocess has its own timeout; on top of that a *whole request* shares one 60s
+  budget, so asking for ten frames cannot cost ten times a single frame's ceiling. Frames
+  are scaled inside ffmpeg before the PNG is encoded rather than after, so a 4K source
+  never builds a 4K image just to be shrunk. An animation whose frames exceed the decode
+  pixel ceiling is refused before the first frame rather than during. And if you stop
+  waiting — the client disconnects, or the call is cancelled — the decoders are told and
+  terminated, instead of running on with nobody left to read the answer. A slow or corrupt
+  video yields an error rather than a hang. Its diagnostics are passed through with
+  filesystem paths redacted to
   `<temp-file>` and the text capped at 300 characters, so the server's temporary paths — and
   on Windows the OS account name they contain — never reach the model. Media that no decoder
   recognises returns a plain "could not decode" message instead of an internal error code.
