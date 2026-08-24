@@ -20,6 +20,7 @@ historic seam.
 import argparse
 import logging
 import os
+import secrets
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import unquote, urlparse
@@ -57,6 +58,62 @@ ROOTS_STATUS_UNSUPPORTED_FALLBACK = "unsupported_fallback"
 ROOTS_STATUS_CLIENT_DENY_ALL = "client_deny_all"
 ROOTS_STATUS_SERVER_FALLBACK = "server_fallback"
 ROOTS_STATUS_ERROR = "error"
+
+
+def _fsync_dir(directory: Path) -> None:
+    """Make a directory entry survive a crash, where the platform has one to sync.
+
+    ``os.replace`` publishes a name, and the name is metadata: without this the
+    rename can still be in the log when the machine stops, and the file the
+    caller was told about is not there when it comes back. Windows exposes no
+    directory handle to sync and orders this metadata itself, so it is a no-op
+    there rather than an error.
+    """
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _fsync_file(path: Path) -> None:
+    """Push a finished file's bytes to durable storage.
+
+    Opened read-write because Windows' ``_commit`` refuses a read-only handle,
+    and a file this package is about to install is one it already owns.
+    """
+    fd = os.open(path, os.O_RDWR)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_file_durably(destination: Path, data: bytes) -> None:
+    """Put ``data`` at ``destination`` so a reader sees all of it or none of it.
+
+    The bytes go to an unpredictable sibling first, are flushed to storage, and
+    only then take the destination's name. Writing into the destination directly
+    is what left a short file wearing the finished file's name: a full disk does
+    not fail at ``write()`` on a delayed-allocation filesystem, it fails at the
+    flush, which a direct write never performs.
+
+    The destination is expected to be a name the caller already reserved, so the
+    rename over it is deliberate. The temp file goes in ``finally`` whatever
+    happens -- including a ``CancelledError``, which no ``except`` here would see.
+    """
+    temp = destination.parent / f".{destination.name}.{secrets.token_hex(8)}.part"
+    try:
+        with open(temp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temp, destination)
+        _fsync_dir(destination.parent)
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -431,6 +488,8 @@ __all__ = [
     "_ensure_extension_allowed",
     "_ensure_size_within_limit",
     "_first_resolution_root",
+    "_fsync_dir",
+    "_fsync_file",
     "_get_effective_allowed_roots",
     "_get_effective_allowed_roots_with_status",
     "_is_roots_unsupported_error",
@@ -439,4 +498,5 @@ __all__ = [
     "_resolve_readable_file_path",
     "_resolve_writable_file_path",
     "_server_roots_fallback_enabled",
+    "_write_file_durably",
 ]

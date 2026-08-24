@@ -20,8 +20,6 @@ import os
 import re
 import shutil
 import subprocess
-from pathlib import Path
-import sys
 import tempfile
 import threading
 import time
@@ -44,26 +42,6 @@ FFMPEG_REQUEST_BUDGET_SECONDS = 60
 # built an 8K PNG in memory first, per frame, purely to throw it away. Telegram's
 # own preview ceiling is smaller than this, so nothing legitimate is lost.
 FFMPEG_MAX_EMITTED_SIDE = 2048
-
-# The whole request's decoded-frame ceiling, before anything downstream resizes.
-# Per-frame limits do not bound a request: MAX_DECODED_PIXELS caps ONE frame, and
-# MAX_FRAMES caps the count, so their product was the real ceiling and it is far
-# larger than anything a reply can carry. 96 MB comfortably holds ten 2048-wide
-# PNGs, which is the largest thing any decoder here is allowed to emit.
-MAX_TOTAL_FRAME_BYTES = 96 * 1024 * 1024
-
-# What one decoder call may hand back. Peak memory here is bounded by the input
-# rather than by the pipe: measured on this ffmpeg, ffprobe's JSON is ~0.3x the
-# size of the file it describes (400 audio streams in a 120 KB mkv produce 38 KB
-# of output), and the ffmpeg calls emit a single -frames:v 1 PNG clamped to
-# FFMPEG_MAX_EMITTED_SIDE. This ceiling states that invariant instead of leaving
-# it to hold by accident, so a future flag change fails here rather than in the
-# allocator.
-MAX_DECODER_OUTPUT_BYTES = 32 * 1024 * 1024
-
-# Enough diagnostic to identify a decoder failure, and no more: stderr is
-# attacker-influenced text that ends up in a log line.
-MAX_DECODER_STDERR_BYTES = 64 * 1024
 
 # How often a running decode is re-checked for cancellation.
 #
@@ -145,59 +123,15 @@ def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> s
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-class _Budget:
-    """One clock, one byte ceiling and one cancel flag for a whole request.
+def _check_cancelled(cancelled: Optional[threading.Event], done: int, total: int) -> None:
+    """Stop between frames when the caller has gone away.
 
-    Each decoder used to start its own ``FFMPEG_REQUEST_BUDGET_SECONDS`` clock on
-    entry, so the ceiling was per-decoder rather than per-request: a .gif that
-    Pillow refused and ffmpeg then retried got two full budgets in series, and the
-    Pillow path had no clock at all. Building this once in ``extract_frames`` and
-    passing it down is what makes the budget end-to-end.
-
-    ``emitted`` is the second half of the ceiling. Time alone does not bound
-    memory: ten frames that each decode quickly at 50 megapixels are within every
-    timeout and still hold ~1.5 GB of PNG in a list before anything downstream
-    gets a chance to shrink them.
+    In-process decoders (Pillow, rlottie) cannot be interrupted mid-frame the way
+    a subprocess can be killed, so a frame boundary is the finest granularity
+    available. It is enough: the cost being avoided is the REMAINING frames.
     """
-
-    __slots__ = ("deadline", "cancelled", "emitted")
-
-    def __init__(self, deadline: float, cancelled: Optional[threading.Event] = None) -> None:
-        self.deadline = deadline
-        self.cancelled = cancelled
-        self.emitted = 0
-
-    @classmethod
-    def for_request(cls, cancelled: Optional[threading.Event] = None) -> "_Budget":
-        return cls(time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS, cancelled)
-
-    def check(self, done: int, total: int) -> None:
-        """Stop between frames when the caller left or the request ran out of time.
-
-        In-process decoders (Pillow, rlottie) cannot be interrupted mid-frame the
-        way a subprocess can be killed, so a frame boundary is the finest
-        granularity available. It is enough: the cost being avoided is the
-        REMAINING frames.
-        """
-        if self.cancelled is not None and self.cancelled.is_set():
-            raise DecodingCancelled(
-                f"Frame extraction was cancelled after {done} of {total} frames."
-            )
-        if time.monotonic() > self.deadline:
-            raise FrameExtractionError(
-                f"Frame extraction passed its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget after "
-                f"{done} of {total} frames. Ask for fewer frames."
-            )
-
-    def charge(self, data: bytes) -> None:
-        """Account for one emitted frame, refusing once the request total is reached."""
-        self.emitted += len(data)
-        if self.emitted > MAX_TOTAL_FRAME_BYTES:
-            raise FrameExtractionError(
-                f"Decoded frames total {self.emitted} bytes, above the "
-                f"{MAX_TOTAL_FRAME_BYTES}-byte budget for one request. Ask for fewer frames, "
-                "or a smaller max_dimension."
-            )
+    if cancelled is not None and cancelled.is_set():
+        raise DecodingCancelled(f"Frame extraction was cancelled after {done} of {total} frames.")
 
 
 def _run(
@@ -248,18 +182,8 @@ def _run(
                 # pipes on its own reader threads and hands over everything once
                 # the child exits.
                 stdout, stderr = process.communicate(timeout=DECODER_POLL_SECONDS)
-                if stdout is not None and len(stdout) > MAX_DECODER_OUTPUT_BYTES:
-                    raise FrameExtractionError(
-                        f"{os.path.basename(command[0])} produced {len(stdout)} bytes, above "
-                        f"the {MAX_DECODER_OUTPUT_BYTES}-byte ceiling for one decoder call."
-                    )
                 return subprocess.CompletedProcess(
-                    command,
-                    process.returncode,
-                    stdout=stdout,
-                    # Truncated at the boundary rather than at each use, so no
-                    # later caller can forget and log the whole thing.
-                    stderr=(stderr or b"")[:MAX_DECODER_STDERR_BYTES],
+                    command, process.returncode, stdout=stdout, stderr=stderr
                 )
             except subprocess.TimeoutExpired:
                 pass
@@ -347,10 +271,9 @@ def probe_duration(path: str) -> Optional[float]:
 
 
 def _frames_with_pillow(
-    path: str, count: int, budget: Optional["_Budget"] = None
+    path: str, count: int, cancelled: Optional[threading.Event] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
-    budget = budget or _Budget.for_request()
     from PIL import Image, ImageSequence
 
     from telegram_mcp.visual.images import MAX_DECODED_PIXELS, ImageError, encode_image
@@ -393,15 +316,10 @@ def _frames_with_pillow(
         frames: list[tuple[bytes, dict[str, Any]]] = []
         try:
             for index, frame in enumerate(ImageSequence.Iterator(source)):
-                # Checked before the skip, not after. ImageSequence.Iterator
-                # DECODES every frame it walks past, so selecting 10 of 3000 still
-                # costs 3000 decodes - and the check used to run only on the 10
-                # that were kept. A cancelled caller waited out the other 2990.
-                budget.check(len(frames), wanted)
                 if index not in indexes:
                     continue
+                _check_cancelled(cancelled, len(frames), wanted)
                 data, meta = encode_image(frame.convert("RGB"), image_format="png")
-                budget.charge(data)
                 meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
                 frames.append((data, meta))
                 if len(frames) >= wanted:
@@ -437,74 +355,30 @@ def lottie_available() -> bool:
 # are downscaled again at the tool layer anyway.
 LOTTIE_RENDER_SIZE = 512
 
-# Covers interpreter startup plus every requested frame in one child, so it is
-# a whole-render ceiling rather than a per-frame one. The request budget still
-# caps it from above via _run's deadline.
-LOTTIE_RENDER_TIMEOUT_SECONDS = 45
-
-# Mirrors lottie_worker.EXIT_CANNOT_OPEN. Duplicated rather than imported: the
-# worker is deliberately standalone so spawning it costs only the renderer.
-LOTTIE_EXIT_CANNOT_OPEN = 3
-
 
 def _frames_with_lottie(
-    path: str, count: int, budget: Optional["_Budget"] = None
+    path: str, count: int, cancelled: Optional[threading.Event] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
-    """Rasterise a .tgs (gzipped Lottie) with rlottie, in a process that can be killed.
+    """Rasterise a .tgs (gzipped Lottie) with rlottie, when it is installed.
 
-    The render runs in :mod:`telegram_mcp.visual.lottie_worker` rather than here.
-    rlottie is native code, and native code called on a worker thread cannot be
-    interrupted by anything Python can do - so a single frame that does not return
-    used to hold the decode past every deadline, with the caller's cancellation
-    event never read. Checking the budget between frames does not help when
-    control never reaches the next frame.
-
-    That is reachable from the wire: a Lottie repeater multiplies its group at
-    render time and repeaters nest, so cost grows as ``copies ** depth`` while the
-    file stays tiny. Measured with rlottie 1.3.8, a 332-byte .tgs holding three
-    nested 150x repeaters kept one 512x512 frame busy for 12.1 seconds; a fourth
-    level reaches half an hour.
-
-    As a child process it is a PID, and :func:`_run` already bounds one, kills the
-    whole thing and reaps it. The render size stays fixed at 512x512, so the
-    worker's raw-RGBA reply is exactly 1 MiB per frame.
+    The render size is fixed at 512x512 so memory is bounded by construction, but
+    time was not: rlottie is native code called in a worker thread, and a Lottie
+    with a pathological shape count can sit there indefinitely. The budget is
+    checked between frames - the only place this loop yields.
     """
-    budget = budget or _Budget.for_request()
+    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
+    from rlottie_python import LottieAnimation
 
     from telegram_mcp.visual.images import encode_image
 
-    result = _run(
-        [
-            sys.executable,
-            str(Path(__file__).with_name("lottie_worker.py")),
-            path,
-            str(count),
-            str(LOTTIE_RENDER_SIZE),
-        ],
-        timeout=LOTTIE_RENDER_TIMEOUT_SECONDS,
-        deadline=budget.deadline,
-        cancelled=budget.cancelled,
-    )
-    if result.returncode == LOTTIE_EXIT_CANNOT_OPEN:
-        raise FrameExtractionError(
-            f"rlottie could not open this .tgs animation. "
-            f"{_safe_stderr(result.stderr, path)}".strip()
-        )
-    if result.returncode != 0:
-        raise FrameExtractionError(
-            f"rlottie could not render this .tgs animation. "
-            f"{_safe_stderr(result.stderr, path)}".strip()
-        )
-
-    header_line, _, payload = (result.stdout or b"").partition(b"\n")
     try:
-        header = json.loads(header_line or b"{}")
-        total = int(header["total"])
-        indexes = [int(i) for i in header["indexes"]]
-        frame_rate = float(header.get("framerate") or 0)
-    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
-        raise FrameExtractionError("The .tgs renderer returned a reply this build cannot read.")
+        animation = LottieAnimation.from_tgs(path)
+    except Exception as error:
+        raise FrameExtractionError(
+            f"rlottie could not open this .tgs animation: {type(error).__name__}."
+        )
 
+    total = animation.lottie_animation_get_totalframe()
     if not total:
         # rlottie does not raise on garbage: it returns an animation reporting
         # totalframe=0, framerate=0. `or 1` turned that "I parsed nothing" signal
@@ -516,35 +390,36 @@ def _frames_with_lottie(
             "rlottie parsed no animation from this .tgs payload (it reports zero frames), so "
             "it is not a valid gzipped Lottie file. Any frame rendered from it would be blank."
         )
+    wanted = min(count, total)
+    indexes = (
+        sorted({round(i * (total - 1) / max(1, wanted - 1)) for i in range(wanted)})
+        if wanted > 1
+        else [0]
+    )
 
-    stride = LOTTIE_RENDER_SIZE * LOTTIE_RENDER_SIZE * 4
-    if len(payload) != stride * len(indexes):
-        raise FrameExtractionError(
-            f"The .tgs renderer returned {len(payload)} bytes for {len(indexes)} frame(s); "
-            f"{stride * len(indexes)} were expected. The render was cut short."
-        )
-
-    from PIL import Image
-
+    frame_rate = animation.lottie_animation_get_framerate() or 0
     frames: list[tuple[bytes, dict[str, Any]]] = []
-    for position, index in enumerate(indexes):
-        budget.check(len(frames), len(indexes))
-        rendered = Image.frombytes(
-            "RGBA",
-            (LOTTIE_RENDER_SIZE, LOTTIE_RENDER_SIZE),
-            payload[position * stride : (position + 1) * stride],
+    for index in indexes:
+        _check_cancelled(cancelled, len(frames), len(indexes))
+        if time.monotonic() > deadline:
+            raise FrameExtractionError(
+                f"Rendering this .tgs passed the {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
+                f"after {len(frames)} of {len(indexes)} frames. Ask for fewer frames."
+            )
+        image = animation.render_pillow_frame(
+            frame_num=index, width=LOTTIE_RENDER_SIZE, height=LOTTIE_RENDER_SIZE
         )
+        rendered = image.convert("RGBA")
         # An empty frame is normal here and needs saying so. A message effect
-        # BEGINS and ENDS transparent - measured on Telegram's own fire effect,
-        # frame 0 of 181 has zero visible pixels and frame 180 has eight - so an
-        # evenly spaced ladder legitimately lands on blank canvases at both ends.
-        # Without this flag a caller sees a blank image next to full ones and
-        # concludes the render failed, which is the wrong conclusion about a
-        # correct render. getbbox() on the alpha channel is a C-level scan and
-        # returns None only when every pixel is fully transparent.
+        # BEGINS and ENDS transparent — measured on Telegram's own 🔥 effect, frame
+        # 0 of 181 has zero visible pixels and frame 180 has eight — so an evenly
+        # spaced ladder legitimately lands on blank canvases at both ends. Without
+        # this flag a caller sees a blank image next to full ones and concludes the
+        # render failed, which is the wrong conclusion about a correct render.
+        # getbbox() on the alpha channel is a C-level scan and returns None only
+        # when every pixel is fully transparent.
         blank = rendered.getchannel("A").getbbox() is None
         data, meta = encode_image(rendered, image_format="png")
-        budget.charge(data)
         meta.update(
             {
                 "frame_index": index,
@@ -557,7 +432,7 @@ def _frames_with_lottie(
             meta["blank"] = True
             meta["blank_note"] = (
                 "This frame is fully transparent, and that is the animation's own content at "
-                "frame {index} of {total} - not a failed render. Effects and stickers commonly "
+                "frame {index} of {total} — not a failed render. Effects and stickers commonly "
                 "start and end on an empty canvas.".format(index=index, total=total)
             )
         if frame_rate:
@@ -570,7 +445,7 @@ def _frames_with_lottie(
 
 
 def _frames_with_ffmpeg(
-    path: str, count: int, budget: Optional["_Budget"] = None
+    path: str, count: int, cancelled: Optional[threading.Event] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from a video file using ffmpeg input seeking.
 
@@ -578,16 +453,14 @@ def _frames_with_ffmpeg(
     single subprocess, and a request asking for ten frames used to be able to
     spend all of them in series.
     """
-    budget = budget or _Budget.for_request()
+    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
     if not ffmpeg_available():
         raise FrameExtractionError(
             "ffmpeg is required to extract frames from video media but was not found on PATH. "
             "Install ffmpeg, or use get_media_thumbnail for a static preview."
         )
 
-    duration, frame_rate, codec = _probe(
-        path, deadline=budget.deadline, cancelled=budget.cancelled
-    )
+    duration, frame_rate, codec = _probe(path, deadline=deadline, cancelled=cancelled)
     if duration and duration > 0:
         # Sample inside the clip: the very first and last frames are often black.
         #
@@ -645,8 +518,8 @@ def _frames_with_ffmpeg(
                 "-",
             ],
             timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
-            deadline=budget.deadline,
-            cancelled=budget.cancelled,
+            deadline=deadline,
+            cancelled=cancelled,
         )
         if result.returncode != 0 or not result.stdout:
             # The last iteration is the furthest-past-EOF seek and therefore the
@@ -654,7 +527,6 @@ def _frames_with_ffmpeg(
             if first_error is None:
                 first_error = result.stderr
             continue
-        budget.charge(result.stdout)
         frames.append(
             (
                 result.stdout,
@@ -681,7 +553,6 @@ def extract_frames(
     suffix: str,
     count: int = 4,
     cancelled: Optional[threading.Event] = None,
-    deadline: Optional[float] = None,
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Extract up to ``count`` representative frames from in-memory media bytes.
 
@@ -692,9 +563,6 @@ def extract_frames(
         cancelled: Set by the caller when it stops waiting, so a decode that is
             no longer wanted stops instead of running to completion on a worker
             thread nobody is reading from.
-        deadline: A ``time.monotonic()`` value shared with the caller, so decoding
-            and whatever the caller does with the frames run under ONE clock. Left
-            out, decoding gets its own ``FFMPEG_REQUEST_BUDGET_SECONDS``.
 
     Returns:
         A list of ``(png_bytes, metadata)`` tuples.
@@ -712,22 +580,15 @@ def extract_frames(
             "sticker as Telegram Desktop actually plays it."
         )
 
-    # Built once, here: a .gif that Pillow refuses is retried with ffmpeg below,
-    # and two decoders each starting their own clock gave that one request twice
-    # the budget it is allowed.
-    budget = (
-        _Budget(deadline, cancelled) if deadline is not None else _Budget.for_request(cancelled)
-    )
-
     with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
         handle.write(data)
         path = handle.name
     try:
         if suffix == ".tgs":
-            return _frames_with_lottie(path, count, budget)
+            return _frames_with_lottie(path, count, cancelled)
         if suffix in PILLOW_ANIMATED_SUFFIXES:
             try:
-                return _frames_with_pillow(path, count, budget)
+                return _frames_with_pillow(path, count, cancelled)
             except DecoderMismatch:
                 # Only "Pillow cannot read this format" is worth a second decoder.
                 # A frame-count refusal or "not animated" is a decision about the
@@ -735,7 +596,7 @@ def extract_frames(
                 # class here handed the refused file straight to ffmpeg.
                 if suffix not in FFMPEG_SUFFIXES:
                     raise
-        return _frames_with_ffmpeg(path, count, budget)
+        return _frames_with_ffmpeg(path, count, cancelled)
     finally:
         try:
             os.unlink(path)

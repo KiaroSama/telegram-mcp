@@ -21,7 +21,6 @@ download under these previews.
 """
 
 import threading
-import time
 
 from telegram_mcp.runtime import *
 from telegram_mcp.effect_catalog import sniff_asset_format
@@ -35,13 +34,7 @@ from telegram_mcp.media_transfer import (
     with_reference_retry,
 )
 from telegram_mcp.message_view import display_name
-from telegram_mcp.visual.frames import (
-    FFMPEG_REQUEST_BUDGET_SECONDS,
-    DecodingCancelled,
-    FrameExtractionError,
-    extract_frames,
-    lottie_available,
-)
+from telegram_mcp.visual.frames import FrameExtractionError, extract_frames, lottie_available
 from telegram_mcp.visual.images import ImageError, encode_image, open_image_bytes
 
 from mcp.server.fastmcp import Image
@@ -82,25 +75,9 @@ def _encode_frames(
     max_dimension: int,
     cancelled: Optional[threading.Event] = None,
 ) -> tuple:
-    """Frames of an animation as ``([metadata], [Image])``. Blocking: call in a thread.
-
-    One clock covers decoding AND this re-encode. Passing the deadline in rather
-    than letting ``extract_frames`` start its own is what keeps that true: a decode
-    that spends the whole budget must not then hand back ten frames to resize on a
-    fresh one, and a caller who stopped waiting should not be resized for either.
-    """
-    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
+    """Frames of an animation as ``([metadata], [Image])``. Blocking: call in a thread."""
     metas, images = [], []
-    for png, meta in extract_frames(raw, suffix, count, cancelled, deadline=deadline):
-        if cancelled is not None and cancelled.is_set():
-            raise DecodingCancelled(
-                f"Encoding was cancelled after {len(images)} of {count} frames."
-            )
-        if time.monotonic() > deadline:
-            raise FrameExtractionError(
-                f"Preview passed its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget while encoding "
-                f"frame {len(images) + 1}. Ask for fewer frames, or a smaller max_dimension."
-            )
+    for png, meta in extract_frames(raw, suffix, count, cancelled):
         encoded, encoded_meta = encode_image(open_image_bytes(png), max_dimension=max_dimension)
         metas.append({**meta, **encoded_meta})
         images.append(Image(data=encoded, format="png"))
