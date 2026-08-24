@@ -104,7 +104,7 @@ which is refused outright because rlottie reports zero frames and *every* frame 
 Resolve custom/premium emoji IDs — the ones `inspect_message` reports under `custom_emoji` — into
 metadata plus a preview image each. A batch resolves its documents concurrently, so the peak held
 in memory is the number in flight times `max_bytes`; the width is derived from that budget so the
-peak stays under `MAX_BATCH_BYTES` (2 GB) whatever the caller asks for.
+peak stays under `MAX_BATCH_BYTES` (512 MiB) whatever the caller asks for.
 Static emoji return the document itself; animated WebM emoji
 return `count` extracted frames; `.tgs` Lottie emoji are rendered into real frames when the
 optional renderer is installed (`pip install 'telegram-mcp[lottie]'`, reported as
