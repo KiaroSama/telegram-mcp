@@ -34,7 +34,12 @@ from typing import Any, Optional, Union
 
 from telegram_mcp.runtime import *
 from telegram_mcp.media_preview import _encode_frames, _encode_one, _media_suffix
-from telegram_mcp.media_transfer import MAX_FRAME_SOURCE_BYTES, _download_capped
+from telegram_mcp.media_transfer import (
+    MAX_FRAME_SOURCE_BYTES,
+    NAME_ATTEMPTS,
+    _download_capped,
+    reserve_free_path,
+)
 from telegram_mcp.message_view import describe_media, display_name, display_text
 from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
@@ -316,6 +321,25 @@ async def send_disappearing_media(
         return log_and_format_error("send_disappearing_media", e, chat_id=chat_id)
 
 
+def _target_path(out_path: Path, suffix: str) -> tuple:
+    """The path to write, with the media's extension enforced over the caller's.
+
+    Returns ``(path, replaced_suffix)``; ``replaced_suffix`` is None when the
+    caller's own extension already agreed.
+
+    A caller-supplied suffix used to win outright, so ``file_path="note.exe"``
+    wrote sender-controlled bytes into a file Windows executes on double-click.
+    That is the same hole the sender-side guard above closes, entered through the
+    other door - and the comment two lines up already claimed the extension comes
+    from the media and never from the caller.
+    """
+    if not out_path.suffix:
+        return out_path.with_suffix(suffix), None
+    if out_path.suffix.lower() == suffix.lower():
+        return out_path, None
+    return out_path.with_suffix(suffix), out_path.suffix
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Save Disappearing Media",
@@ -325,7 +349,11 @@ async def send_disappearing_media(
     )
 )
 @require_explicit_account
-@with_account(readonly=True)
+# readonly=False, matching readOnlyHint above: this tool writes a file to the
+# operator's disk. It said readonly=True, so the annotation and the router
+# disagreed and only require_explicit_account kept it out of the read-only
+# fan-out - one decorator away from a silent multi-account write.
+@with_account(readonly=False)
 @validate_id("chat_id")
 async def save_disappearing_media(
     chat_id: Union[int, str],
@@ -437,10 +465,22 @@ async def save_disappearing_media(
                 "preview below is all that survives this call."
             )
         else:
-            target = out_path if out_path.suffix else out_path.with_suffix(suffix)
+            target, replaced_suffix = _target_path(out_path, suffix)
+            if replaced_suffix:
+                record["path_suffix_replaced"] = display_name(replaced_suffix)
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(data)
-            saved = Path(target).resolve(strict=True)
+            # Reserve the name, then write into it: the default name is only
+            # second-precise, so two saves in one second would otherwise overwrite
+            # each other silently.
+            reserved = reserve_free_path(target)
+            if reserved is None:
+                record["save_error"] = (
+                    f"{NAME_ATTEMPTS} names near {target.name} are already taken. "
+                    "Pass file_path to choose one."
+                )
+                return format_tool_result([record])
+            reserved.write_bytes(data)
+            saved = Path(reserved).resolve(strict=True)
             roots, roots_error = await _ensure_allowed_roots(ctx, "save_disappearing_media")
             if roots_error:
                 # The bytes are already on disk; refusing without removing them

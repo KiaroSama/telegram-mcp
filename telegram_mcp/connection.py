@@ -418,6 +418,10 @@ def with_account(readonly=False):
             # this wrapper must never raise.
             return json.dumps({"accounts": accounts}, ensure_ascii=False, default=str)
 
+        # The routing contract, readable without unwrapping: a registry test can
+        # check it against the tool annotation, which is how save_disappearing_media
+        # was found declaring readOnlyHint=False while routing as read-only.
+        wrapper.__telegram_readonly__ = readonly
         return wrapper
 
     return decorator

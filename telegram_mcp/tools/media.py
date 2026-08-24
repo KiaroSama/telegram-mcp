@@ -3,6 +3,7 @@
 import secrets
 
 from telegram_mcp.runtime import *
+from telegram_mcp.media_transfer import NAME_ATTEMPTS, reserve_free_path
 
 # What one download_media call may write before it is stopped. Telegram files run
 # to 2GB (4GB for premium), and the tool had no ceiling at all: a single call
@@ -10,32 +11,9 @@ from telegram_mcp.runtime import *
 # chose for itself, and the caller can raise it per call with max_bytes.
 _DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024
 
-# How many collision-avoiding suffixes to try before giving up. A download must
-# not overwrite a file that is already there, and the default name is only
-# second-precise, so two downloads in one second collide.
-_DOWNLOAD_NAME_ATTEMPTS = 100
-
 
 class _DownloadTooLarge(Exception):
     """Raised out of the progress callback to stop an over-cap stream mid-flight."""
-
-
-def _reserve_free_path(target: Path) -> Optional[Path]:
-    """Create and return an unused path near ``target``, or None if there is none.
-
-    O_EXCL is the reservation: it fails if the name appeared between the check
-    and the create, so the caller owns the name it gets back rather than merely
-    having seen it free a moment ago.
-    """
-    stem, suffix, parent = target.stem, target.suffix, target.parent
-    for attempt in range(_DOWNLOAD_NAME_ATTEMPTS):
-        candidate = parent / (f"{stem}{suffix}" if attempt == 0 else f"{stem}-{attempt}{suffix}")
-        try:
-            os.close(os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-            return candidate
-        except FileExistsError:
-            continue
-    return None
 
 
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
@@ -258,10 +236,10 @@ async def download_media(
         if not _path_is_within_any_root(temp_path, roots):
             return "Download refused: the resulting path is outside the allowed roots."
 
-        final_path = _reserve_free_path(out_path.with_suffix(temp_path.suffix))
+        final_path = reserve_free_path(out_path.with_suffix(temp_path.suffix))
         if final_path is None:
             return (
-                f"Download refused: {_DOWNLOAD_NAME_ATTEMPTS} names near "
+                f"Download refused: {NAME_ATTEMPTS} names near "
                 f"{out_path.name} are already taken. Pass file_path to choose one."
             )
         if not _path_is_within_any_root(final_path, roots):

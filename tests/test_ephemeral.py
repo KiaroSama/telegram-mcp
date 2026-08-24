@@ -496,3 +496,46 @@ async def test_an_unknown_mime_type_lands_on_bin_without_being_flagged(
 
     assert Path(record["saved_path"]).suffix == ".bin"
     assert "suffix_replaced" not in record
+
+
+# --- the caller does not get to choose the extension either --------------------
+
+
+def test_a_caller_supplied_suffix_does_not_override_the_media_s():
+    """`file_path="note.exe"` used to win outright, writing sender-controlled bytes
+    into a file Windows executes on double-click. That is the same hole the
+    sender-side suffix guard closes, entered through the other door."""
+    target, replaced = mod._target_path(Path("C:/roots/note.exe"), ".pdf")
+
+    assert target.suffix == ".pdf"
+    assert target.name == "note.pdf"
+    assert replaced == ".exe", "the caller deserves to be told their extension was dropped"
+
+
+def test_a_caller_suffix_that_already_matches_is_left_alone():
+    """A flag that always fires carries no information."""
+    target, replaced = mod._target_path(Path("C:/roots/note.pdf"), ".pdf")
+
+    assert target.name == "note.pdf"
+    assert replaced is None
+
+
+def test_the_match_ignores_case():
+    target, replaced = mod._target_path(Path("C:/roots/photo.JPG"), ".jpg")
+
+    assert replaced is None, "a case difference is not a different extension"
+
+
+def test_a_path_with_no_suffix_gains_the_media_s():
+    target, replaced = mod._target_path(Path("C:/roots/note"), ".ogg")
+
+    assert target.name == "note.ogg"
+    assert replaced is None
+
+
+def test_saving_disappearing_media_is_declared_a_write():
+    """The tool writes a file to the operator's disk. It was registered
+    `readOnlyHint=False` but wrapped in `with_account(readonly=True)`, so the
+    annotation and the router disagreed about what it does; only
+    `require_explicit_account` was keeping it out of the read-only fan-out."""
+    assert mod.save_disappearing_media.__telegram_readonly__ is False
