@@ -56,7 +56,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    $wrapperOutput = & $python -c $wrapperMatch.Groups['body'].Value $wrapperTestLog $wrapperTestScript 2>&1
+    $wrapperOutput = & $python -c $wrapperMatch.Groups['body'].Value $wrapperTestLog 0 $wrapperTestScript 2>&1
     $wrapperExitCode = $LASTEXITCODE
     if ($wrapperExitCode -eq 0) {
         throw 'Python tee wrapper unexpectedly returned success for an unhandled exception.'
@@ -81,7 +81,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    $interruptOutput = & $python -c $wrapperMatch.Groups['body'].Value $interruptLog $interruptScript 2>&1
+    $interruptOutput = & $python -c $wrapperMatch.Groups['body'].Value $interruptLog 0 $interruptScript 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Python tee wrapper returned $LASTEXITCODE for Ctrl+C: $($interruptOutput -join [Environment]::NewLine)"
     }
@@ -97,7 +97,7 @@ try {
         [Text.UTF8Encoding]::new($false)
     )
 
-    $shutdownOutput = & $python -c $wrapperMatch.Groups['body'].Value $shutdownLog $shutdownScript 2>&1
+    $shutdownOutput = & $python -c $wrapperMatch.Groups['body'].Value $shutdownLog 0 $shutdownScript 2>&1
     if ($LASTEXITCODE -ne 0) {
         throw "Python tee wrapper returned $LASTEXITCODE for shutdown output."
     }
@@ -109,6 +109,31 @@ try {
     if ($shutdownLogText -notmatch 'late-shutdown-output') {
         throw 'Python tee wrapper log is missing late shutdown output.'
     }
+
+    # The server runs for as long as the client keeps it, so the tee needs a size
+    # ceiling of its own: a retention count alone bounds the number of files, not
+    # the one file being written.
+    $chattyScript = Join-Path $wrapperTestDirectory 'chatty.py'
+    $chattyLog = Join-Path $wrapperTestDirectory 'chatty.log'
+    [IO.File]::WriteAllText(
+        $chattyScript,
+        "for i in range(400): print('x' * 100)$([Environment]::NewLine)",
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    $null = & $python -c $wrapperMatch.Groups['body'].Value $chattyLog 4096 $chattyScript 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Python tee wrapper returned $LASTEXITCODE for the size test." }
+    $liveSize = (Get-Item -LiteralPath $chattyLog).Length
+    if ($liveSize -gt 8192) {
+        throw "The tee wrote $liveSize bytes past a 4096-byte ceiling without rolling."
+    }
+    if (-not (Test-Path -LiteralPath "$chattyLog.1")) {
+        throw 'The tee never rolled, so the ceiling is not enforced.'
+    }
+    if (Test-Path -LiteralPath "$chattyLog.2") {
+        throw 'Rolling kept more than one previous part.'
+    }
+    Write-Output 'ok  the launcher tee rolls at its size ceiling and keeps one part'
 }
 finally {
     [IO.Directory]::Delete($wrapperTestDirectory, $true)
@@ -120,23 +145,50 @@ finally {
 if ($manager -notmatch 'Backup-EnvFile') {
     throw 'The account manager rewrites .env with no backup step.'
 }
-if ($manager -match 'Write-Host[^
+if ($manager -match 'Write-Host[^
 ]*\$sessionString') {
     throw 'The account manager prints a session string to the terminal.'
 }
 if ($manager -notmatch 'AsSecureString') {
     throw 'The account manager reads a session string as visible input.'
 }
-if ($manager -notmatch '(?s)function Set-EnvValue.*?\[IO\.File\]::WriteAllText') {
-    throw 'The account manager does not write .env through an explicit encoding.'
+if ($manager -notmatch '(?s)function Set-EnvValue.*?Write-FileAtomic') {
+    throw 'The account manager rewrites .env in place instead of replacing it atomically.'
+}
+if ($manager -match '(?ms)^\s*\[IO\.File\]::WriteAllText\(\s*\r?\n\s*\$envPath') {
+    throw 'The account manager still truncates .env before writing it.'
+}
+if ($manager -match 'Copy-Item[^\r\n]*\$envPath[^\r\n]*-Force') {
+    throw 'A backup is taken with -Force, which silently replaces one taken the same second.'
+}
+foreach ($shipped in $scripts) {
+    $text = Get-Content -LiteralPath $shipped -Raw
+    # `logs/` beside the source lands inside the git checkout and inherits whatever
+    # the repository directory grants; the state directory is the private one.
+    if ($text -match "Join-Path \`$PSScriptRoot 'logs'") {
+        throw "$(Split-Path -Leaf $shipped) still logs beside its own source."
+    }
+    foreach ($required in 'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Remove-StaleFiles') {
+        if ($text -notmatch "function $required") {
+            throw "$(Split-Path -Leaf $shipped) has no $required."
+        }
+    }
+    # /grant on its own ADDS an entry and leaves the inherited BUILTIN\Users one,
+    # so without /inheritance:r the call grants exactly what it meant to remove.
+    if ($text -notmatch "'/inheritance:r'") {
+        throw "$(Split-Path -Leaf $shipped) grants without removing inheritance."
+    }
+}
+if ($launcher -notmatch 'LogMaxBytes') {
+    throw 'The launcher log has no size ceiling; a long-running server fills the disk.'
 }
 
-$logsDirectory = Join-Path $projectRoot 'logs'
-$logsDirectoryExisted = Test-Path -LiteralPath $logsDirectory
-$before = @(
-    Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File -ErrorAction SilentlyContinue |
-        Select-Object -ExpandProperty FullName
-)
+# XDG_STATE_HOME points the launcher at a throwaway directory, so this asserts the
+# real path resolution rather than reaching into the operator's own state.
+$stateHome = Join-Path ([IO.Path]::GetTempPath()) ("tg-state-" + [guid]::NewGuid())
+$originalStateHome = $env:XDG_STATE_HOME
+$env:XDG_STATE_HOME = $stateHome
+$logsDirectory = Join-Path $stateHome 'telegram-mcp/logs'
 
 $originalPath = $env:PATH
 $originalPathExt = $env:PATHEXT
@@ -148,13 +200,12 @@ try {
     if ($LASTEXITCODE -ne 0) {
         throw "Launcher exited with $LASTEXITCODE`: $($output -join [Environment]::NewLine)"
     }
-    $after = @(
+    $newLogs = @(
         Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File |
             Select-Object -ExpandProperty FullName
     )
-    $newLogs = @($after | Where-Object { $_ -notin $before })
     if ($newLogs.Count -ne 1) {
-        throw "Expected one new launcher log, found $($newLogs.Count)."
+        throw "Expected one launcher log under $logsDirectory, found $($newLogs.Count)."
     }
 
     $log = Get-Content -LiteralPath $newLogs[0] -Raw
@@ -167,19 +218,39 @@ try {
 finally {
     $env:PATH = $originalPath
     $env:PATHEXT = $originalPathExt
-    $testLogs = @(
-        Get-ChildItem -LiteralPath $logsDirectory -Filter 'start-mcp_*.log' -File -ErrorAction SilentlyContinue |
-            Select-Object -ExpandProperty FullName |
-            Where-Object { $_ -notin $before }
-    )
-    foreach ($logFile in $testLogs) {
-        Remove-Item -LiteralPath $logFile -Force -ErrorAction SilentlyContinue
+    if ($null -eq $originalStateHome) {
+        Remove-Item -LiteralPath Env:XDG_STATE_HOME -ErrorAction SilentlyContinue
     }
-    if (-not $logsDirectoryExisted -and
-        (Test-Path -LiteralPath $logsDirectory) -and
-        -not (Get-ChildItem -LiteralPath $logsDirectory -Force)) {
-        Remove-Item -LiteralPath $logsDirectory -Force
+    else {
+        $env:XDG_STATE_HOME = $originalStateHome
     }
+    Remove-Item -LiteralPath $stateHome -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Retention, proved against the shipped function rather than by eleven real launches.
+$retentionDirectory = Join-Path ([IO.Path]::GetTempPath()) ("tg-retention-" + [guid]::NewGuid())
+[void] (New-Item -ItemType Directory -Path $retentionDirectory)
+try {
+    $prune = [regex]::Match($launcher, '(?ms)^function Remove-StaleFiles \{.*?^\}')
+    if (-not $prune.Success) { throw 'Could not extract Remove-StaleFiles from the launcher.' }
+    . ([ScriptBlock]::Create($prune.Value))
+
+    foreach ($index in 1..15) {
+        $name = 'start-mcp_2026-01-{0:d2}_00-00-00_UTC.log' -f $index
+        [IO.File]::WriteAllText((Join-Path $retentionDirectory $name), 'x')
+    }
+    Remove-StaleFiles -Directory $retentionDirectory -Filter 'start-mcp_*.log' -Keep 10
+    $kept = @(Get-ChildItem -LiteralPath $retentionDirectory -Filter 'start-mcp_*.log' -File |
+            Sort-Object Name)
+    if ($kept.Count -ne 10) { throw "Retention kept $($kept.Count) logs, expected 10." }
+    # The OLDEST five go, not the newest: a log is only useful while it is recent.
+    if ($kept[0].Name -notmatch '2026-01-06') {
+        throw "Retention deleted the wrong end: oldest kept is $($kept[0].Name)."
+    }
+    Write-Output 'ok  launcher logs are pruned to the newest ten'
+}
+finally {
+    Remove-Item -LiteralPath $retentionDirectory -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 Write-Output 'Launcher checks passed.'

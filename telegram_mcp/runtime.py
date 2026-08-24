@@ -48,6 +48,7 @@ from telethon.tl.types import (
 import re
 import hashlib
 import tempfile
+import traceback
 
 try:
     import fcntl  # POSIX advisory locks; unavailable on Windows
@@ -316,6 +317,49 @@ def _safe_context_value(value: Any) -> Any:
     return f"<{type(value).__name__} len={len(text)} #{digest}>"
 
 
+# How many innermost frames of a failure are worth keeping. Enough to name the
+# call that failed and who called it; not the whole stack, which is mostly this
+# server's own plumbing repeated in every report.
+_LOGGED_FRAMES = 6
+
+
+def _safe_exception(error: BaseException) -> str:
+    """Everything about a failure that may be written down.
+
+    `exc_info=True` used to hand the handler the rendered traceback, which ends
+    in the exception's own text - and an exception carries whatever the failing
+    call was given: a caption, a filename, a contact's name, a search query.
+    `RedactingFilter` can only scrub the shapes it was told about, so an
+    arbitrary canary planted in an exception came back out of the log verbatim.
+
+    What survives is the same allowlist `_safe_context_value` applies to
+    keywords: type, size, digest. The digest is what still makes two reports
+    comparable - the same failure keeps the same eight characters - and the
+    frames say where it happened without quoting anything the caller supplied.
+    """
+    text = str(error)
+    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
+    parts = [f"{type(error).__name__} len={len(text)} #{digest}"]
+
+    # `raise X from Y` renders both, so scrubbing only the outer one leaks the
+    # inner text. Types only, and no recursion: one link is the useful one.
+    cause = error.__cause__ or error.__context__
+    if cause is not None:
+        parts.append(f"caused by {type(cause).__name__}")
+
+    frames = traceback.extract_tb(error.__traceback__)[-_LOGGED_FRAMES:]
+    if frames:
+        # PurePosixPath/PureWindowsPath would each be wrong on the other host;
+        # rpartition on both separators is the same answer everywhere.
+        names = [
+            f"{frame.filename.rpartition('/')[2].rpartition(chr(92))[2]}"
+            f":{frame.lineno}:{frame.name}"
+            for frame in reversed(frames)
+        ]
+        parts.append("at " + " <- ".join(names))
+    return " ".join(parts)
+
+
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -366,8 +410,11 @@ def log_and_format_error(
     # Format the additional context parameters
     context = ", ".join(f"{k}={_safe_context_value(v)}" for k, v in kwargs.items())
 
-    # Log the full technical error
-    logger.error(f"Error in {function_name} ({context}) - Code: {error_code}", exc_info=True)
+    # Log the failure, never its text: see _safe_exception.
+    logger.error(
+        f"Error in {function_name} ({context}) - Code: {error_code} - "
+        f"failure: {_safe_exception(error)}"
+    )
 
     # Return a user-friendly message
     if user_message:

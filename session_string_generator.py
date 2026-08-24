@@ -37,6 +37,7 @@ from telethon import errors
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telegram_mcp.client_identity import client_identity_kwargs
+from telegram_mcp.aliases import restrict_to_owner
 from telegram_mcp.console_theme import default_hint, failure, heading, hint, note
 from telegram_mcp.install_guard import UnsafeInstallationError, assert_safe_distribution
 
@@ -84,10 +85,18 @@ _MAX_BACKUP_COLLISIONS = 100
 
 
 def _write_owner_only(path: Path, text: str) -> None:
-    """Create ``path`` with 0600 from the first byte, refusing to clobber."""
+    """Create ``path`` owner-only from the first byte, refusing to clobber.
+
+    The 0600 in the open is the POSIX half and is what makes the file private
+    before a single byte is in it. `restrict_to_owner` is the Windows half:
+    there the mode argument is ignored and the file inherits the directory's
+    ACL, so a backup of every configured login lands readable by every account
+    on the machine.
+    """
     fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
+    restrict_to_owner(path)
 
 
 def _backup_env(env_path: Path) -> Path:
@@ -171,6 +180,11 @@ def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Opti
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
             handle.write("".join(lines))
+            handle.flush()
+            os.fsync(handle.fileno())  # the rename must not outrun the bytes
+        # Before the rename: an ACL travels with the file, so `.env` is never
+        # briefly readable under its real name.
+        restrict_to_owner(tmp)
         os.replace(tmp, env_path)
     except BaseException:
         try:

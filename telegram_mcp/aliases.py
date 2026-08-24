@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import re
+import subprocess
 import tempfile
 import time
 import unicodedata
@@ -55,6 +56,70 @@ _LEGACY_ALIASES_FILE = Path(__file__).resolve().parent.parent / "aliases.json"
 # fuzzy-matched or an alias could hijack a real account.
 _HANDLE_RE = re.compile(r"^@?[a-zA-Z0-9_]{5,}$")
 _SELF_REFS = {"me", "self"}
+
+
+# icacls is a subprocess; it needs a ceiling like any other. Ten seconds is
+# generous for a local file and short enough that a wedged one is not a hang.
+_ACL_TIMEOUT_SECONDS = 10.0
+
+
+def _current_principal() -> Optional[str]:
+    """`DOMAIN\\user` for the account this process runs as, or None."""
+    user = os.environ.get("USERNAME")
+    if not user:
+        return None
+    domain = os.environ.get("USERDOMAIN")
+    return f"{domain}\\{user}" if domain else user
+
+
+def _owner_only_acl_command(path: str, principal: str) -> list:
+    """The icacls invocation that leaves exactly one access entry.
+
+    `/inheritance:r` is the half that matters. `/grant` on its own ADDS an entry
+    and leaves the inherited one - typically `BUILTIN\\Users` - in place, so it
+    grants precisely what it was called to remove.
+    """
+    return ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(F)"]
+
+
+def restrict_to_owner(path: Union[str, Path]) -> bool:
+    """Make a file readable by its owner alone, on POSIX *and* on Windows.
+
+    Lives here because this module already owns writing a private file safely,
+    and it is imported by everything that needs the same guarantee.
+
+    `os.chmod(path, 0o600)` is not that guarantee on Windows: it toggles the
+    read-only attribute and cannot clear the read bit, so the alias store, the
+    `.env` and its backups were readable by every account on the machine this
+    project targets first - while the POSIX-only tests passed. `icacls` ships
+    with Windows, needs no elevation for a file the caller owns, and is the
+    only owner-only mechanism available without a new dependency.
+
+    Returns whether it was applied, so a caller can report a machine where it
+    could not be. Never raises: a permissions detail must not take a tool down.
+    """
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+            return True
+        except OSError as error:
+            logger.warning("Could not restrict %s to its owner: %s", path, error)
+            return False
+
+    principal = _current_principal()
+    if principal is None or not os.path.exists(path):
+        return False
+    try:
+        completed = subprocess.run(
+            _owner_only_acl_command(path, principal),
+            capture_output=True,
+            timeout=_ACL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        logger.warning("Could not restrict %s to its owner: %s", path, type(error).__name__)
+        return False
+    return completed.returncode == 0
 
 
 def aliases_file_path() -> Path:
@@ -215,6 +280,9 @@ def save_aliases(aliases: Dict[Any, Any]) -> None:
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
+        # Before the rename, so the file is never briefly readable under its real
+        # name: an ACL travels with the file, and mkstemp's 0600 is POSIX-only.
+        restrict_to_owner(tmp)
         os.replace(tmp, path)  # atomic: a crash leaves the previous file intact
     except BaseException:
         os.unlink(tmp)
@@ -705,6 +773,7 @@ __all__ = [
     "load_aliases",
     "match_aliases",
     "migrate_legacy_rows",
+    "restrict_to_owner",
     "save_aliases",
     "sole_account_label",
     "update_aliases",

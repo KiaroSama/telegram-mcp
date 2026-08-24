@@ -11,12 +11,14 @@ The canaries below are synthetic. Nothing here touches a real session.
 
 import logging
 import os
+import re
 import stat
+import subprocess
 import sys
 
 import pytest
 
-from telegram_mcp import connection, runtime
+from telegram_mcp import aliases, connection, runtime
 
 CANARY = "canary-9Yb3Qw-do-not-log"
 SESSION_CANARY = "1" + "A" * 48  # shaped like a Telethon StringSession
@@ -71,8 +73,7 @@ def test_a_planted_context_value_never_reaches_the_log(logged, capsys):
 def test_a_secret_inside_the_exception_text_is_scrubbed(logged, monkeypatch):
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK", SESSION_CANARY)
 
-    # Raised and caught, the way the tool call sites do it: `exc_info=True`
-    # records the exception being handled, traceback and final line included.
+    # Raised and caught, the way the tool call sites do it.
     try:
         raise RuntimeError(f"failed for session {SESSION_CANARY} via t.me/+SecretInviteHash")
     except RuntimeError as exc:
@@ -81,7 +82,70 @@ def test_a_secret_inside_the_exception_text_is_scrubbed(logged, monkeypatch):
     written = logged.read_text(encoding="utf-8")
     assert SESSION_CANARY not in written
     assert "SecretInviteHash" not in written
-    assert "REDACTED" in written
+
+
+def test_the_shape_scrubber_still_marks_what_it_catches(monkeypatch):
+    """`log_and_format_error` no longer writes exception text at all, so the
+    marker cannot appear from that path. The scrubber still guards every OTHER
+    record - the console handler, and anything logged without going through it."""
+    monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK", SESSION_CANARY)
+
+    cleaned = connection.redact(f"session {SESSION_CANARY} via t.me/+SecretInviteHash")
+
+    assert SESSION_CANARY not in cleaned
+    assert "SecretInviteHash" not in cleaned
+    assert "REDACTED" in cleaned
+
+
+def test_an_arbitrary_canary_in_exception_text_never_reaches_the_log(logged):
+    """The case the shape-based scrubber cannot win.
+
+    `exc_info=True` wrote the exception's own text and its whole traceback, and
+    an exception carries whatever the failing call was given - a caption, a
+    filename, a contact's name. `redact()` can only catch shapes it was told
+    about, so anything else came straight back out of the file.
+    """
+    try:
+        raise RuntimeError(f"upload of {CANARY} failed")
+    except RuntimeError as exc:
+        runtime.log_and_format_error("send_file", exc, chat_id=1)
+
+    written = logged.read_text(encoding="utf-8")
+
+    assert CANARY not in written
+    # Not by writing nothing: a report has to stay actionable.
+    assert "RuntimeError" in written
+    assert "send_file" in written
+
+
+def test_a_canary_in_a_chained_cause_never_reaches_the_log(logged):
+    """`raise X from Y` renders BOTH exceptions, so scrubbing only the outer one
+    leaks the inner text that the outer was raised to hide."""
+    try:
+        try:
+            raise ValueError(f"inner {CANARY}")
+        except ValueError as inner:
+            raise RuntimeError("outer") from inner
+    except RuntimeError as exc:
+        runtime.log_and_format_error("download_media", exc, chat_id=1)
+
+    written = logged.read_text(encoding="utf-8")
+
+    assert CANARY not in written
+    assert "ValueError" in written, "the cause's type is the useful half"
+
+
+def test_two_failures_with_the_same_text_share_a_digest(logged):
+    """What replaces the text has to be enough to say "these are the same bug"."""
+    for _ in range(2):
+        try:
+            raise RuntimeError(f"upload of {CANARY} failed")
+        except RuntimeError as exc:
+            runtime.log_and_format_error("send_file", exc, chat_id=1)
+
+    digests = re.findall(r"#([0-9a-f]{8})", logged.read_text(encoding="utf-8"))
+
+    assert len(digests) == 2 and digests[0] == digests[1]
 
 
 @posix_modes_only
@@ -108,6 +172,87 @@ def test_the_production_logger_is_bounded_and_redacting():
         assert any(
             isinstance(f, connection.RedactingFilter) for f in handler.filters
         ), f"{handler!r} can emit unredacted text"
+
+
+# --- owner-only on Windows too, not just on POSIX -----------------------------
+#
+# `os.chmod(path, 0o600)` cannot clear the read bit on Windows: it toggles the
+# read-only attribute and nothing else. Every private file this project writes -
+# the alias store, `.env`, its backups - was therefore readable by every account
+# on the machine this project targets first, while the POSIX-only tests passed.
+
+windows_acls_only = pytest.mark.skipif(
+    os.name != "nt", reason="Windows ACLs; there is no icacls on the Linux runner"
+)
+
+
+def test_the_owner_only_acl_command_names_exactly_one_principal():
+    """Asserted as a command rather than as a resulting ACL, so the contract is
+    checked on every host including the Linux runner that has no icacls.
+
+    `/inheritance:r` is the half that matters: `/grant` alone ADDS an entry and
+    leaves the inherited `Users` one in place, which grants what it was called
+    to remove."""
+    command = aliases._owner_only_acl_command("C:/state/aliases.json", "CORP\\ada")
+
+    assert command == [
+        "icacls",
+        "C:/state/aliases.json",
+        "/inheritance:r",
+        "/grant:r",
+        "CORP\\ada:(F)",
+    ]
+
+
+@windows_acls_only
+def test_a_private_file_ends_up_with_one_access_entry(tmp_path):
+    path = tmp_path / "private.json"
+    path.write_text("secret", encoding="utf-8")
+
+    assert aliases.restrict_to_owner(path) is True
+
+    listing = subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, timeout=30, check=True
+    )
+    # One ACE, whatever this host's language calls its groups.
+    assert listing.stdout.count(":(") == 1
+    assert os.environ["USERNAME"] in listing.stdout
+
+
+@windows_acls_only
+def test_the_alias_store_is_owner_only_on_windows(tmp_path, monkeypatch):
+    monkeypatch.setenv("TELEGRAM_ALIASES_FILE", str(tmp_path / "aliases.json"))
+    runtime.save_aliases({"андрей": 1})
+
+    listing = subprocess.run(
+        ["icacls", str(runtime.aliases_file_path())],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+
+    assert listing.stdout.count(":(") == 1
+
+
+@windows_acls_only
+def test_env_and_backup_are_owner_only_on_windows(generator, tmp_path):
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_API_ID=1\n", encoding="utf-8")
+
+    backup = generator.write_env_value("TELEGRAM_SESSION_STRING", SESSION_CANARY, env)
+
+    for path in (env, backup):
+        listing = subprocess.run(
+            ["icacls", str(path)], capture_output=True, text=True, timeout=30, check=True
+        )
+        assert listing.stdout.count(":(") == 1, f"{path} is not owner-only"
+
+
+def test_restricting_an_absent_file_reports_failure_rather_than_raising(tmp_path):
+    """A caller that cannot lock a file down has to be able to say so; raising
+    here would take down a tool call over a permissions detail."""
+    assert aliases.restrict_to_owner(tmp_path / "nothing-here.json") is False
 
 
 # --- the session generator's own files ---------------------------------------

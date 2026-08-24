@@ -19,11 +19,13 @@ if ($Arguments.Count -ge 4 -and
     exit $pytestExit
 }
 
-if ($Arguments.Count -lt 6 -or
+# `uv run python -c <wrapper> <log path> <max bytes> <main.py> [server args...]`.
+if ($Arguments.Count -lt 7 -or
     $Arguments[0] -ne 'run' -or
     $Arguments[1] -ne 'python' -or
     $Arguments[2] -ne '-c' -or
-    [IO.Path]::GetFileName($Arguments[5]) -ne 'main.py') {
+    $Arguments[5] -notmatch '^\d+$' -or
+    [IO.Path]::GetFileName($Arguments[6]) -ne 'main.py') {
     throw "Unexpected uv arguments: $($Arguments -join ' ')"
 }
 

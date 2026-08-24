@@ -30,11 +30,114 @@ $exitCode = 0
 $script:LogPath = $null
 $envPath = Join-Path $PSScriptRoot '.env'
 
+# How many of each are kept. Both hold private material - a log names the accounts
+# on this machine, a backup holds a full login to every one of them - so an
+# unbounded pile of either turns one readable directory into a standing leak.
+$script:LogRetention = 10
+$script:EnvBackupRetention = 5
+$script:MaxBackupCollisions = 100
+
+# --- private files ------------------------------------------------------------
+
+function Get-StateDirectory {
+    <#
+      Where runtime state goes: NOT beside the source, which may be read-only,
+      may be a git checkout, and is where a `logs/` directory ends up committed
+      or synced. Same rule as `telegram_mcp.aliases.aliases_file_path`, so an
+      operator has one place to look and one place to lock down.
+    #>
+    $base = if ($env:XDG_STATE_HOME) { $env:XDG_STATE_HOME } else { Join-Path $HOME '.local/state' }
+    return Join-Path $base 'telegram-mcp'
+}
+
+function Set-OwnerOnlyAcl {
+    <#
+      Leave exactly one access entry on a private file.
+
+      `/inheritance:r` is the half that matters: `/grant` on its own ADDS an
+      entry and leaves the inherited one - typically BUILTIN\Users - in place,
+      granting precisely what it was called to remove. Mirrors
+      `telegram_mcp.aliases.restrict_to_owner`.
+
+      Returns whether it applied, never throws: a permissions detail must not
+      abort an account operation half-way.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+    $principal = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
+    if (-not $principal) { return $false }
+    try {
+        & icacls $Path '/inheritance:r' '/grant:r' "${principal}:(F)" *> $null
+        return $LASTEXITCODE -eq 0
+    }
+    catch { return $false }
+}
+
+function Write-FileAtomic {
+    <#
+      Write a file so a crash cannot leave it half-written.
+
+      `[IO.File]::WriteAllText` truncates first and writes second, so an
+      interrupted rewrite of `.env` leaves a file missing the accounts that had
+      not been written yet - and the backup beside it is the only way back. A
+      temp file, flushed to disk, then installed by an atomic replace, has no
+      such window.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Path,
+        [Parameter(Mandatory)] [AllowEmptyString()] [string] $Text
+    )
+    $temp = "$Path.$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        $stream = [IO.File]::Open(
+            $temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
+            $stream.Write($bytes, 0, $bytes.Length)
+            $stream.Flush($true)  # $true: to the disk, not just to the OS cache
+        }
+        finally { $stream.Dispose() }
+        [void] (Set-OwnerOnlyAcl -Path $temp)
+        if (Test-Path -LiteralPath $Path -PathType Leaf) {
+            # [NullString]::Value, not $null: PowerShell binds $null to a string
+            # parameter as "", and File.Replace reads that as "back it up to a
+            # file with no name" and refuses.
+            [IO.File]::Replace($temp, $Path, [NullString]::Value)
+        }
+        else {
+            [IO.File]::Move($temp, $Path)
+        }
+    }
+    catch {
+        Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
+        throw
+    }
+    [void] (Set-OwnerOnlyAcl -Path $Path)
+}
+
+function Remove-StaleFiles {
+    <#
+      Keep the newest $Keep files matching $Filter and delete the rest.
+      Named by a UTC timestamp, so the name order IS the age order.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Directory,
+        [Parameter(Mandatory)] [string] $Filter,
+        [Parameter(Mandatory)] [int] $Keep
+    )
+    $files = @(
+        Get-ChildItem -LiteralPath $Directory -Filter $Filter -File -Force -ErrorAction SilentlyContinue |
+            Sort-Object Name
+    )
+    for ($index = 0; $index -lt $files.Count - $Keep; $index++) {
+        Remove-Item -LiteralPath $files[$index].FullName -Force -ErrorAction SilentlyContinue
+    }
+}
+
 # --- logging -----------------------------------------------------------------
 
 function Start-Logging {
     try {
-        $logsDirectory = Join-Path $PSScriptRoot 'logs'
+        $logsDirectory = Join-Path (Get-StateDirectory) 'logs'
         [void] (New-Item -ItemType Directory -Path $logsDirectory -Force)
         $timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
         $path = Join-Path $logsDirectory "Manage-Accounts_$timestamp.log"
@@ -44,6 +147,9 @@ function Start-Logging {
             $suffix++
         }
         [IO.File]::WriteAllText($path, '', [Text.UTF8Encoding]::new($false))
+        [void] (Set-OwnerOnlyAcl -Path $path)
+        Remove-StaleFiles -Directory $logsDirectory -Filter 'Manage-Accounts_*.log' `
+            -Keep $script:LogRetention
         $script:LogPath = $path
     }
     catch {
@@ -70,13 +176,30 @@ function Backup-EnvFile {
       A copy beside the original, named by the moment it was taken. Restoring is a
       rename, which is the point: the recovery path has to be obvious to someone
       who has just realised they deleted the wrong account.
+
+      Never overwrites: `Copy-Item -Force` would silently replace a backup taken
+      in the same second, which is exactly when two operations in a row need
+      both. Owner-only, and pruned - each one is a complete set of logins, so
+      keeping every backup ever taken leaks every session ever configured.
     #>
     if (-not (Test-Path -LiteralPath $envPath -PathType Leaf)) { return $null }
     $stamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
-    $backup = "$envPath.backup-$stamp"
-    Copy-Item -LiteralPath $envPath -Destination $backup -Force
-    Write-Log "Backed up .env to $(Split-Path -Leaf $backup)"
-    return $backup
+    for ($attempt = 0; $attempt -lt $script:MaxBackupCollisions; $attempt++) {
+        $suffix = if ($attempt -eq 0) { '' } else { "-$attempt" }
+        $backup = "$envPath.backup-$stamp$suffix"
+        try {
+            [IO.File]::Copy($envPath, $backup, $false)
+        }
+        catch [IO.IOException] {
+            continue  # that name was taken between the check and the copy
+        }
+        [void] (Set-OwnerOnlyAcl -Path $backup)
+        Remove-StaleFiles -Directory (Split-Path -Parent $envPath) `
+            -Filter "$(Split-Path -Leaf $envPath).backup-*" -Keep $script:EnvBackupRetention
+        Write-Log "Backed up .env to $(Split-Path -Leaf $backup)"
+        return $backup
+    }
+    throw "Could not find a free backup name for $envPath within one second."
 }
 
 function Get-EnvLines {
@@ -130,21 +253,15 @@ function Set-EnvValue {
         else { $line }
     }
     if (-not $written) { $updated = @($updated) + "$Key=$Value" }
-    [IO.File]::WriteAllText(
-        $envPath,
-        (($updated -join [Environment]::NewLine) + [Environment]::NewLine),
-        [Text.UTF8Encoding]::new($false)
-    )
+    Write-FileAtomic -Path $envPath `
+        -Text (($updated -join [Environment]::NewLine) + [Environment]::NewLine)
 }
 
 function Remove-EnvKey {
     param([Parameter(Mandatory)] [string] $Key)
     $kept = @(Get-EnvLines | Where-Object { $_.Trim() -notmatch "^$([regex]::Escape($Key))\s*=" })
-    [IO.File]::WriteAllText(
-        $envPath,
-        (($kept -join [Environment]::NewLine) + [Environment]::NewLine),
-        [Text.UTF8Encoding]::new($false)
-    )
+    Write-FileAtomic -Path $envPath `
+        -Text (($kept -join [Environment]::NewLine) + [Environment]::NewLine)
 }
 
 # --- theme -------------------------------------------------------------------

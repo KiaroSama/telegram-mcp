@@ -37,6 +37,13 @@ try {
     # assignments across as well or Get-Painted indexes a null hashtable.
     $tables = [regex]::Matches($source, '(?ms)^\$script:(Color|MenuItems) = (\[ordered\] )?@\{.*?^\}')
     if ($tables.Count -ne 2) { throw "Expected the Color and MenuItems tables, found $($tables.Count)." }
+    # The numeric script-scope constants - retention counts, collision ceilings.
+    # A function that reads one it was not given fails at runtime under
+    # StrictMode, which is a stack trace rather than a readable assertion.
+    $constants = [regex]::Matches($source, '(?m)^\$script:\w+ = \d+\s*$')
+    if ($constants.Count -lt 3) {
+        throw "Expected the numeric script-scope constants, found $($constants.Count)."
+    }
     $escLine = [regex]::Match($source, '(?m)^\$script:Esc = .*$')
     if (-not $escLine.Success) { throw 'Could not find the Esc definition.' }
 
@@ -46,6 +53,7 @@ try {
 `$script:LogPath = `$null
 `$script:Quitting = `$false
 $($escLine.Value)
+$($constants.Value -join "`n")
 $($tables.Value -join "`n`n")
 $($functions.Value -join "`n`n")
 "@
@@ -96,6 +104,54 @@ $($functions.Value -join "`n`n")
         throw "Restoring the backup did not bring the file back: $($restored.Keys -join ', ')"
     }
     Write-Host 'ok  the backup restores the file by a plain copy'
+
+    # --- the file that holds every login is written safely -------------------
+    #
+    # `[IO.File]::WriteAllText` truncates first and writes second: an interrupted
+    # rewrite leaves a .env missing the accounts that had not been written yet.
+    # A temp file installed by an atomic replace has no such window, and the
+    # temp file must not survive either outcome.
+    $strays = @(Get-ChildItem -LiteralPath $sandbox -Filter '*.tmp' -File -Force)
+    if ($strays.Count -ne 0) {
+        throw "Atomic .env writes left temp files behind: $($strays.Name -join ', ')"
+    }
+    Write-Host 'ok  an atomic .env write leaves no temporary file behind'
+
+    # Each backup is a complete set of logins, so an unbounded pile of them turns
+    # one readable directory into a leak of every session ever configured.
+    foreach ($index in 1..($script:EnvBackupRetention + 4)) {
+        $stamp = '2026-01-{0:d2}_00-00-00_UTC' -f $index
+        [IO.File]::Copy($envPath, "$envPath.backup-$stamp", $false)
+    }
+    Remove-StaleFiles -Directory $sandbox -Filter '.env.backup-*' -Keep $script:EnvBackupRetention
+    $kept = @(Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force | Sort-Object Name)
+    if ($kept.Count -ne $script:EnvBackupRetention) {
+        throw "Retention kept $($kept.Count) backups, expected $($script:EnvBackupRetention)."
+    }
+    Write-Host 'ok  .env backups are pruned to the newest few'
+
+    # Two operations in the same second each need their own restore point;
+    # `Copy-Item -Force` silently replaced the first with the second.
+    Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force |
+        Remove-Item -Force
+    $first = Backup-EnvFile
+    $second = Backup-EnvFile
+    if ($first -eq $second) { throw 'Two backups in one second collapsed into one file.' }
+    if (-not (Test-Path -LiteralPath $first)) { throw 'The first backup was overwritten.' }
+    Write-Host 'ok  a second backup in the same second gets its own name'
+
+    if ($env:OS -eq 'Windows_NT') {
+        # os.chmod-style modes do not exist here: without an explicit ACL the
+        # file holding every login inherits whatever the directory grants.
+        $acl = & icacls $envPath
+        $entries = @($acl | Select-String -Pattern ':\(' -AllMatches |
+                ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
+        if ($entries -ne 1) { throw "The .env carries $entries access entries, expected 1." }
+        Write-Host 'ok  .env is left with exactly one access entry'
+    }
+
+    Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force |
+        Remove-Item -Force -ErrorAction SilentlyContinue
 
     # --- a commented-out account is not an account ---------------------------
     [IO.File]::WriteAllLines($envPath, @('#TELEGRAM_SESSION_STRING_OLD=1AAAAAold', 'TELEGRAM_SESSION_STRING=1AAAAAx'),
