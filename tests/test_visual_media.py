@@ -10,6 +10,7 @@ import gzip
 import io
 import json
 import os
+from pathlib import Path
 import subprocess
 import tempfile
 import threading
@@ -1088,3 +1089,208 @@ def test_a_pillow_animation_is_encoded_at_the_requested_side(tmp_path):
     for data, _meta in small:
         rendered = Image.open(io.BytesIO(data))
         assert max(rendered.size) <= 96, f"encoded at {rendered.size} for a 96px request"
+
+
+# --- the parent half of the .tgs split, without needing the renderer -----------
+#
+# The coverage job runs without the optional rlottie extra, so every test gated on
+# `lottie_available()` skips there and the whole parent-side protocol - header
+# parsing, stride arithmetic, exit-code mapping, blank detection - went unmeasured
+# on the platform CI actually gates on. None of it needs the renderer: it needs a
+# worker REPLY, which is a bytes object.
+
+
+def _worker_reply(indexes, total=31, framerate=30.0, side=None, colour=(10, 20, 30, 255)):
+    """A reply shaped exactly as lottie_worker writes one."""
+    from telegram_mcp.visual.frames import LOTTIE_RENDER_SIZE
+
+    side = side or LOTTIE_RENDER_SIZE
+    header = json.dumps({"total": total, "framerate": framerate, "indexes": list(indexes)})
+    body = bytes(colour) * (side * side) * len(indexes)
+    return header.encode("utf-8") + b"\n" + body
+
+
+class _FakeCompleted:
+    def __init__(self, returncode=0, stdout=b"", stderr=b""):
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+@pytest.fixture
+def _fake_worker(monkeypatch):
+    """Swap the child process for a reply this test writes."""
+    monkeypatch.setattr(frames, "lottie_available", lambda: True)
+
+    def _install(result):
+        monkeypatch.setattr(frames, "_run", lambda *a, **k: result)
+
+    return _install
+
+
+def test_the_parent_turns_a_worker_reply_into_frames(_fake_worker):
+    _fake_worker(_FakeCompleted(stdout=_worker_reply([0, 15, 30])))
+
+    extracted = frames._frames_with_lottie("ignored.tgs", 3)
+
+    assert len(extracted) == 3
+    assert [meta["frame_index"] for _data, meta in extracted] == [0, 15, 30]
+    assert all(meta["source"] == "rlottie" for _data, meta in extracted)
+    assert all(meta["animation_format"] == "lottie_tgs" for _data, meta in extracted)
+    # framerate 30 => frame 15 is half a second in.
+    assert extracted[1][1]["timestamp_seconds"] == 0.5
+
+
+def test_a_short_reply_is_refused_rather_than_sliced_into_garbage(_fake_worker):
+    """The parent slices the body at a fixed stride. A reply cut short would still
+    slice - into frames made of the next frame's pixels, or into empty strings -
+    and produce images that look like a successful render of nothing."""
+    truncated = _worker_reply([0, 15])[:-500]
+    _fake_worker(_FakeCompleted(stdout=truncated))
+
+    with pytest.raises(FrameExtractionError, match="cut short"):
+        frames._frames_with_lottie("ignored.tgs", 2)
+
+
+def test_a_reply_the_parent_cannot_read_is_reported_as_such(_fake_worker):
+    _fake_worker(_FakeCompleted(stdout=b"not json at all\nbody"))
+
+    with pytest.raises(FrameExtractionError, match="cannot read"):
+        frames._frames_with_lottie("ignored.tgs", 1)
+
+
+def test_a_zero_frame_animation_is_refused_not_rendered_blank(_fake_worker):
+    """rlottie does not raise on garbage that still gunzips - it reports zero frames.
+    Rendering that would produce a transparent canvas the tool layer would then
+    label a successful frame."""
+    _fake_worker(_FakeCompleted(stdout=_worker_reply([], total=0)))
+
+    with pytest.raises(FrameExtractionError, match="zero frames"):
+        frames._frames_with_lottie("ignored.tgs", 1)
+
+
+def test_the_two_worker_failures_stay_distinguishable(_fake_worker):
+    """Exit 3 means rlottie refused the FILE; anything else means it failed while
+    rendering. Collapsing them tells a caller their animation is broken when the
+    bytes were never a Lottie at all."""
+    _fake_worker(_FakeCompleted(returncode=frames.LOTTIE_EXIT_CANNOT_OPEN, stderr=b"BadGzipFile"))
+    with pytest.raises(FrameExtractionError, match="could not open"):
+        frames._frames_with_lottie("ignored.tgs", 1)
+
+    _fake_worker(_FakeCompleted(returncode=1, stderr=b"RuntimeError: boom"))
+    with pytest.raises(FrameExtractionError, match="could not render"):
+        frames._frames_with_lottie("ignored.tgs", 1)
+
+
+def test_a_fully_transparent_frame_is_flagged_not_treated_as_a_failure(_fake_worker):
+    """A message effect BEGINS and ENDS transparent, so an evenly spaced ladder
+    legitimately lands on blank canvases. Without the flag a caller sees a blank
+    image beside full ones and concludes the render broke."""
+    _fake_worker(_FakeCompleted(stdout=_worker_reply([0], colour=(0, 0, 0, 0))))
+
+    ((_data, meta),) = frames._frames_with_lottie("ignored.tgs", 1)
+
+    assert meta["blank"] is True
+    assert "not a failed render" in meta["blank_note"]
+
+
+def test_a_frame_with_content_is_not_flagged_blank(_fake_worker):
+    _fake_worker(_FakeCompleted(stdout=_worker_reply([0], colour=(255, 0, 0, 255))))
+
+    ((_data, meta),) = frames._frames_with_lottie("ignored.tgs", 1)
+
+    assert "blank" not in meta
+
+
+def _fake_rlottie(monkeypatch, total=31, framerate=30.0):
+    """A stand-in for rlottie_python, so the worker's own protocol code is testable
+    where the optional renderer is not installed - which is every CI job that
+    measures coverage.
+    """
+    import sys as _sys
+    import types as _types
+
+    class _Animation:
+        @staticmethod
+        def from_tgs(path):
+            if b"bad" in Path(path).read_bytes():
+                raise ValueError("Unknown compression method")
+            return _Animation()
+
+        def lottie_animation_get_totalframe(self):
+            return total
+
+        def lottie_animation_get_framerate(self):
+            return framerate
+
+        def render_pillow_frame(self, frame_num, width, height):
+            return Image.new("RGBA", (width, height), (frame_num % 256, 0, 0, 255))
+
+    module = _types.ModuleType("rlottie_python")
+    module.LottieAnimation = _Animation
+    monkeypatch.setitem(_sys.modules, "rlottie_python", module)
+
+
+def test_the_worker_writes_a_header_then_exactly_one_frame_per_index(
+    tmp_path, capsysbinary, monkeypatch
+):
+    """The contract the parent slices against, checked from the worker's side."""
+    from telegram_mcp.visual import lottie_worker
+
+    _fake_rlottie(monkeypatch)
+    path = tmp_path / "anim.tgs"
+    path.write_bytes(b"gzipped-lottie")
+
+    assert lottie_worker.render(str(path), 3, 64) == 0
+
+    header_line, _, body = capsysbinary.readouterr().out.partition(b"\n")
+    header = json.loads(header_line)
+    assert header["total"] == 31
+    assert header["framerate"] == 30.0
+    assert len(header["indexes"]) == 3
+    assert len(body) == 64 * 64 * 4 * 3
+
+
+def test_the_worker_exit_code_for_an_unopenable_file_needs_no_renderer(
+    tmp_path, capsysbinary, monkeypatch
+):
+    from telegram_mcp.visual import lottie_worker
+
+    _fake_rlottie(monkeypatch)
+    path = tmp_path / "bad.tgs"
+    path.write_bytes(b"bad payload")
+
+    assert lottie_worker.main([str(path), "3", "64"]) == lottie_worker.EXIT_CANNOT_OPEN
+    assert b"Unknown compression method" in capsysbinary.readouterr().err
+
+
+def test_the_worker_forwards_a_zero_frame_animation_verbatim(tmp_path, capsysbinary, monkeypatch):
+    """Deciding what zero frames MEANS is the parent's job - it owns the error text."""
+    from telegram_mcp.visual import lottie_worker
+
+    _fake_rlottie(monkeypatch, total=0)
+    path = tmp_path / "empty.tgs"
+    path.write_bytes(b"gzipped-lottie")
+
+    assert lottie_worker.main([str(path), "3", "64"]) == 0
+    out = capsysbinary.readouterr().out
+    assert json.loads(out.partition(b"\n")[0])["total"] == 0
+    assert out.partition(b"\n")[2] == b"", "a zero-frame reply must carry no frames"
+
+
+def test_a_render_that_fails_midway_is_its_own_exit_code(tmp_path, capsysbinary, monkeypatch):
+    """Distinct from "cannot open": the file parsed, the drawing broke."""
+    from telegram_mcp.visual import lottie_worker
+
+    _fake_rlottie(monkeypatch)
+    import rlottie_python
+
+    def _boom(self, frame_num, width, height):
+        raise RuntimeError("rasteriser gave up")
+
+    monkeypatch.setattr(rlottie_python.LottieAnimation, "render_pillow_frame", _boom)
+    path = tmp_path / "anim.tgs"
+    path.write_bytes(b"gzipped-lottie")
+
+    assert lottie_worker.main([str(path), "2", "64"]) == lottie_worker.EXIT_RENDER_FAILED
+    assert b"rasteriser gave up" in capsysbinary.readouterr().err
