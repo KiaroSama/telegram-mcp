@@ -546,7 +546,7 @@ async def wait_for_new_message(
             any unrelated conversation wakes the call and you burn turns on
             messages you are not waiting for. Other chats keep accumulating and
             are still there when you ask for them.
-        limit: Most chats to list in one answer (default 50). The pending set is
+        limit: Most chats to list in one answer (default 50, max 100). The pending set is
             bounded but not small, and every chat listed costs context; `total`
             and `has_more` say what was left out. Ask for the rest by calling
             again, or narrow with chat_id.

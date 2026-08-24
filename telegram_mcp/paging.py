@@ -40,24 +40,27 @@ LIMITS: dict[str, int] = {
     # Messages: the heaviest records here, each with text, media and sender.
     "list_messages": 200,
     "get_history": 200,
+    "get_messages": 200,
     "search_messages": 200,
     "search_global": 100,
-    "get_saved_history": 200,
+    "get_saved_history": 100,  # Telegram's own cap on messages.getSavedHistory
+    "inspect_messages": 50,  # every entity, reaction and media field per message
+    "get_message_context": 25,  # taken twice, before and after
     # Chat and dialog listings: one record per chat, cheap but numerous.
     "get_chats": 200,
     "list_chats": 200,
-    "list_saved_dialogs": 200,
+    "list_saved_dialogs": 100,
     "search_public_chats": 100,
     "list_topics": 200,
+    "get_common_chats": 100,  # Telegram caps messages.getCommonChats at 100
+    "get_participants": 1000,  # a member list is the one place four figures is normal
     # Per-message detail: a request each, so the ceiling is what one screenful of
     # reasoning can actually use.
     "get_poll_voters": 200,
     "get_message_reactions": 200,
     "get_user_photos": 100,
-    "list_disappearing_media": 100,
-    "inspect_messages": 50,
-    "search_gifs": 50,
-    "list_group_members": 200,
+    "list_disappearing_media": 200,
+    "get_gif_search": 50,
     # Pending incoming bursts held in memory, not fetched from Telegram.
     "wait_for_new_message": 100,
 }

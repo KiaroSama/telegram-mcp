@@ -76,13 +76,17 @@ async def test_a_page_past_the_end_says_so(_wire):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("page, page_size", [(0, 20), (-3, 20), (1, 0), (1, -5)])
-async def test_a_nonsense_page_is_clamped_not_turned_into_a_negative_slice(_wire, page, page_size):
+async def test_a_nonsense_page_is_refused_not_turned_into_a_negative_slice(_wire, page, page_size):
     """Telethon maps limit<=0 to ZERO dialogs, not all of them (requestiter.py:34,
-    dialogs.py:41). Without a clamp, page=-3 would go from returning real rows out of
-    the middle of the list to returning nothing, silently."""
+    dialogs.py:41), so the one outcome that must not happen is a silent empty
+    result. It used to be clamped to page 1, which is also silent -- the caller
+    asked for something impossible and got a plausible answer to a different
+    question. Now it is named, and nothing is fetched."""
     client = _wire(_DialogClient(total=250))
 
-    payload = json.loads(await mod.get_chats(page=page, page_size=page_size, account="a"))
+    result = await mod.get_chats(page=page, page_size=page_size, account="a")
 
-    assert client.limits and client.limits[0] >= 1
-    assert payload["results"], "a clamped request must still return the first page"
+    assert not result.startswith("{"), result
+    assert "Error" in result
+    assert ("page_size" if page_size < 1 else "page") in result
+    assert client.limits == [], "a request went out for a page that does not exist"

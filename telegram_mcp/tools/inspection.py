@@ -5,6 +5,7 @@ Telegram API actually say about this message, and what does its media look like
 without paying for a full download.
 """
 
+from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 from telegram_mcp.media_transfer import (  # noqa: F401  (re-exported for tests and tools)
     MAX_FRAME_SOURCE_BYTES,
@@ -283,9 +284,12 @@ async def inspect_messages(
     found in field values.
     """
     try:
+        bound = bounded(limit, LIMITS["inspect_messages"])
+        if bound.error:
+            return bound.error
+        limit = bound.value
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        limit = max(1, min(int(limit), 50))
         kwargs = {"limit": limit}
         if offset_id > 0:
             kwargs["max_id"] = offset_id
@@ -303,7 +307,15 @@ async def inspect_messages(
         # an offset-map list sized in UTF-16 code units. Inline, that whole page is built
         # before the loop can service any other tool call — the same reason the thumbnail
         # encodes above are threaded.
-        return format_tool_result(await asyncio.to_thread(_build))
+        records = await asyncio.to_thread(_build)
+        return format_tool_result(
+            records,
+            dict(
+                bound.metadata,
+                returned=len(records),
+                has_more=len(records) >= bound.value,
+            ),
+        )
     except Exception as e:
         return log_and_format_error("inspect_messages", e, chat_id=chat_id, limit=limit)
 

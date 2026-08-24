@@ -1,5 +1,6 @@
 """Profile MCP tools."""
 
+from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 
 
@@ -526,14 +527,27 @@ async def set_bot_commands(commands: list, account: str = None) -> str:
 async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: str = None) -> str:
     """
     Get profile photos of a user.
+
+    Args:
+        user_id: The user ID or username.
+        limit: How many photo ids to return (1-100; a larger value is served as 100).
     """
     try:
+        bound = bounded(limit, LIMITS["get_user_photos"])
+        if bound.error:
+            return bound.error
         cl = get_client(account)
         user = await resolve_entity(user_id, cl)
         photos = await cl(
-            functions.photos.GetUserPhotosRequest(user_id=user, offset=0, max_id=0, limit=limit)
+            functions.photos.GetUserPhotosRequest(
+                user_id=user, offset=0, max_id=0, limit=bound.value
+            )
         )
-        return json.dumps([p.id for p in photos.photos], indent=2)
+        ids = [p.id for p in photos.photos]
+        return format_tool_result(
+            [{"photo_id": photo_id} for photo_id in ids],
+            dict(bound.metadata, returned=len(ids), has_more=len(ids) >= bound.value),
+        )
     except Exception as e:
         return log_and_format_error("get_user_photos", e, user_id=user_id, limit=limit)
 

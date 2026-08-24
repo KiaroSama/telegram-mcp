@@ -17,6 +17,7 @@ text, is the payload: it ships an empty message body carrying an
 close it — is state manipulation of that attachment.
 """
 
+from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 
 # Explicitly, not via the star import: `display_text` is not part of
@@ -618,12 +619,15 @@ async def get_message_reactions(
         chat_id: The chat ID or username
         message_id: The message ID to get reactions from
         limit: How many reactors this page returns in total, across every emoji
-            (default: 50). It is not a per-emoji limit.
+            (default 50, max 200). It is not a per-emoji limit.
         offset: The `next_offset` from a previous call, to continue where it
             stopped. Omitted starts at the newest reactor; a page answering with
             `next_offset: null` was the last one.
     """
     try:
+        bound = bounded(limit, LIMITS["get_message_reactions"])
+        if bound.error:
+            return bound.error
         cl = get_client(account)
         from telethon.tl.types import ReactionEmoji, ReactionCustomEmoji
         from telethon import utils as telethon_utils
@@ -634,7 +638,7 @@ async def get_message_reactions(
             functions.messages.GetMessageReactionsListRequest(
                 peer=peer,
                 id=message_id,
-                limit=limit,
+                limit=bound.value,
                 offset=offset or None,
             )
         )

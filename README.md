@@ -74,6 +74,25 @@ Aliases live in `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/aliases.json` (o
 
 All tool results that include Telegram user-controlled content are sanitized and, where practical, returned as structured JSON.
 
+### How much a listing may return
+
+Every tool that takes a `limit`, `page_size` or `context_size` runs it through one shared rule, and
+every ceiling is declared in one table (`telegram_mcp/paging.py`) rather than decided per function —
+they used to disagree, and several tools passed whatever arrived straight into RPC iteration and then
+into the response.
+
+- A count that is not a whole number — `0`, a negative, `2.5`, `nan`, `inf`, `true`, `"lots"` — is
+  **refused** before anything is fetched. Zero and negative matter most: Telethon reads a
+  non-positive limit as *no* limit, so the value that looks like "none" is the one that asks for
+  everything.
+- A count above the tool's ceiling is **clamped**, not refused, and the reply says so:
+  `requested_limit`, `effective_limit`, a `limit_note`, and `has_more` so a short page is
+  distinguishable from a trimmed one. Each tool's docstring names its own ceiling.
+- Page-numbered listings (`get_chats`, `get_messages`, `search_global`, `get_participants`) validate
+  the page number too and stop at 100,000 records in. `(page - 1) * page_size` does not overflow in
+  Python — it just asks Telegram to skip past an arbitrary number of records — so the bound is
+  explicit.
+
 ### Incoming Event Feed (callback mode, Claude Code only)
 
 By default, an agent waits for replies by calling `wait_for_settled_message`, which blocks up to the MCP tool timeout and must be re-called — that works everywhere (Codex, Cursor, etc.) and is unchanged.
