@@ -11,6 +11,8 @@ import io
 import os
 import subprocess
 import tempfile
+import time
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
@@ -324,7 +326,7 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
         ]
     )
 
-    def _fake_run(command, timeout):
+    def _fake_run(command, timeout, deadline=None):
         # The temp path ffmpeg was handed is the one that must not reach the model.
         spooled = command[command.index("-i") + 1]
         return subprocess.CompletedProcess(
@@ -608,3 +610,53 @@ def test_naming_the_vp9_decoder_does_not_break_an_h264_source(tmp_path):
 
     assert frames._probe(str(clip))[2] == "h264"
     assert len(frames._frames_with_ffmpeg(str(clip), 2)) == 2
+
+
+# --- one request, one decoding budget ------------------------------------------
+
+
+def test_a_subprocess_is_bounded_by_the_request_budget_not_just_its_own_timeout():
+    """Ten frames at 30s each, after a 15s probe, is 315 seconds one caller can
+    ask for. The per-call timeout bounds a subprocess; only a shared deadline
+    bounds the request."""
+    recorded = {}
+
+    def _fake_run(command, capture_output, timeout, check, stdin):
+        recorded["timeout"] = timeout
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    original = frames.subprocess.run
+    frames.subprocess.run = _fake_run
+    try:
+        # Only two seconds of budget left, far less than the per-call timeout.
+        frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() + 2)
+    finally:
+        frames.subprocess.run = original
+
+    assert recorded["timeout"] <= 2, (
+        f"the call was given its full {30}s despite the request having 2s left: "
+        f"{recorded['timeout']}"
+    )
+
+
+def test_an_exhausted_budget_refuses_instead_of_starting_another_decoder():
+    with pytest.raises(frames.FrameExtractionError, match="budget"):
+        frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() - 1)
+
+
+def test_a_call_with_no_deadline_keeps_its_own_timeout():
+    """The probe path and existing callers must not change behaviour."""
+    recorded = {}
+
+    def _fake_run(command, capture_output, timeout, check, stdin):
+        recorded["timeout"] = timeout
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    original = frames.subprocess.run
+    frames.subprocess.run = _fake_run
+    try:
+        frames._run(["ffprobe"], timeout=15)
+    finally:
+        frames.subprocess.run = original
+
+    assert recorded["timeout"] == 15

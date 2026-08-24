@@ -21,10 +21,20 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 from typing import Any, Optional
 
 FFPROBE_TIMEOUT_SECONDS = 15
 FFMPEG_FRAME_TIMEOUT_SECONDS = 30
+
+# The ceiling for ONE request, across every probe and every frame it runs.
+#
+# Per-call timeouts alone do not bound a request: ten frames each allowed 30s,
+# after a 15s probe, is 315 seconds of decoding that one caller can ask for -
+# and the event loop is not the thing waiting, a worker thread is, so nothing
+# upstream notices. Every subprocess below takes the smaller of its own timeout
+# and what is left of this.
+FFMPEG_REQUEST_BUDGET_SECONDS = 60
 MAX_FRAMES = 10
 
 # n_frames is a header value (declared outright for APNG/WebP). The sample set
@@ -87,7 +97,22 @@ def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> s
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _run(command: list[str], timeout: int) -> subprocess.CompletedProcess:
+def _run(
+    command: list[str], timeout: int, deadline: Optional[float] = None
+) -> subprocess.CompletedProcess:
+    """Run a decoder, bounded by its own timeout AND the request's remaining budget.
+
+    ``deadline`` is a ``time.monotonic()`` value. Passing it is what stops N
+    frames from costing N times the per-call timeout.
+    """
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise FrameExtractionError(
+                f"Frame extraction ran out of its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
+                "for this request. Ask for fewer frames."
+            )
+        timeout = min(timeout, remaining)
     try:
         return subprocess.run(
             command,
@@ -311,7 +336,13 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
 
 
 def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
-    """Evenly spaced frames from a video file using ffmpeg input seeking."""
+    """Evenly spaced frames from a video file using ffmpeg input seeking.
+
+    One budget covers the probe and every frame: the per-call timeouts bound a
+    single subprocess, and a request asking for ten frames used to be able to
+    spend all of them in series.
+    """
+    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
     if not ffmpeg_available():
         raise FrameExtractionError(
             "ffmpeg is required to extract frames from video media but was not found on PATH. "
@@ -367,6 +398,7 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
                 "-",
             ],
             timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
+            deadline=deadline,
         )
         if result.returncode != 0 or not result.stdout:
             # The last iteration is the furthest-past-EOF seek and therefore the
