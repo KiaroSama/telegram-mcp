@@ -660,3 +660,71 @@ def test_a_call_with_no_deadline_keeps_its_own_timeout():
         frames.subprocess.run = original
 
     assert recorded["timeout"] == 15
+
+
+# --- decoders get a size ceiling too, not only a time one ----------------------
+
+
+def test_an_oversized_animation_is_refused_before_any_frame_is_decoded(tmp_path, monkeypatch):
+    """Frame COUNT was bounded; frame SIZE was not. This path opens the file
+    directly rather than through open_image_bytes, so that module's
+    MAX_DECODED_PIXELS ceiling never applied here and a 20000x20000 animated WebP
+    decoded at 400 megapixels per frame."""
+
+    class _HugeAnimation:
+        size = (20000, 20000)
+        n_frames = 10
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    # frames.py imports PIL inside the function, so the patch has to land on the
+    # real module rather than on a module-level name that does not exist.
+    monkeypatch.setattr("PIL.Image.open", lambda path: _HugeAnimation())
+
+    with pytest.raises(frames.FrameExtractionError, match="pixel decode limit"):
+        frames._frames_with_pillow("ignored.webp", count=2)
+
+
+def test_the_ffmpeg_command_scales_before_it_encodes_a_png():
+    """ffmpeg encoded at the SOURCE resolution and the tool layer downscaled after,
+    so an 8K video built an 8K PNG per frame purely to throw it away."""
+    seen = {}
+
+    def _fake_run(command, timeout, deadline=None):
+        seen["command"] = command
+        return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no frame")
+
+    original_run, original_probe = frames._run, frames._probe
+    frames._run = _fake_run
+    frames._probe = lambda path: (1.0, 25.0, "h264")
+    try:
+        with pytest.raises(frames.FrameExtractionError):
+            frames._frames_with_ffmpeg("clip.mp4", count=1)
+    finally:
+        frames._run, frames._probe = original_run, original_probe
+
+    command = seen["command"]
+    assert "-vf" in command, f"no filter chain: {command}"
+    scale = command[command.index("-vf") + 1]
+    assert "scale=" in scale
+    assert "min(iw," in scale and "min(ih," in scale, (
+        "the box must be clamped to the source, or force_original_aspect_ratio=decrease "
+        f"upscales a small sticker to fill it: {scale}"
+    )
+
+
+def test_the_batch_ceiling_leaves_room_for_the_rest_of_the_machine():
+    """Ten custom emoji at the 200 MiB per-asset limit fitted inside the old 2 GiB
+    ceiling, so one request could hold 2 GiB of raw bytes before a decoder had
+    allocated anything."""
+    from telegram_mcp.media_transfer import MAX_BATCH_BYTES, MAX_FRAME_SOURCE_BYTES, batch_width
+
+    assert MAX_BATCH_BYTES <= 512 * 1024 * 1024
+    assert (
+        batch_width(10, MAX_FRAME_SOURCE_BYTES) <= 2
+    ), "a ten-item batch at the per-asset ceiling must not run ten wide"
+    assert batch_width(10, 1024) == 10, "a small batch must still run fully concurrent"

@@ -42,7 +42,14 @@ MAX_FRAME_SOURCE_BYTES = 200 * 1024 * 1024
 
 # A batch tool downloads its items concurrently, so the peak held in memory is
 # `width * max_bytes`, not one buffer. This is the ceiling on that product.
-MAX_BATCH_BYTES = 2 * 1024 * 1024 * 1024
+#
+# 512 MiB, not the 2 GiB this used to be. The old figure was a ceiling nothing
+# legitimate approached and every hostile batch could: ten custom emoji at the
+# 200 MiB per-asset limit fitted inside it, so one request could hold 2 GiB of
+# raw bytes before a decoder had allocated anything. The server also runs
+# alongside whatever else the machine is doing, and a worker that survives its
+# own peak but starves its neighbour has not been bounded, only moved.
+MAX_BATCH_BYTES = 512 * 1024 * 1024
 
 
 def batch_width(item_count: int, max_bytes: int) -> int:

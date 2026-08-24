@@ -35,6 +35,12 @@ FFMPEG_FRAME_TIMEOUT_SECONDS = 30
 # upstream notices. Every subprocess below takes the smaller of its own timeout
 # and what is left of this.
 FFMPEG_REQUEST_BUDGET_SECONDS = 60
+
+# The longest side ffmpeg is allowed to emit. Without it ffmpeg encoded a PNG at
+# the SOURCE resolution and the tool layer downscaled afterwards - so an 8K video
+# built an 8K PNG in memory first, per frame, purely to throw it away. Telegram's
+# own preview ceiling is smaller than this, so nothing legitimate is lost.
+FFMPEG_MAX_EMITTED_SIDE = 2048
 MAX_FRAMES = 10
 
 # n_frames is a header value (declared outright for APNG/WebP). The sample set
@@ -194,7 +200,7 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
     """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
     from PIL import Image, ImageSequence
 
-    from telegram_mcp.visual.images import ImageError, encode_image
+    from telegram_mcp.visual.images import MAX_DECODED_PIXELS, ImageError, encode_image
 
     try:
         source = Image.open(path)
@@ -205,6 +211,17 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
         raise DecoderMismatch(f"Pillow could not decode this media: {type(error).__name__}.")
 
     with source:
+        # Frame COUNT was bounded below; frame SIZE was not, and this path opens
+        # the file directly rather than through open_image_bytes, so its
+        # MAX_DECODED_PIXELS ceiling never applied here. A 20000x20000 animated
+        # WebP therefore decoded at 400 megapixels per frame.
+        width, height = source.size
+        if width * height > MAX_DECODED_PIXELS:
+            raise FrameExtractionError(
+                f"Animation frames are {width}x{height} ({width * height} pixels), above "
+                f"the {MAX_DECODED_PIXELS}-pixel decode limit; refusing to decode it. "
+                "Use get_media_thumbnail for a static preview."
+            )
         total = getattr(source, "n_frames", 1)
         if total > MAX_ANIMATION_FRAMES:
             raise FrameExtractionError(
@@ -263,7 +280,14 @@ LOTTIE_RENDER_SIZE = 512
 
 
 def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
-    """Rasterise a .tgs (gzipped Lottie) with rlottie, when it is installed."""
+    """Rasterise a .tgs (gzipped Lottie) with rlottie, when it is installed.
+
+    The render size is fixed at 512x512 so memory is bounded by construction, but
+    time was not: rlottie is native code called in a worker thread, and a Lottie
+    with a pathological shape count can sit there indefinitely. The budget is
+    checked between frames - the only place this loop yields.
+    """
+    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
     from rlottie_python import LottieAnimation
 
     from telegram_mcp.visual.images import encode_image
@@ -297,6 +321,11 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
     frame_rate = animation.lottie_animation_get_framerate() or 0
     frames: list[tuple[bytes, dict[str, Any]]] = []
     for index in indexes:
+        if time.monotonic() > deadline:
+            raise FrameExtractionError(
+                f"Rendering this .tgs passed the {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
+                f"after {len(frames)} of {len(indexes)} frames. Ask for fewer frames."
+            )
         image = animation.render_pillow_frame(
             frame_num=index, width=LOTTIE_RENDER_SIZE, height=LOTTIE_RENDER_SIZE
         )
@@ -391,6 +420,15 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
                 path,
                 "-frames:v",
                 "1",
+                # Scale before the PNG encoder, not after. The box is clamped to the
+                # SOURCE size with min(): force_original_aspect_ratio=decrease fits
+                # to the box, so a bare 2048 box upscaled a 64x64 sticker to 2048
+                # and destroyed its alpha test. Clamped, a small source is untouched.
+                "-vf",
+                (
+                    f"scale=w='min(iw,{FFMPEG_MAX_EMITTED_SIDE})':h='min(ih,{FFMPEG_MAX_EMITTED_SIDE})'"
+                    ":force_original_aspect_ratio=decrease"
+                ),
                 "-f",
                 "image2pipe",
                 "-vcodec",
