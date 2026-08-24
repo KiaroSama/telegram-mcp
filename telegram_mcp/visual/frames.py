@@ -45,10 +45,6 @@ FFMPEG_REQUEST_BUDGET_SECONDS = 60
 # own preview ceiling is smaller than this, so nothing legitimate is lost.
 FFMPEG_MAX_EMITTED_SIDE = 2048
 
-# Below this a preview stops being one. A caller asking for 8 pixels has made a
-# mistake, and honouring it would produce an image nothing can read.
-MIN_EMITTED_SIDE = 64
-
 # The whole request's decoded-frame ceiling, before anything downstream resizes.
 # Per-frame limits do not bound a request: MAX_DECODED_PIXELS caps ONE frame, and
 # MAX_FRAMES caps the count, so their product was the real ceiling and it is far
@@ -147,22 +143,6 @@ def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> s
     text = text.replace(tempfile.gettempdir(), "<temp-dir>")
     text = _ABSOLUTE_PATH_RE.sub("<temp-file>", text)
     return text if len(text) <= limit else text[:limit] + "…"
-
-
-def _emitted_side(max_side: Optional[int]) -> int:
-    """The largest side a decoder should emit for this request.
-
-    Extraction used to emit at FFMPEG_MAX_EMITTED_SIDE regardless and let the
-    tool layer shrink afterwards, so asking for a 256px preview still paid for a
-    2048px decode, a 2048px PNG encode, and a 2048px image held in a list -
-    then threw most of it away. Lowering the public parameter has to lower the
-    cost, or it is a formatting option pretending to be a budget.
-
-    Never raises the ceiling: a caller asking for 4096 still gets 2048.
-    """
-    if not max_side or max_side <= 0:
-        return FFMPEG_MAX_EMITTED_SIDE
-    return max(MIN_EMITTED_SIDE, min(FFMPEG_MAX_EMITTED_SIDE, int(max_side)))
 
 
 class _Budget:
@@ -367,14 +347,10 @@ def probe_duration(path: str) -> Optional[float]:
 
 
 def _frames_with_pillow(
-    path: str,
-    count: int,
-    budget: Optional["_Budget"] = None,
-    max_side: Optional[int] = None,
+    path: str, count: int, budget: Optional["_Budget"] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
     budget = budget or _Budget.for_request()
-    side = _emitted_side(max_side)
     from PIL import Image, ImageSequence
 
     from telegram_mcp.visual.images import MAX_DECODED_PIXELS, ImageError, encode_image
@@ -424,9 +400,7 @@ def _frames_with_pillow(
                 budget.check(len(frames), wanted)
                 if index not in indexes:
                     continue
-                data, meta = encode_image(
-                    frame.convert("RGB"), image_format="png", max_dimension=side
-                )
+                data, meta = encode_image(frame.convert("RGB"), image_format="png")
                 budget.charge(data)
                 meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
                 frames.append((data, meta))
@@ -474,10 +448,7 @@ LOTTIE_EXIT_CANNOT_OPEN = 3
 
 
 def _frames_with_lottie(
-    path: str,
-    count: int,
-    budget: Optional["_Budget"] = None,
-    max_side: Optional[int] = None,
+    path: str, count: int, budget: Optional["_Budget"] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Rasterise a .tgs (gzipped Lottie) with rlottie, in a process that can be killed.
 
@@ -499,9 +470,6 @@ def _frames_with_lottie(
     worker's raw-RGBA reply is exactly 1 MiB per frame.
     """
     budget = budget or _Budget.for_request()
-    # Telegram renders .tgs at 512; asking rlottie for less is cheaper, asking for
-    # more only invents detail the vector never had.
-    side = min(LOTTIE_RENDER_SIZE, _emitted_side(max_side))
 
     from telegram_mcp.visual.images import encode_image
 
@@ -511,7 +479,7 @@ def _frames_with_lottie(
             str(Path(__file__).with_name("lottie_worker.py")),
             path,
             str(count),
-            str(side),
+            str(LOTTIE_RENDER_SIZE),
         ],
         timeout=LOTTIE_RENDER_TIMEOUT_SECONDS,
         deadline=budget.deadline,
@@ -549,7 +517,7 @@ def _frames_with_lottie(
             "it is not a valid gzipped Lottie file. Any frame rendered from it would be blank."
         )
 
-    stride = side * side * 4
+    stride = LOTTIE_RENDER_SIZE * LOTTIE_RENDER_SIZE * 4
     if len(payload) != stride * len(indexes):
         raise FrameExtractionError(
             f"The .tgs renderer returned {len(payload)} bytes for {len(indexes)} frame(s); "
@@ -563,7 +531,7 @@ def _frames_with_lottie(
         budget.check(len(frames), len(indexes))
         rendered = Image.frombytes(
             "RGBA",
-            (side, side),
+            (LOTTIE_RENDER_SIZE, LOTTIE_RENDER_SIZE),
             payload[position * stride : (position + 1) * stride],
         )
         # An empty frame is normal here and needs saying so. A message effect
@@ -602,10 +570,7 @@ def _frames_with_lottie(
 
 
 def _frames_with_ffmpeg(
-    path: str,
-    count: int,
-    budget: Optional["_Budget"] = None,
-    max_side: Optional[int] = None,
+    path: str, count: int, budget: Optional["_Budget"] = None
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from a video file using ffmpeg input seeking.
 
@@ -614,7 +579,6 @@ def _frames_with_ffmpeg(
     spend all of them in series.
     """
     budget = budget or _Budget.for_request()
-    side = _emitted_side(max_side)
     if not ffmpeg_available():
         raise FrameExtractionError(
             "ffmpeg is required to extract frames from video media but was not found on PATH. "
@@ -671,7 +635,7 @@ def _frames_with_ffmpeg(
                 # and destroyed its alpha test. Clamped, a small source is untouched.
                 "-vf",
                 (
-                    f"scale=w='min(iw,{side})':h='min(ih,{side})'"
+                    f"scale=w='min(iw,{FFMPEG_MAX_EMITTED_SIDE})':h='min(ih,{FFMPEG_MAX_EMITTED_SIDE})'"
                     ":force_original_aspect_ratio=decrease"
                 ),
                 "-f",
@@ -718,7 +682,6 @@ def extract_frames(
     count: int = 4,
     cancelled: Optional[threading.Event] = None,
     deadline: Optional[float] = None,
-    max_side: Optional[int] = None,
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Extract up to ``count`` representative frames from in-memory media bytes.
 
@@ -732,9 +695,6 @@ def extract_frames(
         deadline: A ``time.monotonic()`` value shared with the caller, so decoding
             and whatever the caller does with the frames run under ONE clock. Left
             out, decoding gets its own ``FFMPEG_REQUEST_BUDGET_SECONDS``.
-        max_side: The longest side the caller will actually keep. Decoding larger
-            and shrinking afterwards is work and memory spent on pixels that are
-            discarded, so this lowers the cost rather than only the output.
 
     Returns:
         A list of ``(png_bytes, metadata)`` tuples.
@@ -764,10 +724,10 @@ def extract_frames(
         path = handle.name
     try:
         if suffix == ".tgs":
-            return _frames_with_lottie(path, count, budget, max_side)
+            return _frames_with_lottie(path, count, budget)
         if suffix in PILLOW_ANIMATED_SUFFIXES:
             try:
-                return _frames_with_pillow(path, count, budget, max_side)
+                return _frames_with_pillow(path, count, budget)
             except DecoderMismatch:
                 # Only "Pillow cannot read this format" is worth a second decoder.
                 # A frame-count refusal or "not animated" is a decision about the
@@ -775,7 +735,7 @@ def extract_frames(
                 # class here handed the refused file straight to ffmpeg.
                 if suffix not in FFMPEG_SUFFIXES:
                     raise
-        return _frames_with_ffmpeg(path, count, budget, max_side)
+        return _frames_with_ffmpeg(path, count, budget)
     finally:
         try:
             os.unlink(path)

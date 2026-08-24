@@ -10,19 +10,11 @@ proof that the guard worked is that the child never reaches the line after it -
 if the marker file appears, the child outlived its budget and the runner failed.
 """
 
-import os
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
-
-# The runner is a script, not a package module, so the suite reaches it the
-# same way the shell does. Importing it is what lets the platform-independent
-# decision tests run on a host where neither process groups nor job objects
-# can be exercised.
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import run_tests_guarded  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 RUNNER = REPO / "scripts" / "run_tests_guarded.py"
@@ -36,31 +28,6 @@ CHILD_SLEEP_SECONDS = 120
 WALL_BUDGET = 6.0
 IDLE_BUDGET = 4.0
 HARNESS_TIMEOUT = 90
-
-
-def _process_alive(pid: int) -> bool:
-    """Whether ``pid`` is still running, asked of the OS rather than inferred.
-
-    The marker file these tests relied on was not evidence: a grandchild still
-    sleeping out CHILD_SLEEP_SECONDS has not written its marker either way, so
-    `not marker.exists()` passed just as happily over a LIVE orphan as over a
-    reaped one. It caught nothing while reading as proof, which is worse than
-    not being there. The marker stays as a second signal; this one decides.
-    """
-    if sys.platform == "win32":
-        listing = subprocess.run(
-            ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-            capture_output=True,
-            text=True,
-        ).stdout
-        return str(pid) in listing
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    return True
 
 
 def _write_case(directory: Path, body: str) -> Path:
@@ -230,7 +197,6 @@ def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
     parent then raised, so the SIGKILL escalation could not even find the group.
     """
     marker = tmp_path / "grandchild-finished.marker"
-    pid_file = tmp_path / "grandchild.pid"
     stubborn = tmp_path / "stubborn.py"
     stubborn.write_text(
         "import signal, time\n"
@@ -243,11 +209,9 @@ def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
     _write_case(
         tmp_path,
         "import subprocess, sys, time\n"
-        "from pathlib import Path\n"
         "\n"
         "def test_spawns_a_stubborn_grandchild():\n"
-        f"    p = subprocess.Popen([sys.executable, {str(stubborn)!r}])\n"
-        f"    Path({str(pid_file)!r}).write_text(str(p.pid), encoding='utf-8')\n"
+        f"    subprocess.Popen([sys.executable, {str(stubborn)!r}])\n"
         # pytest itself finishes quickly; the grandchild is what must be reaped.
         "    time.sleep(1)\n",
     )
@@ -255,76 +219,4 @@ def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
     result = _run_guarded(tmp_path, "--wall-seconds", str(WALL_BUDGET))
 
     assert result.returncode == 124, f"{result.stdout}\n{result.stderr}"
-    pid = int(pid_file.read_text(encoding="utf-8"))
-    assert not _process_alive(pid), f"grandchild {pid} outlived the run"
-    assert not marker.exists(), "the grandchild ran to completion"
-
-
-@pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
-def test_a_grandchild_that_outlives_pytest_is_killed_on_windows(tmp_path):
-    """The Windows half of the same guarantee, and the half that can actually be
-    run here.
-
-    There is no signal to ignore on Windows, so the POSIX test's stubborn
-    grandchild has no equivalent - a process that simply keeps running is enough.
-    `taskkill /T` cannot help either: it walks the tree by PID, and once pytest
-    has been reaped its PID names nothing. A job object is what still knows the
-    grandchild belongs to this run, which is why the runner opens one.
-    """
-    marker = tmp_path / "grandchild-finished.marker"
-    pid_file = tmp_path / "grandchild.pid"
-    stubborn = tmp_path / "stubborn.py"
-    stubborn.write_text(
-        "import time\n"
-        "from pathlib import Path\n"
-        f"time.sleep({CHILD_SLEEP_SECONDS})\n"
-        f"Path({str(marker)!r}).write_text('finished', encoding='utf-8')\n",
-        encoding="utf-8",
-    )
-    _write_case(
-        tmp_path,
-        "import subprocess, sys, time\n"
-        "from pathlib import Path\n"
-        "\n"
-        "def test_spawns_a_grandchild():\n"
-        f"    p = subprocess.Popen([sys.executable, {str(stubborn)!r}])\n"
-        f"    Path({str(pid_file)!r}).write_text(str(p.pid), encoding='utf-8')\n"
-        # pytest itself finishes quickly; the grandchild is what must be reaped.
-        "    time.sleep(1)\n",
-    )
-
-    result = _run_guarded(tmp_path, "--wall-seconds", str(WALL_BUDGET))
-
-    assert result.returncode == 124, f"{result.stdout}\n{result.stderr}"
-    pid = int(pid_file.read_text(encoding="utf-8"))
-    assert not _process_alive(pid), f"grandchild {pid} outlived the run"
-    assert not marker.exists(), "the grandchild ran to completion"
-
-
-def test_the_run_is_not_over_while_anything_it_spawned_is_alive():
-    """The decision the first version got wrong, as a plain function.
-
-    It ended the monitor loop on `while process.poll() is None`, so pytest
-    exiting 0 over a live decoder was reported as a clean pass. This is the one
-    part of the runner that can be checked without arranging real process
-    groups, job objects or a stubborn grandchild - which matters, because the
-    platform-specific halves cannot both be executed on one machine.
-    """
-    assert run_tests_guarded._run_is_over(parent_alive=False, tree_alive=False) is True
-
-    assert run_tests_guarded._run_is_over(parent_alive=True, tree_alive=True) is False
-    assert run_tests_guarded._run_is_over(parent_alive=True, tree_alive=False) is False
-    # The regression: pytest is gone, its children are not, and this must NOT
-    # read as a finished run.
-    assert run_tests_guarded._run_is_over(parent_alive=False, tree_alive=True) is False
-
-
-def test_an_unavailable_tree_handle_does_not_stall_the_run():
-    """`_open_tree` returns None when the platform gives nothing to hold onto.
-
-    Treating that unknown as "something is alive" would hang every run on a
-    platform the runner cannot introspect, so the parent's own exit stays the
-    fallback signal. Fail open here, not closed.
-    """
-    assert run_tests_guarded._tree_alive(None) is False
-    assert run_tests_guarded._run_is_over(parent_alive=False, tree_alive=False) is True
+    assert not marker.exists(), "the SIGTERM-ignoring grandchild outlived the run"

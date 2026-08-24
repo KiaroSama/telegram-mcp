@@ -148,14 +148,7 @@ def account_key(account: Optional[str]) -> Optional[str]:
     """
     if account is None:
         return None
-    try:
-        return normalise_account_label(str(account)).lower()
-    except ValueError:
-        # A label the canonical rule refuses cannot name a configured account, so
-        # there is nothing for it to key. Legacy rows written before this rule
-        # existed fall here and stay unresolvable rather than matching the wrong
-        # login - which is the safe direction for a row that names a recipient.
-        return None
+    return str(account).strip().lower() or None
 
 
 # A label is a SUFFIX of an env key, so it may start with a digit; it may not
