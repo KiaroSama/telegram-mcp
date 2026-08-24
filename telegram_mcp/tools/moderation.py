@@ -95,10 +95,6 @@ async def promote_admin(
             return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
 
     except Exception as e:
-        logger.error(
-            f"telegram_mcp promote_admin failed (group_id={group_id}, user_id={user_id})",
-            exc_info=True,
-        )
         return log_and_format_error("promote_admin", e, group_id=group_id, user_id=user_id)
 
 
@@ -155,10 +151,6 @@ async def demote_admin(
             return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
 
     except Exception as e:
-        logger.error(
-            f"telegram_mcp demote_admin failed (group_id={group_id}, user_id={user_id})",
-            exc_info=True,
-        )
         return log_and_format_error("demote_admin", e, group_id=group_id, user_id=user_id)
 
 
@@ -246,7 +238,6 @@ async def edit_admin_rights(
     except telethon.errors.rpcerrorlist.RightForbiddenError:
         return "Error: some of the requested rights are not allowed for your account or for this chat."
     except Exception as e:
-        logger.exception(f"edit_admin_rights failed (chat_id={chat_id}, user_id={user_id})")
         return log_and_format_error("edit_admin_rights", e, chat_id=chat_id, user_id=user_id)
 
 
@@ -278,7 +269,6 @@ async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
             records.append(rec)
         return format_tool_result(records) if records else "No admins found."
     except Exception as e:
-        logger.exception(f"get_admins failed (chat_id={chat_id})")
         return log_and_format_error("get_admins", e, chat_id=chat_id)
 
 
@@ -333,7 +323,6 @@ async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: 
         except Exception as e:
             return log_and_format_error("ban_user", e, chat_id=chat_id, user_id=user_id)
     except Exception as e:
-        logger.exception(f"ban_user failed (chat_id={chat_id}, user_id={user_id})")
         return log_and_format_error("ban_user", e, chat_id=chat_id, user_id=user_id)
 
 
@@ -392,7 +381,6 @@ async def unban_user(
         except Exception as e:
             return log_and_format_error("unban_user", e, chat_id=chat_id, user_id=user_id)
     except Exception as e:
-        logger.exception(f"unban_user failed (chat_id={chat_id}, user_id={user_id})")
         return log_and_format_error("unban_user", e, chat_id=chat_id, user_id=user_id)
 
 
@@ -426,7 +414,6 @@ async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str
             records.append(rec)
         return format_tool_result(records) if records else "No banned users found."
     except Exception as e:
-        logger.exception(f"get_banned_users failed (chat_id={chat_id})")
         return log_and_format_error("get_banned_users", e, chat_id=chat_id)
 
 
@@ -506,7 +493,6 @@ async def set_default_chat_permissions(
     except telethon.errors.rpcerrorlist.ChatNotModifiedError:
         return f"Chat {chat_id} default permissions unchanged (already matched)."
     except Exception as e:
-        logger.exception(f"set_default_chat_permissions failed (chat_id={chat_id})")
         return log_and_format_error("set_default_chat_permissions", e, chat_id=chat_id)
 
 
@@ -547,7 +533,6 @@ async def get_recent_actions(chat_id: Union[int, str], account: str = None) -> s
             default=json_serializer,
         )
     except Exception as e:
-        logger.exception(f"get_recent_actions failed (chat_id={chat_id})")
         return log_and_format_error("get_recent_actions", e, chat_id=chat_id)
 
 

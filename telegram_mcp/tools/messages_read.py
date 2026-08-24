@@ -467,7 +467,6 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str = None) -> 
 
         return format_tool_result(records)
     except Exception as e:
-        logger.exception(f"get_pinned_messages failed (chat_id={chat_id})")
         return log_and_format_error("get_pinned_messages", e, chat_id=chat_id)
 
 

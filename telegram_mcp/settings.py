@@ -13,6 +13,7 @@ it now would change what callers catch.
 """
 
 import os
+from pathlib import Path
 from typing import Optional
 
 from dotenv import load_dotenv
@@ -67,6 +68,18 @@ except ValueError:
 TELEGRAM_API_HASH = _require_credential("TELEGRAM_API_HASH")
 
 
+def state_dir() -> Path:
+    """Where runtime state goes: never the install directory.
+
+    The install directory may be read-only, is often a git checkout, and inherits
+    whatever that directory grants. The alias store already used this location;
+    the error log and file-based Telethon sessions join it so there is one place
+    to lock down rather than three. `start-mcp.ps1` computes the same path.
+    """
+    base = os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "telegram-mcp"
+
+
 def parse_bool_env(value: Optional[str], default: bool) -> bool:
     """A permissive truthy read: unset means `default`, and only the obvious words win.
 
@@ -89,5 +102,6 @@ __all__ = [
     "TELEGRAM_API_ID",
     "ValidationError",
     "parse_bool_env",
+    "state_dir",
     "_parse_bool_env",
 ]

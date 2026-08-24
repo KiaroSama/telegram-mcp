@@ -689,11 +689,11 @@ async def get_custom_emoji(
                 # Real cancellation of this tool, not one emoji failing.
                 raise outcome
             if isinstance(outcome, BaseException):
-                logger.warning(
-                    "custom emoji %s failed to resolve: %s: %s",
-                    getattr(document, "id", None),
-                    type(outcome).__name__,
-                    outcome,
+                log_event(
+                    logging.WARNING,
+                    "a custom emoji failed to resolve",
+                    error=outcome,
+                    document_id=getattr(document, "id", None),
                 )
                 records.append(
                     {

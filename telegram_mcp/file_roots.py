@@ -35,10 +35,8 @@ from telegram_mcp.handles import (
     open_allowed_directory,
     open_verified_file,
 )
+from telegram_mcp.safe_log import log_event
 from telegram_mcp.settings import _parse_bool_env
-
-logger = logging.getLogger("telegram_mcp")
-
 
 # File-path tool security configuration
 SERVER_ALLOWED_ROOTS: list[Path] = []
@@ -263,9 +261,10 @@ async def _get_effective_allowed_roots_with_status(
     except Exception as error:
         recovered_roots = _coerce_paths_from_list_roots_validation_error(error)
         if recovered_roots:
-            logger.warning(
-                "MCP client returned non-URI roots; recovered %d path(s) from validation error.",
-                len(recovered_roots),
+            log_event(
+                logging.WARNING,
+                "recovered non-URI roots from the client",
+                count=len(recovered_roots),
             )
             return recovered_roots, ROOTS_STATUS_READY
         if _is_roots_unsupported_error(error):
@@ -275,14 +274,17 @@ async def _get_effective_allowed_roots_with_status(
         # Unexpected list_roots failures (e.g. malformed client payloads that we
         # could not recover). Match empty-list behavior: opt-in server fallback.
         if fallback_roots and _server_roots_fallback_enabled():
-            logger.warning(
-                "MCP roots request failed; falling back to server CLI roots "
-                "(TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK).",
-                exc_info=True,
+            log_event(
+                logging.WARNING,
+                "roots request failed; falling back to server CLI roots "
+                "(TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK)",
+                error=error,
             )
             return fallback_roots, ROOTS_STATUS_SERVER_FALLBACK
-        logger.error(
-            "MCP roots request failed; disabling file-path tools for safety.", exc_info=True
+        log_event(
+            logging.ERROR,
+            "roots request failed; disabling file-path tools for safety",
+            error=error,
         )
         return [], ROOTS_STATUS_ERROR
 

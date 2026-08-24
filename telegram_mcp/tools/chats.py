@@ -181,8 +181,11 @@ async def list_chats(
                         full = await cl(functions.users.GetFullUserRequest(id=entity))
                         about_text = getattr(full.full_user, "about", "") or ""
                 except Exception as about_err:
-                    logger.warning(
-                        f"list_chats: failed to fetch about for {entity.id}: {about_err}"
+                    log_event(
+                        logging.WARNING,
+                        "list_chats could not fetch a description",
+                        error=about_err,
+                        entity_id=getattr(entity, "id", None),
                     )
                     about_text = "<error fetching description>"
 
@@ -301,7 +304,12 @@ async def get_chat(chat_id: Union[int, str], account: str = None) -> str:
                     "text": sanitize_user_content(last_msg.message),
                 }
         except Exception as diag_ex:
-            logger.warning(f"Could not get dialog info for {chat_id}: {diag_ex}")
+            log_event(
+                logging.WARNING,
+                "could not get dialog info",
+                error=diag_ex,
+                chat_id=chat_id,
+            )
 
         return format_tool_result([], metadata=record)
     except Exception as e:
@@ -447,9 +455,6 @@ async def get_common_chats(
 
         return "\n".join(lines)
     except Exception as e:
-        logger.exception(
-            f"get_common_chats failed (user_id={user_id}, limit={limit}, max_id={max_id})"
-        )
         return log_and_format_error(
             "get_common_chats", e, user_id=user_id, limit=limit, max_id=max_id
         )
@@ -538,9 +543,6 @@ async def get_message_read_by(
             default=json_serializer,
         )
     except Exception as e:
-        logger.exception(
-            f"get_message_read_by failed (chat_id={chat_id}, message_id={message_id})"
-        )
         return log_and_format_error(
             "get_message_read_by", e, chat_id=chat_id, message_id=message_id
         )
@@ -594,10 +596,6 @@ async def get_message_link(
             output += f"\nHTML: {html}"
         return output
     except Exception as e:
-        logger.exception(
-            f"get_message_link failed (chat_id={chat_id}, message_id={message_id}, "
-            f"thread={thread})"
-        )
         return log_and_format_error(
             "get_message_link",
             e,

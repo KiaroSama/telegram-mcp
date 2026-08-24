@@ -59,7 +59,7 @@ async def _resolve_icons(cl, buttons: list) -> None:
         )
     except Exception as error:
         # An unresolvable icon must not cost the caller the whole listing.
-        logger.debug("icon resolution failed: %s: %s", type(error).__name__, error)
+        log_event(logging.DEBUG, "icon resolution failed", error=error)
         for button in buttons:
             style = button.get("style")
             if style and style.get("icon_document_id"):

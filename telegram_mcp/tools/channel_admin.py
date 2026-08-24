@@ -140,7 +140,7 @@ async def _describe_graph(load: Optional[Callable], graph: Any, include_data: bo
         try:
             graph = await load(graph.token)
         except Exception as error:
-            logger.debug("async graph load failed: %s: %s", type(error).__name__, error)
+            log_event(logging.DEBUG, "async graph load failed", error=error)
             return {
                 "status": "not_loaded",
                 "note": (

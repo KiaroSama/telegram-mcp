@@ -13,6 +13,7 @@ from telethon.errors import AuthKeyDuplicatedError
 
 from telegram_mcp import runtime as _runtime
 from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, parse_port
+from telegram_mcp.safe_log import safe_exception
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
@@ -169,6 +170,27 @@ async def _serve(transport: str) -> None:
         await mcp.run_stdio_async()
 
 
+# Startup failures this package raises itself, whose message is a fixed sentence
+# telling the operator what to change. Everything else -- Telethon, sqlite, the
+# OS -- carries whatever the failing call was given, and is reduced to a type,
+# a length and a digest.
+#
+# The narrowness is the point: a server that will not start prints one line, and
+# an operator who cannot read it has nothing else to go on. `RuntimeError` is on
+# the list because the three that reach here are raised by `_reject_duplicate_
+# sessions`, `_connect_authorized_client` and `connection._force_reconnect`, each
+# with a literal sentence. A RuntimeError raised elsewhere with caller data would
+# also print; that is the residual cost of keeping this readable, and it is
+# bounded to the startup path, which runs before any tool call.
+_READABLE_STARTUP_ERRORS = (ValidationError, SessionLockError, RuntimeError)
+
+
+def _startup_text(error: BaseException) -> str:
+    if isinstance(error, _READABLE_STARTUP_ERRORS):
+        return str(error)
+    return safe_exception(error)
+
+
 async def _main() -> None:
     try:
         labels = ", ".join(clients.keys())
@@ -190,7 +212,12 @@ async def _main() -> None:
                 await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
                 print("Entity caches warmed.", file=sys.stderr)
             except Exception as warm_exc:
-                print(f"Entity cache warm failed: {warm_exc}", file=sys.stderr)
+                # stderr may be persisted by the launcher, so this says what
+                # failed and where, never what the failing call was given.
+                print(
+                    f"Entity cache warm failed: {safe_exception(warm_exc)}",
+                    file=sys.stderr,
+                )
 
         # Held deliberately: asyncio keeps only a weak reference to a running task,
         # so dropping this name can let the cache warm-up be collected mid-flight.
@@ -203,7 +230,7 @@ async def _main() -> None:
         )
         await _serve(transport)
     except Exception as e:
-        print(f"Error starting client: {e}", file=sys.stderr)
+        print(f"Error starting client: {_startup_text(e)}", file=sys.stderr)
         if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
             print(
                 "Database lock detected. Please ensure no other instances are running.",

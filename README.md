@@ -717,7 +717,15 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.
 - **Auth errors after password changes:** regenerate your session string.
 - **Bot-only tool rejected:** regular user accounts cannot manage bot command settings.
-- **Need details:** check your MCP client logs, terminal output, and `mcp_errors.log`.
+- **Need details:** check your MCP client logs, terminal output, and the server log at
+  `$XDG_STATE_HOME/telegram-mcp/mcp_errors.log` (`~/.local/state/telegram-mcp/mcp_errors.log`
+  by default; `%USERPROFILE%\.local\state	elegram-mcp\mcp_errors.log` on Windows). It is
+  created readable by you alone and holds bounded metadata only: the failing tool, an error
+  code, numeric ids and an exception type with a stable digest. Message text, names, titles,
+  paths and queries are deliberately not in it, so quote the error code when reporting a bug.
+- **Want the server's diagnostics on disk:** run `./start-mcp.ps1 -LogToFile` (or set
+  `TELEGRAM_MCP_LAUNCHER_LOG=1`). Only stderr is written; stdout is the MCP protocol channel
+  and carries whole tool results, so it is never persisted.
 
 ## Working on it
 

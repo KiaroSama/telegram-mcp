@@ -34,13 +34,12 @@ from telethon import TelegramClient, functions
 from telethon.errors import AuthKeyDuplicatedError, RPCError
 from telethon.sessions import StringSession
 
+from telegram_mcp.aliases import restrict_to_owner
 from telegram_mcp.client_identity import client_identity_kwargs
+from telegram_mcp.safe_log import log_event, logger, safe_exception
 from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, ValidationError
-from telegram_mcp.settings import _parse_bool_env
+from telegram_mcp.settings import _parse_bool_env, state_dir
 from telegram_mcp.singleton import try_lock_exclusive
-
-logger = logging.getLogger("telegram_mcp")
-
 
 # ---------------------------------------------------------------------------
 # Multi-account configuration
@@ -459,8 +458,7 @@ async def _force_reconnect(cl: TelegramClient):
             _CONN_VERIFY_INTERVAL
         ):
             return
-        reconnect_logger = logging.getLogger("telegram_mcp")
-        reconnect_logger.warning("Forcing reconnect...")
+        log_event(logging.WARNING, "forcing a reconnect")
         try:
             await cl.disconnect()
         except Exception:
@@ -477,8 +475,9 @@ async def _force_reconnect(cl: TelegramClient):
                 f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
             ) from exc
         if not await cl.is_user_authorized():
-            reconnect_logger.error(
-                "Client not authorized after reconnect; refusing interactive login"
+            log_event(
+                logging.ERROR,
+                "not authorized after reconnect; refusing interactive login",
             )
             # A raise, not a call to Telethon's start(). That method defaults to
             # `phone=lambda: input(...)` — a synchronous read inside a coroutine, which
@@ -495,7 +494,7 @@ async def _force_reconnect(cl: TelegramClient):
                 "`Manage-Accounts.ps1` does both for a labelled account."
             )
         _last_conn_verified[key] = time.time()
-        reconnect_logger.warning("Forced reconnect successful")
+        log_event(logging.WARNING, "forced reconnect succeeded")
 
 
 async def ensure_connected(cl: TelegramClient = None):
@@ -627,18 +626,20 @@ class RedactingFilter(logging.Filter):
 
 
 class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
-    """Rotating handler that re-asserts 0600 on the file it just opened.
+    """Rotating handler that leaves the file readable by its owner alone.
 
-    Applied on every rollover too: a fresh log created after a rotation is as
+    Applied on every rollover too: a log created after a rotation is as
     sensitive as the first one, and the umask would have given it 0644.
+
+    `restrict_to_owner`, not `os.chmod(0o600)`. On Windows chmod toggles the
+    read-only attribute and cannot clear the read bit, so the POSIX-only call
+    left the log readable by every account on the machine this project
+    targets first -- while the POSIX-only test passed.
     """
 
     def _open(self):
         stream = super()._open()
-        try:
-            os.chmod(self.baseFilename, 0o600)
-        except OSError:  # pragma: no cover - filesystem without POSIX modes
-            pass
+        restrict_to_owner(self.baseFilename)
         return stream
 
 
@@ -658,12 +659,16 @@ def _make_file_handler(path: str) -> logging.Handler:
     return handler
 
 
-# Setup robust logging with both file and console output
-logger = logging.getLogger("telegram_mcp")
+# Setup robust logging with both file and console output. `logger` itself is
+# owned by `safe_log`, which is also the only module allowed to call a method on
+# it; this module wires up where its records go.
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
 
-# Create console handler
-console_handler = logging.StreamHandler()
+# Create console handler. Explicitly stderr: on the stdio transport stdout is the
+# MCP protocol channel and carries complete tool results, so nothing diagnostic
+# may share it. StreamHandler's default happens to be stderr; saying so keeps it
+# from being changed by accident.
+console_handler = logging.StreamHandler(sys.stderr)
 console_handler.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
 console_handler.setFormatter(
     logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
@@ -672,21 +677,32 @@ console_handler.setFormatter(
 # same treatment as the file.
 console_handler.addFilter(RedactingFilter())
 
-# Create file handler with absolute path. Keep the legacy location next to
-# top-level main.py, even though runtime code now lives inside telegram_mcp/.
+# The log lives in the state directory, not beside the installation. Next to
+# main.py it landed inside the git checkout: committed or synced by accident,
+# inheriting whatever that directory grants, and unwritable wherever the
+# install is read-only. Same location as the alias store and file sessions, so
+# there is one directory to lock down.
 package_dir = os.path.dirname(os.path.abspath(__file__))
 script_dir = os.path.dirname(package_dir)
-log_file_path = os.path.join(script_dir, "mcp_errors.log")
+_log_directory = state_dir()
+log_file_path = str(_log_directory / "mcp_errors.log")
 
 logger.addHandler(console_handler)
 try:
+    _log_directory.mkdir(parents=True, exist_ok=True)
+    restrict_to_owner(_log_directory)
     file_handler = _make_file_handler(log_file_path)
     logger.addHandler(file_handler)
-    logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
-    print(f"WARNING: Error setting up log file: {log_error}", file=sys.stderr)
+    # stderr, never stdout: on the stdio transport stdout is the MCP protocol
+    # channel and a stray line there corrupts the session. Type only -- the
+    # message can name a path.
+    print(
+        f"WARNING: could not set up the log file: {type(log_error).__name__}",
+        file=sys.stderr,
+    )
     # Console-only logging; the console handler is already attached.
-    logger.error(f"Failed to set up log file handler: {log_error}")
+    log_event(logging.ERROR, "could not set up the log file handler", error=log_error)
 
 
 __all__ = [
@@ -710,9 +726,12 @@ __all__ = [
     "ensure_connected",
     "get_client",
     "is_multi_mode",
+    "log_event",
     "log_file_path",
     "logger",
     "package_dir",
+    "restrict_to_owner",
+    "safe_exception",
     "script_dir",
     "with_account",
 ]

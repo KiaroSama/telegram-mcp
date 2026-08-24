@@ -32,8 +32,10 @@ if ($Arguments.Count -lt 7 -or
 $logPath = $Arguments[4]
 [Console]::Out.WriteLine('fake-normal-output')
 [Console]::Error.WriteLine('fake-error-output')
+# Only stderr reaches the file, because only stderr is teed: stdout is the MCP
+# protocol channel and carries whole tool results.
 [IO.File]::AppendAllText(
     $logPath,
-    "fake-normal-output$([Environment]::NewLine)fake-error-output$([Environment]::NewLine)",
+    "fake-error-output$([Environment]::NewLine)",
     [Text.UTF8Encoding]::new($false)
 )

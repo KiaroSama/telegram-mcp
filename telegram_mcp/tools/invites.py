@@ -122,7 +122,6 @@ async def get_invite_link(chat_id: Union[int, str], account: str = None) -> str:
             "(reading it needs the invite-users right). export_chat_invite creates one."
         )
     except Exception as e:
-        logger.exception(f"get_invite_link failed (chat_id={chat_id})")
         return log_and_format_error("get_invite_link", e, chat_id=chat_id)
 
 
@@ -160,7 +159,6 @@ async def export_chat_invite(chat_id: Union[int, str], account: str = None) -> s
             return link
         return "Telegram accepted the request but returned no link."
     except Exception as e:
-        logger.exception(f"export_chat_invite failed (chat_id={chat_id})")
         return log_and_format_error("export_chat_invite", e, chat_id=chat_id)
 
 
@@ -211,7 +209,6 @@ async def _redeem_invite(tool_name: str, invite_hash: str, account: str) -> str:
         )
     except Exception as e:
         # The hash is a credential; the error report gets its length, not its value.
-        logger.exception(f"{tool_name} failed (hash={_redact_hash(invite_hash)})")
         return log_and_format_error(tool_name, e, hash=_redact_hash(invite_hash))
 
     chats = getattr(result, "chats", None)

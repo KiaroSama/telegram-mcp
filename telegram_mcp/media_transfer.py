@@ -16,11 +16,12 @@ importing another tool module's privates is how that dependency used to be
 spelled.
 """
 
+import logging
 import os
 from pathlib import Path
 from typing import Optional
 
-from telegram_mcp.runtime import logger
+from telegram_mcp.safe_log import log_event
 
 from telethon import utils
 from telethon.errors import (
@@ -94,7 +95,11 @@ async def _stream_capped(cl, target, max_bytes: int) -> tuple:
                 # raises AttributeError from in here and replaces the failure that
                 # actually matters — including the stale-reference error that
                 # effects.py retries on.
-                logger.debug("iter_download close() failed: %s: %s", type(error).__name__, error)
+                log_event(
+                    logging.DEBUG,
+                    "iter_download close() failed",
+                    error=error,
+                )
     return bytes(buffer), False
 
 

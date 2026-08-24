@@ -150,7 +150,6 @@ async def save_draft(
 
         return f"Draft saved to chat {chat_id}. Open the chat in Telegram to see and send it."
     except Exception as e:
-        logger.exception(f"save_draft failed (chat_id={chat_id})")
         return log_and_format_error("save_draft", e, chat_id=chat_id)
 
 
@@ -212,7 +211,6 @@ async def get_drafts(account: str = None) -> str:
             {"drafts": drafts_info, "count": len(drafts_info)}, indent=2, default=json_serializer
         )
     except Exception as e:
-        logger.exception("get_drafts failed")
         return log_and_format_error("get_drafts", e)
 
 
@@ -244,7 +242,6 @@ async def clear_draft(chat_id: Union[int, str], account: str = None) -> str:
 
         return f"Draft cleared from chat {chat_id}."
     except Exception as e:
-        logger.exception(f"clear_draft failed (chat_id={chat_id})")
         return log_and_format_error("clear_draft", e, chat_id=chat_id)
 
 

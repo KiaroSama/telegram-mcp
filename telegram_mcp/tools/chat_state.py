@@ -89,10 +89,8 @@ async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
             return f"Chat {chat_id} muted (using alternative method)."
         except Exception as alt_e:
-            logger.exception(f"mute_chat (alt method) failed (chat_id={chat_id})")
             return log_and_format_error("mute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"mute_chat failed (chat_id={chat_id})")
         return log_and_format_error("mute_chat", e, chat_id=chat_id)
 
 
@@ -134,10 +132,8 @@ async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
             return f"Chat {chat_id} unmuted (using alternative method)."
         except Exception as alt_e:
-            logger.exception(f"unmute_chat (alt method) failed (chat_id={chat_id})")
             return log_and_format_error("unmute_chat", alt_e, chat_id=chat_id)
     except Exception as e:
-        logger.exception(f"unmute_chat failed (chat_id={chat_id})")
         return log_and_format_error("unmute_chat", e, chat_id=chat_id)
 
 

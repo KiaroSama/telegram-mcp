@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from telegram_mcp import aliases, connection, runtime
+from telegram_mcp import aliases, connection, runtime, safe_log
 
 CANARY = "canary-9Yb3Qw-do-not-log"
 SESSION_CANARY = "1" + "A" * 48  # shaped like a Telethon StringSession
@@ -41,7 +41,9 @@ def logged(tmp_path, monkeypatch):
     test_logger.setLevel(logging.ERROR)
     test_logger.propagate = False
     test_logger.addHandler(handler)
-    monkeypatch.setattr(runtime, "logger", test_logger)
+    # `safe_log` owns the logger and is the only module that calls a method on
+    # it, so that is the name a test has to replace.
+    monkeypatch.setattr(safe_log, "logger", test_logger)
     try:
         yield path
     finally:

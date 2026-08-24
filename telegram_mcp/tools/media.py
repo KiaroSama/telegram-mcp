@@ -303,9 +303,10 @@ async def download_media(
                     staging.remove_tree()
                     parent.rmdir(staging_name)
                 except (OSError, UnsafeTarget) as cleanup_error:
-                    logger.warning(
-                        "could not remove the download directory: %s",
-                        type(cleanup_error).__name__,
+                    log_event(
+                        logging.WARNING,
+                        "could not remove the download directory",
+                        error=cleanup_error,
                     )
                 finally:
                     staging.close()
@@ -614,7 +615,6 @@ async def get_gif_search(
             },
         )
     except Exception as e:
-        logger.exception("get_gif_search failed")
         return log_and_format_error("get_gif_search", e, limit=limit)
 
 

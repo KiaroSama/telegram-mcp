@@ -47,7 +47,12 @@ async def create_group(title: str, user_ids: List[Union[int, str]], account: str
                 user = await resolve_entity(user_id, cl)
                 users.append(user)
             except Exception as e:
-                logger.error(f"Failed to get entity for user ID {user_id}: {e}")
+                log_event(
+                    logging.ERROR,
+                    "could not resolve a user for the new group",
+                    error=e,
+                    user_id=user_id,
+                )
                 return f"Error: Could not find user with ID {user_id}"
 
         if not users:
@@ -84,7 +89,6 @@ async def create_group(title: str, user_ids: List[Union[int, str]], account: str
             else:
                 raise  # Let the outer exception handler catch it
     except Exception as e:
-        logger.exception(f"create_group failed (title={title}, user_ids={user_ids})")
         return log_and_format_error("create_group", e, title=title, user_ids=user_ids)
 
 
@@ -137,7 +141,6 @@ async def edit_chat_title(chat_id: Union[int, str], title: str, account: str = N
             return f"Cannot edit title for this entity type ({type(entity)})."
         return f"Chat {chat_id} title updated to '{sanitize_name(title)}'."
     except Exception as e:
-        logger.exception(f"edit_chat_title failed (chat_id={chat_id}, title='{title}')")
         return log_and_format_error("edit_chat_title", e, chat_id=chat_id, title=title)
 
 
@@ -183,7 +186,6 @@ async def edit_chat_photo(
 
             return f"Chat {chat_id} photo updated from {source.path}."
     except Exception as e:
-        logger.exception(f"edit_chat_photo failed (chat_id={chat_id}, file_path='{file_path}')")
         return log_and_format_error("edit_chat_photo", e, chat_id=chat_id, file_path=file_path)
 
 
@@ -218,7 +220,6 @@ async def edit_chat_about(chat_id: Union[int, str], about: str, account: str = N
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Error: admin rights required to edit the chat description."
     except Exception as e:
-        logger.exception(f"edit_chat_about failed (chat_id={chat_id})")
         return log_and_format_error("edit_chat_about", e, chat_id=chat_id)
 
 
@@ -253,7 +254,6 @@ async def delete_chat_photo(chat_id: Union[int, str], account: str = None) -> st
 
         return f"Chat {chat_id} photo deleted."
     except Exception as e:
-        logger.exception(f"delete_chat_photo failed (chat_id={chat_id})")
         return log_and_format_error("delete_chat_photo", e, chat_id=chat_id)
 
 
@@ -291,7 +291,6 @@ async def toggle_slow_mode(chat_id: Union[int, str], seconds: int = 0, account: 
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Error: admin rights required to toggle slow mode."
     except Exception as e:
-        logger.exception(f"toggle_slow_mode failed (chat_id={chat_id}, seconds={seconds})")
         return log_and_format_error("toggle_slow_mode", e, chat_id=chat_id, seconds=seconds)
 
 
@@ -338,8 +337,10 @@ async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
                 return f"Left basic group {chat_name} (ID: {chat_id})."
             except Exception as chat_err:
                 # If the above fails, try the second approach
-                logger.warning(
-                    f"First leave attempt failed: {chat_err}, trying alternative method"
+                log_event(
+                    logging.WARNING,
+                    "the first leave attempt failed; trying the alternative",
+                    error=chat_err,
                 )
 
                 try:
@@ -366,8 +367,6 @@ async def leave_chat(chat_id: Union[int, str], account: str = None) -> str:
             )
 
     except Exception as e:
-        logger.exception(f"leave_chat failed (chat_id={chat_id})")
-
         # Provide helpful hint for common errors
         error_str = str(e).lower()
         if "invalid" in error_str and "chat" in error_str:
@@ -536,10 +535,6 @@ async def invite_to_group(
             return log_and_format_error("invite_to_group", e, group_id=group_id, user_ids=user_ids)
 
     except Exception as e:
-        logger.error(
-            f"telegram_mcp invite_to_group failed (group_id={group_id}, user_ids={user_ids})",
-            exc_info=True,
-        )
         return log_and_format_error("invite_to_group", e, group_id=group_id, user_ids=user_ids)
 
 

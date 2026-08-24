@@ -85,11 +85,11 @@ async def _poll_answers_max(cl, account) -> int:
                 value = published
             break
     except Exception as error:
-        logger.debug(
-            "poll_answers_max lookup failed, using %d: %s: %s",
-            value,
-            type(error).__name__,
-            error,
+        log_event(
+            logging.DEBUG,
+            "poll_answers_max lookup failed; using the fallback",
+            error=error,
+            fallback=value,
         )
 
     _poll_answers_max_cache[label] = value
@@ -445,7 +445,6 @@ async def create_poll(
         # The question and its options are user-supplied text. They identify
         # nothing a reader of the log needs and they are exactly what a failure
         # report must not copy, so only the shape of the poll goes out.
-        logger.exception(f"create_poll failed (chat_id={chat_id})")
         return log_and_format_error("create_poll", e, chat_id=chat_id, option_count=len(options))
 
 
@@ -487,9 +486,6 @@ async def send_reaction(
         )
         return f"Reaction '{emoji}' sent to message {message_id} in chat {chat_id}."
     except Exception as e:
-        logger.exception(
-            f"send_reaction failed (chat_id={chat_id}, message_id={message_id}, emoji={emoji})"
-        )
         return log_and_format_error(
             "send_reaction", e, chat_id=chat_id, message_id=message_id, emoji=emoji
         )
@@ -526,7 +522,6 @@ async def remove_reaction(
         )
         return f"Reaction removed from message {message_id} in chat {chat_id}."
     except Exception as e:
-        logger.exception(f"remove_reaction failed (chat_id={chat_id}, message_id={message_id})")
         return log_and_format_error("remove_reaction", e, chat_id=chat_id, message_id=message_id)
 
 
@@ -620,9 +615,6 @@ async def get_message_reactions(
             default=json_serializer,
         )
     except Exception as e:
-        logger.exception(
-            f"get_message_reactions failed (chat_id={chat_id}, message_id={message_id})"
-        )
         return log_and_format_error(
             "get_message_reactions", e, chat_id=chat_id, message_id=message_id
         )

@@ -181,8 +181,8 @@ async def _feed_loop(settle_ms: int) -> None:
                 await ev.wait()
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logging.getLogger("telegram_mcp").exception("error in incoming feed loop")
+        except Exception as error:
+            log_event(logging.ERROR, "error in the incoming feed loop", error=error)
             await asyncio.sleep(1.0)
 
 
@@ -207,8 +207,8 @@ def _maybe_autostart_feed() -> None:
     if _parse_bool_env(os.getenv("TELEGRAM_EVENT_FEED"), False):
         try:
             _touch_feed_file()
-        except OSError:
-            logging.getLogger("telegram_mcp").exception("cannot create event feed file")
+        except OSError as error:
+            log_event(logging.ERROR, "cannot create the event feed file", error=error)
             return
         _start_feed(_feed_settle_ms)
 
@@ -254,8 +254,8 @@ async def _on_new_incoming(account: str, event) -> None:
             rec["count"] += 1
         _maybe_autostart_feed()
         _get_activity_event().set()
-    except Exception:
-        logging.getLogger("telegram_mcp").exception("error in _on_new_incoming")
+    except Exception as error:
+        log_event(logging.ERROR, "error in _on_new_incoming", error=error)
 
 
 def register_incoming_handlers() -> None:
@@ -272,8 +272,8 @@ def register_incoming_handlers() -> None:
             cl.add_event_handler(
                 partial(_on_new_incoming, label), _events.NewMessage(incoming=True)
             )
-        except Exception:
-            logging.getLogger("telegram_mcp").exception("failed to register incoming handler")
+        except Exception as error:
+            log_event(logging.ERROR, "failed to register the incoming handler", error=error)
 
 
 @mcp.tool(

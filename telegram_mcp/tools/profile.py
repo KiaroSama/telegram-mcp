@@ -185,7 +185,6 @@ async def get_privacy_settings(key: str = "status", account: str = None) -> str:
         rules = [_describe_privacy_rule(rule) for rule in getattr(settings, "rules", None) or []]
         return format_tool_result(rules, {"key": key, "rule_count": len(rules)})
     except Exception as e:
-        logger.exception("get_privacy_settings failed")
         return log_and_format_error("get_privacy_settings", e, key=key)
 
 
@@ -320,7 +319,6 @@ async def set_privacy_settings(
             {"replaced": True},
         )
     except Exception as e:
-        logger.exception(f"set_privacy_settings failed (key={key})")
         return log_and_format_error("set_privacy_settings", e, key=key)
 
 
@@ -444,7 +442,6 @@ async def get_bot_info(bot_username: str, account: str = None) -> str:
             )
         return json.dumps(info, indent=2)
     except Exception as e:
-        logger.exception(f"get_bot_info failed (bot_username={bot_username})")
         return log_and_format_error("get_bot_info", e, bot_username=bot_username)
 
 
@@ -508,10 +505,8 @@ async def set_bot_commands(commands: list, account: str = None) -> str:
         who = getattr(me, "username", None) or getattr(me, "id", "this bot")
         return f"Set {len(bot_commands)} command(s) for {who}."
     except ImportError as ie:
-        logger.exception(f"set_bot_commands failed - ImportError: {ie}")
         return log_and_format_error("set_bot_commands", ie)
     except Exception as e:
-        logger.exception("set_bot_commands failed")
         return log_and_format_error("set_bot_commands", e)
 
 

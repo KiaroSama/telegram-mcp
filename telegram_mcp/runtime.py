@@ -55,6 +55,13 @@ try:
 except ImportError:  # pragma: no cover - Windows fallback
     fcntl = None
 
+from telegram_mcp.safe_log import (  # noqa: F401 - historic re-exports
+    log_event,
+    safe_exception,
+    safe_value,
+    _safe_context_value,
+    _safe_exception,
+)
 from telegram_mcp.singleton import try_lock_exclusive
 
 from functools import wraps
@@ -297,69 +304,6 @@ def _telegram_refusal(error: Exception) -> Optional[str]:
     return TELEGRAM_REFUSALS.get(type(error).__name__)
 
 
-def _safe_context_value(value: Any) -> Any:
-    """What may be written about one context value.
-
-    Numbers, booleans and None are structural: chat ids, message ids, limits and
-    flags are what make a log line actionable and none of them is content. Every
-    other value is replaced by its type, its size and a short digest -- enough to
-    see that two reports are about the same input, and not enough to read it.
-
-    This is the half of the redaction that does not have to guess: the call
-    sites pass search queries, phone numbers, contact names, aliases, chat
-    titles, file paths, poll questions and captions under keys of their own
-    choosing, and the old code interpolated every one of them with a bare `str`.
-    """
-    if value is None or isinstance(value, (bool, int, float)):
-        return value
-    text = value if isinstance(value, str) else repr(value)
-    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
-    return f"<{type(value).__name__} len={len(text)} #{digest}>"
-
-
-# How many innermost frames of a failure are worth keeping. Enough to name the
-# call that failed and who called it; not the whole stack, which is mostly this
-# server's own plumbing repeated in every report.
-_LOGGED_FRAMES = 6
-
-
-def _safe_exception(error: BaseException) -> str:
-    """Everything about a failure that may be written down.
-
-    `exc_info=True` used to hand the handler the rendered traceback, which ends
-    in the exception's own text - and an exception carries whatever the failing
-    call was given: a caption, a filename, a contact's name, a search query.
-    `RedactingFilter` can only scrub the shapes it was told about, so an
-    arbitrary canary planted in an exception came back out of the log verbatim.
-
-    What survives is the same allowlist `_safe_context_value` applies to
-    keywords: type, size, digest. The digest is what still makes two reports
-    comparable - the same failure keeps the same eight characters - and the
-    frames say where it happened without quoting anything the caller supplied.
-    """
-    text = str(error)
-    digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:8]
-    parts = [f"{type(error).__name__} len={len(text)} #{digest}"]
-
-    # `raise X from Y` renders both, so scrubbing only the outer one leaks the
-    # inner text. Types only, and no recursion: one link is the useful one.
-    cause = error.__cause__ or error.__context__
-    if cause is not None:
-        parts.append(f"caused by {type(cause).__name__}")
-
-    frames = traceback.extract_tb(error.__traceback__)[-_LOGGED_FRAMES:]
-    if frames:
-        # PurePosixPath/PureWindowsPath would each be wrong on the other host;
-        # rpartition on both separators is the same answer everywhere.
-        names = [
-            f"{frame.filename.rpartition('/')[2].rpartition(chr(92))[2]}"
-            f":{frame.lineno}:{frame.name}"
-            for frame in reversed(frames)
-        ]
-        parts.append("at " + " <- ".join(names))
-    return " ".join(parts)
-
-
 def log_and_format_error(
     function_name: str,
     error: Exception,
@@ -407,13 +351,12 @@ def log_and_format_error(
         # purpose is to correlate a user's report with a log line has to survive one.
         error_code = f"{prefix_str}-ERR-{zlib.crc32(function_name.encode('utf-8')) % 1000:03d}"
 
-    # Format the additional context parameters
-    context = ", ".join(f"{k}={_safe_context_value(v)}" for k, v in kwargs.items())
-
-    # Log the failure, never its text: see _safe_exception.
-    logger.error(
-        f"Error in {function_name} ({context}) - Code: {error_code} - "
-        f"failure: {_safe_exception(error)}"
+    # One bounded line through the only primitive that writes one. The tool name
+    # and the error code are both this project's own strings, so they go in the
+    # event itself: a caller quoting a code in a bug report has to be able to
+    # grep for it.
+    log_event(
+        logging.ERROR, f"Error in {function_name} (code {error_code})", error=error, **kwargs
     )
 
     # Return a user-friendly message

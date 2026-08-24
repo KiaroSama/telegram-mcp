@@ -1,5 +1,9 @@
 [CmdletBinding()]
 param(
+    # Persist the server's DIAGNOSTIC output (stderr) to a file under the state
+    # directory. Off by default, and never stdout: see the note below.
+    [switch] $LogToFile,
+
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $ServerArguments = @()
 )
@@ -9,6 +13,17 @@ Set-StrictMode -Version Latest
 
 $exitCode = 1
 $logPath = $null
+
+# STDOUT IS THE MCP PROTOCOL CHANNEL.
+#
+# Under the stdio transport the server speaks JSON-RPC over stdout, and those
+# frames carry complete tool results: message text, contact names, chat titles,
+# files listed, whatever the client asked for. Teeing stdout wrote all of it to
+# disk. Only stderr -- which the server uses for diagnostics, and which
+# `telegram_mcp.safe_log` already bounds -- is ever persisted here, and only when
+# the operator asks for it with -LogToFile or TELEGRAM_MCP_LAUNCHER_LOG.
+$script:LogEnabled = $LogToFile.IsPresent -or
+    ($env:TELEGRAM_MCP_LAUNCHER_LOG -in @('1', 'true', 'yes', 'on'))
 
 # A server run can log for days, so the file needs a ceiling as well as a count:
 # the tee below rolls at LogMaxBytes keeping one previous part, and Remove-StaleFiles
@@ -61,8 +76,10 @@ function Remove-StaleFiles {
 
 try {
     try {
+        if (-not $script:LogEnabled) { throw 'not requested' }
         $logsDirectory = Join-Path (Get-StateDirectory) 'logs'
         [void] (New-Item -ItemType Directory -Path $logsDirectory -Force)
+        [void] (Set-OwnerOnlyAcl -Path $logsDirectory)
 
         $timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
         $logPath = Join-Path $logsDirectory "start-mcp_$timestamp.log"
@@ -77,7 +94,10 @@ try {
         Remove-StaleFiles -Directory $logsDirectory -Filter 'start-mcp_*.log' -Keep $script:LogRetention
     }
     catch {
-        Write-Warning "File logging is unavailable: $($_.Exception.Message)"
+        $logPath = $null
+        if ($script:LogEnabled) {
+            Write-Warning "File logging is unavailable: $($_.Exception.Message)"
+        }
     }
 
     $uv = Get-Command uv -ErrorAction SilentlyContinue
@@ -87,7 +107,9 @@ try {
 
     $logDisplay = if ($logPath) { $logPath } else { 'unavailable' }
     $startMessage = "[$([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss UTC'))] [INFO] [launcher] Starting: uv run main.py; log=$logDisplay"
-    Write-Host $startMessage
+    # stderr, not Write-Host: the host stream is stdout once redirected, and the
+    # client reads this process's stdout as the MCP protocol.
+    [Console]::Error.WriteLine($startMessage)
     if ($logPath) {
         [IO.File]::AppendAllText($logPath, "$startMessage$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
     }
@@ -96,13 +118,45 @@ try {
     try {
         if ($logPath) {
             $pythonWrapper = @'
-import os, re, runpy, sys, threading, traceback
+import os, re, runpy, subprocess, sys, threading, traceback
 
+# STDERR ONLY. On the stdio transport stdout carries the MCP protocol -- complete
+# tool results, i.e. the user's own messages, contacts and files -- so it is
+# passed straight through and never written to disk. stderr is diagnostics, which
+# telegram_mcp.safe_log already bounds.
 ansi = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\))")
 lock = threading.RLock()
 log_path, max_bytes, script, *args = sys.argv[1:]
 max_bytes = int(max_bytes)
+
+def secure(path):
+    # Owner-only, on every file this wrapper creates -- the first one and every
+    # one a rollover makes. os.chmod is not that guarantee on Windows: it toggles
+    # the read-only attribute and cannot clear the read bit, so icacls is the
+    # only owner-only mechanism available there without a dependency.
+    # `/inheritance:r` is the half that matters: `/grant` alone ADDS an entry and
+    # leaves the inherited BUILTIN\Users one in place.
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
+    user = os.environ.get("USERNAME")
+    if not user:
+        return
+    domain = os.environ.get("USERDOMAIN")
+    principal = (domain + "\\" + user) if domain else user
+    try:
+        subprocess.run(
+            ["icacls", path, "/inheritance:r", "/grant:r", principal + ":(F)"],
+            capture_output=True, timeout=10, check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
 log = open(log_path, "a", encoding="utf-8", buffering=1)
+secure(log_path)
 
 def roll():
     # One previous part, not an archive: a server that logs for days must not be
@@ -113,7 +167,9 @@ def roll():
         os.replace(log_path, log_path + ".1")
     except OSError:
         pass
+    secure(log_path + ".1")
     log = open(log_path, "a", encoding="utf-8", buffering=1)
+    secure(log_path)
 
 class Tee:
     def __init__(self, stream):
@@ -139,8 +195,8 @@ class Tee:
     def __getattr__(self, name):
         return getattr(self.stream, name)
 
-stdout, stderr = sys.stdout, sys.stderr
-sys.stdout, sys.stderr = Tee(stdout), Tee(stderr)
+stderr = sys.stderr
+sys.stderr = Tee(stderr)
 sys.argv = [script, *args]
 exit_code = 0
 try:
@@ -186,7 +242,7 @@ catch {
 }
 finally {
     $stopMessage = "[$([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss UTC'))] [INFO] [launcher] Stopped with exit code $exitCode."
-    Write-Host $stopMessage
+    [Console]::Error.WriteLine($stopMessage)
     if ($logPath) {
         [IO.File]::AppendAllText($logPath, "$stopMessage$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
     }

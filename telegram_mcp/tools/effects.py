@@ -326,5 +326,5 @@ async def get_message_effect(
     except (FrameExtractionError, ImageError) as e:
         return f"Could not render effect {effect_id}: {e}"
     except Exception as e:
-        logger.exception(f"get_message_effect failed for {effect_id}")
+        log_event(logging.ERROR, "get_message_effect failed", error=e, effect_id=effect_id)
         return f"Error resolving effect {effect_id}: {e}"

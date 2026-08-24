@@ -117,7 +117,7 @@ try {
     $chattyLog = Join-Path $wrapperTestDirectory 'chatty.log'
     [IO.File]::WriteAllText(
         $chattyScript,
-        "for i in range(400): print('x' * 100)$([Environment]::NewLine)",
+        "import sys$([Environment]::NewLine)for i in range(400): print('x' * 100, file=sys.stderr)$([Environment]::NewLine)",
         [Text.UTF8Encoding]::new($false)
     )
 
@@ -134,6 +134,32 @@ try {
         throw 'Rolling kept more than one previous part.'
     }
     Write-Output 'ok  the launcher tee rolls at its size ceiling and keeps one part'
+
+    # Under the stdio transport stdout carries the MCP protocol -- complete tool
+    # results, i.e. the user's own messages, contacts and files. It reaches the
+    # terminal and never the disk.
+    $protocolScript = Join-Path $wrapperTestDirectory 'protocol.py'
+    $protocolLog = Join-Path $wrapperTestDirectory 'protocol.log'
+    [IO.File]::WriteAllText(
+        $protocolScript,
+        "import sys$([Environment]::NewLine)print('protocol-payload-must-not-be-logged')$([Environment]::NewLine)print('diagnostic-line', file=sys.stderr)$([Environment]::NewLine)",
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    $protocolOutput = & $python -c $wrapperMatch.Groups['body'].Value $protocolLog 0 $protocolScript 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Python tee wrapper returned $LASTEXITCODE for the stdout test." }
+    $protocolTerminalText = $protocolOutput -join [Environment]::NewLine
+    [string] $protocolLogText = Get-Content -LiteralPath $protocolLog -Raw
+    if ($protocolTerminalText -notmatch 'protocol-payload-must-not-be-logged') {
+        throw 'The wrapper swallowed stdout instead of passing it through.'
+    }
+    if ($protocolLogText -match 'protocol-payload-must-not-be-logged') {
+        throw 'The wrapper wrote the MCP protocol channel to disk.'
+    }
+    if ($protocolLogText -notmatch 'diagnostic-line') {
+        throw 'The wrapper stopped persisting stderr diagnostics.'
+    }
+    Write-Output 'ok  the wrapper persists stderr only and leaves stdout on the wire'
 }
 finally {
     [IO.Directory]::Delete($wrapperTestDirectory, $true)
@@ -182,12 +208,25 @@ foreach ($shipped in $scripts) {
 if ($launcher -notmatch 'LogMaxBytes') {
     throw 'The launcher log has no size ceiling; a long-running server fills the disk.'
 }
+# Under the stdio transport stdout IS the MCP protocol channel and carries whole
+# tool results. Teeing it wrote the user's messages, contacts and files to disk.
+if ($launcher -match 'sys\.stdout\s*=\s*Tee') {
+    throw 'The launcher tees stdout, which is the MCP protocol channel.'
+}
+if ($launcher -notmatch 'sys\.stderr\s*=\s*Tee') {
+    throw 'The launcher no longer persists stderr diagnostics at all.'
+}
+if ($launcher -notmatch 'LogToFile') {
+    throw 'Persisting output to disk is not opt-in.'
+}
 
 # XDG_STATE_HOME points the launcher at a throwaway directory, so this asserts the
 # real path resolution rather than reaching into the operator's own state.
 $stateHome = Join-Path ([IO.Path]::GetTempPath()) ("tg-state-" + [guid]::NewGuid())
 $originalStateHome = $env:XDG_STATE_HOME
 $env:XDG_STATE_HOME = $stateHome
+$originalLauncherLog = $env:TELEGRAM_MCP_LAUNCHER_LOG
+$env:TELEGRAM_MCP_LAUNCHER_LOG = '1'
 $logsDirectory = Join-Path $stateHome 'telegram-mcp/logs'
 
 $originalPath = $env:PATH
@@ -209,10 +248,13 @@ try {
     }
 
     $log = Get-Content -LiteralPath $newLogs[0] -Raw
-    foreach ($expected in 'fake-normal-output', 'fake-error-output', '[INFO] [launcher]') {
+    foreach ($expected in 'fake-error-output', '[INFO] [launcher]') {
         if ($log -notmatch [regex]::Escape($expected)) {
             throw "Launcher log is missing: $expected"
         }
+    }
+    if ($log -match [regex]::Escape('fake-normal-output')) {
+        throw 'The launcher wrote stdout to disk; stdout is the MCP protocol channel.'
     }
 }
 finally {
@@ -224,7 +266,45 @@ finally {
     else {
         $env:XDG_STATE_HOME = $originalStateHome
     }
+    if ($null -eq $originalLauncherLog) {
+        Remove-Item -LiteralPath Env:TELEGRAM_MCP_LAUNCHER_LOG -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:TELEGRAM_MCP_LAUNCHER_LOG = $originalLauncherLog
+    }
     Remove-Item -LiteralPath $stateHome -Recurse -Force -ErrorAction SilentlyContinue
+}
+
+# Without the opt-in, nothing is written to disk at all.
+$quietStateHome = Join-Path ([IO.Path]::GetTempPath()) ("tg-quiet-" + [guid]::NewGuid())
+$originalStateHome = $env:XDG_STATE_HOME
+$originalPath = $env:PATH
+$originalPathExt = $env:PATHEXT
+try {
+    $env:XDG_STATE_HOME = $quietStateHome
+    $env:PATH = "$PSScriptRoot\fixtures;$originalPath"
+    $env:PATHEXT = ".PS1;$originalPathExt"
+    Remove-Item -LiteralPath Env:TELEGRAM_MCP_LAUNCHER_LOG -ErrorAction SilentlyContinue
+    $null = & pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[0] 2>&1
+    $quietLogs = Join-Path $quietStateHome 'telegram-mcp/logs'
+    if (Test-Path -LiteralPath $quietLogs) {
+        $found = @(Get-ChildItem -LiteralPath $quietLogs -File -ErrorAction SilentlyContinue)
+        if ($found.Count -ne 0) {
+            throw "The launcher wrote $($found.Count) log file(s) without being asked to."
+        }
+    }
+    Write-Output 'ok  the launcher persists nothing unless asked'
+}
+finally {
+    $env:PATH = $originalPath
+    $env:PATHEXT = $originalPathExt
+    if ($null -eq $originalStateHome) {
+        Remove-Item -LiteralPath Env:XDG_STATE_HOME -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:XDG_STATE_HOME = $originalStateHome
+    }
+    Remove-Item -LiteralPath $quietStateHome -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 # Retention, proved against the shipped function rather than by eleven real launches.

@@ -32,7 +32,8 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import telethon
 
-from telegram_mcp.settings import _parse_bool_env
+from telegram_mcp.safe_log import log_event, logger
+from telegram_mcp.settings import _parse_bool_env, state_dir
 from sanitize import sanitize_name
 
 try:  # POSIX advisory locking.
@@ -44,9 +45,6 @@ try:  # the Windows equivalent; one of the two is always present.
     import msvcrt
 except ImportError:  # pragma: no cover - platform dependent
     msvcrt = None
-
-logger = logging.getLogger("telegram_mcp")
-
 
 _ALIASES_ENV = "TELEGRAM_ALIASES_FILE"
 # Pre-XDG location; read as a fallback so existing installs keep resolving, never written.
@@ -103,7 +101,12 @@ def restrict_to_owner(path: Union[str, Path]) -> bool:
             os.chmod(path, 0o600)
             return True
         except OSError as error:
-            logger.warning("Could not restrict %s to its owner: %s", path, error)
+            log_event(
+                logging.WARNING,
+                "could not restrict a file to its owner",
+                error=error,
+                path=path,
+            )
             return False
 
     principal = _current_principal()
@@ -117,7 +120,12 @@ def restrict_to_owner(path: Union[str, Path]) -> bool:
             check=False,
         )
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        logger.warning("Could not restrict %s to its owner: %s", path, type(error).__name__)
+        log_event(
+            logging.WARNING,
+            "could not restrict a file to its owner",
+            error=error,
+            path=path,
+        )
         return False
     return completed.returncode == 0
 
@@ -127,8 +135,7 @@ def aliases_file_path() -> Path:
     override = os.getenv(_ALIASES_ENV)
     if override:
         return Path(override)
-    base = os.getenv("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    return Path(base) / "telegram-mcp" / "aliases.json"
+    return state_dir() / "aliases.json"
 
 
 def alias_key(text: str) -> str:
@@ -257,7 +264,12 @@ def load_aliases(strict: bool = False) -> Dict[AliasKey, Dict[str, Any]]:
     except FileNotFoundError:
         return {}
     except (OSError, ValueError, TypeError) as error:
-        logger.warning("Ignoring unreadable aliases file %s: %s", path, error)
+        log_event(
+            logging.WARNING,
+            "ignoring an unreadable aliases file",
+            error=error,
+            path=path,
+        )
         if strict:
             # Refuse to write over data we could not read: a degraded read plus a
             # write-back would silently delete every alias in the file.
