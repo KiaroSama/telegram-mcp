@@ -218,7 +218,7 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
             ), "the effect asset was not requested"
             return _Iter([bytes([0x1F, 0x8B]) + b"lottie-payload"], [])
 
-    async def _fake_frames(fn, raw, suffix, count, max_dimension):
+    async def _fake_frames(fn, raw, suffix, count, max_dimension, cancelled=None):
         # Verified against live Telegram data: the type="f" asset is a gzipped
         # Lottie, so asserting .webm here is what locked the bug in.
         assert suffix == ".tgs", f"the effect was decoded as {suffix}, not Lottie"
@@ -371,7 +371,7 @@ async def test_an_effect_at_exactly_the_limit_is_accepted():
 
     client = _EffectClient(payload=b"x" * 1000)
 
-    async def _fake(fn, raw, suffix, count, max_dimension):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         return [{"frame_index": 0}], ["image"]
 
     original = inspection.asyncio.to_thread
@@ -417,7 +417,7 @@ async def test_a_gzipped_effect_asset_is_decoded_as_lottie():
 
     seen = {}
 
-    async def _fake(fn, raw, suffix, count, max_dimension):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 
@@ -449,7 +449,7 @@ async def test_a_non_gzip_effect_asset_still_falls_back_to_video():
 
     seen = {}
 
-    async def _fake(fn, raw, suffix, count, max_dimension):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 

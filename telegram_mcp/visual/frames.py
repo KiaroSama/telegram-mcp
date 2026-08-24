@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 from typing import Any, Optional
 
@@ -41,6 +42,15 @@ FFMPEG_REQUEST_BUDGET_SECONDS = 60
 # built an 8K PNG in memory first, per frame, purely to throw it away. Telegram's
 # own preview ceiling is smaller than this, so nothing legitimate is lost.
 FFMPEG_MAX_EMITTED_SIDE = 2048
+
+# How often a running decode is re-checked for cancellation.
+#
+# Cancelling the coroutine cannot kill the worker thread the decode runs on -
+# Python has no way to stop a thread from outside, and a started
+# concurrent.futures job cannot be cancelled - so the thread has to look for
+# itself. 100ms is well below anything a caller notices and costs nothing: the
+# wait happens inside communicate(), not in a spin.
+DECODER_POLL_SECONDS = 0.1
 MAX_FRAMES = 10
 
 # n_frames is a header value (declared outright for APNG/WebP). The sample set
@@ -63,6 +73,16 @@ DECODABLE_SUFFIXES = PILLOW_ANIMATED_SUFFIXES | FFMPEG_SUFFIXES | {".tgs"}
 
 class FrameExtractionError(RuntimeError):
     """Raised when frames cannot be extracted from a media file."""
+
+
+class DecodingCancelled(FrameExtractionError):
+    """The caller stopped waiting before the decode finished.
+
+    Its own type so the tool layer can tell 'the caller went away' apart from
+    'this media could not be decoded' - only the second is a fault worth
+    reporting. It subclasses FrameExtractionError so nothing that already
+    handles a decode failure stops handling this one.
+    """
 
 
 class DecoderMismatch(FrameExtractionError):
@@ -103,13 +123,35 @@ def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> s
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def _run(
-    command: list[str], timeout: int, deadline: Optional[float] = None
-) -> subprocess.CompletedProcess:
-    """Run a decoder, bounded by its own timeout AND the request's remaining budget.
+def _check_cancelled(cancelled: Optional[threading.Event], done: int, total: int) -> None:
+    """Stop between frames when the caller has gone away.
 
-    ``deadline`` is a ``time.monotonic()`` value. Passing it is what stops N
-    frames from costing N times the per-call timeout.
+    In-process decoders (Pillow, rlottie) cannot be interrupted mid-frame the way
+    a subprocess can be killed, so a frame boundary is the finest granularity
+    available. It is enough: the cost being avoided is the REMAINING frames.
+    """
+    if cancelled is not None and cancelled.is_set():
+        raise DecodingCancelled(f"Frame extraction was cancelled after {done} of {total} frames.")
+
+
+def _run(
+    command: list[str],
+    timeout: int,
+    deadline: Optional[float] = None,
+    cancelled: Optional[threading.Event] = None,
+) -> subprocess.CompletedProcess:
+    """Run a decoder, bounded by its own timeout, the request budget, and the caller.
+
+    ``deadline`` is a ``time.monotonic()`` value; passing it is what stops N frames
+    from costing N times the per-call timeout.
+
+    ``cancelled`` is how a caller that has gone away reaches this. The decode runs
+    on a worker thread and the subprocess is its child, so a cancelled coroutine
+    frees the caller while leaving both running - the process kept burning CPU
+    until its own timeout fired, which is up to the whole request budget after
+    anyone stopped waiting for the answer. Hence the poll: ``subprocess.run``
+    blocks with nothing to interrupt it, so the wait is broken into slices and the
+    event is checked between them.
     """
     if deadline is not None:
         remaining = deadline - time.monotonic()
@@ -119,25 +161,55 @@ def _run(
                 "for this request. Ask for fewer frames."
             )
         timeout = min(timeout, remaining)
+
     try:
-        return subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
-            timeout=timeout,
-            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
         )
-    except subprocess.TimeoutExpired as error:
-        raise FrameExtractionError(
-            f"{os.path.basename(command[0])} timed out after {timeout}s and was terminated."
-        ) from error
     except FileNotFoundError as error:
         raise FrameExtractionError(
             f"{os.path.basename(command[0])} is not installed or not on PATH."
         ) from error
 
+    started = time.monotonic()
+    try:
+        while True:
+            try:
+                # Retrying after a TimeoutExpired is lossless: CPython drains the
+                # pipes on its own reader threads and hands over everything once
+                # the child exits.
+                stdout, stderr = process.communicate(timeout=DECODER_POLL_SECONDS)
+                return subprocess.CompletedProcess(
+                    command, process.returncode, stdout=stdout, stderr=stderr
+                )
+            except subprocess.TimeoutExpired:
+                pass
+            if cancelled is not None and cancelled.is_set():
+                raise DecodingCancelled(
+                    f"{os.path.basename(command[0])} was cancelled by the caller and terminated."
+                )
+            if time.monotonic() - started > timeout:
+                raise FrameExtractionError(
+                    f"{os.path.basename(command[0])} timed out after {timeout}s "
+                    "and was terminated."
+                )
+    except BaseException:
+        # Timeout, cancellation or anything else: the child must not outlive the
+        # call that started it. kill() then communicate() reaps it rather than
+        # leaving a zombie holding the pipes.
+        process.kill()
+        process.communicate()
+        raise
 
-def _probe(path: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
+
+def _probe(
+    path: str,
+    deadline: Optional[float] = None,
+    cancelled: Optional[threading.Event] = None,
+) -> tuple[Optional[float], Optional[float], Optional[str]]:
     """``(duration_seconds, frame_rate, codec)`` from one ffprobe call.
 
     The frame rate comes from the same subprocess the duration already costs, and
@@ -163,6 +235,8 @@ def _probe(path: str) -> tuple[Optional[float], Optional[float], Optional[str]]:
             path,
         ],
         timeout=FFPROBE_TIMEOUT_SECONDS,
+        deadline=deadline,
+        cancelled=cancelled,
     )
     if result.returncode != 0:
         return None, None, None
@@ -196,7 +270,9 @@ def probe_duration(path: str) -> Optional[float]:
     return _probe(path)[0]
 
 
-def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+def _frames_with_pillow(
+    path: str, count: int, cancelled: Optional[threading.Event] = None
+) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
     from PIL import Image, ImageSequence
 
@@ -242,6 +318,7 @@ def _frames_with_pillow(path: str, count: int) -> list[tuple[bytes, dict[str, An
             for index, frame in enumerate(ImageSequence.Iterator(source)):
                 if index not in indexes:
                     continue
+                _check_cancelled(cancelled, len(frames), wanted)
                 data, meta = encode_image(frame.convert("RGB"), image_format="png")
                 meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
                 frames.append((data, meta))
@@ -279,7 +356,9 @@ def lottie_available() -> bool:
 LOTTIE_RENDER_SIZE = 512
 
 
-def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+def _frames_with_lottie(
+    path: str, count: int, cancelled: Optional[threading.Event] = None
+) -> list[tuple[bytes, dict[str, Any]]]:
     """Rasterise a .tgs (gzipped Lottie) with rlottie, when it is installed.
 
     The render size is fixed at 512x512 so memory is bounded by construction, but
@@ -321,6 +400,7 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
     frame_rate = animation.lottie_animation_get_framerate() or 0
     frames: list[tuple[bytes, dict[str, Any]]] = []
     for index in indexes:
+        _check_cancelled(cancelled, len(frames), len(indexes))
         if time.monotonic() > deadline:
             raise FrameExtractionError(
                 f"Rendering this .tgs passed the {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
@@ -364,7 +444,9 @@ def _frames_with_lottie(path: str, count: int) -> list[tuple[bytes, dict[str, An
     return frames
 
 
-def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, Any]]]:
+def _frames_with_ffmpeg(
+    path: str, count: int, cancelled: Optional[threading.Event] = None
+) -> list[tuple[bytes, dict[str, Any]]]:
     """Evenly spaced frames from a video file using ffmpeg input seeking.
 
     One budget covers the probe and every frame: the per-call timeouts bound a
@@ -378,7 +460,7 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
             "Install ffmpeg, or use get_media_thumbnail for a static preview."
         )
 
-    duration, frame_rate, codec = _probe(path)
+    duration, frame_rate, codec = _probe(path, deadline=deadline, cancelled=cancelled)
     if duration and duration > 0:
         # Sample inside the clip: the very first and last frames are often black.
         #
@@ -437,6 +519,7 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
             ],
             timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
             deadline=deadline,
+            cancelled=cancelled,
         )
         if result.returncode != 0 or not result.stdout:
             # The last iteration is the furthest-past-EOF seek and therefore the
@@ -465,13 +548,21 @@ def _frames_with_ffmpeg(path: str, count: int) -> list[tuple[bytes, dict[str, An
     return frames
 
 
-def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes, dict[str, Any]]]:
+def extract_frames(
+    data: bytes,
+    suffix: str,
+    count: int = 4,
+    cancelled: Optional[threading.Event] = None,
+) -> list[tuple[bytes, dict[str, Any]]]:
     """Extract up to ``count`` representative frames from in-memory media bytes.
 
     Args:
         data: Raw media bytes as downloaded from Telegram.
         suffix: File extension including the dot, e.g. ``.webm``.
         count: Number of frames to aim for (capped at ``MAX_FRAMES``).
+        cancelled: Set by the caller when it stops waiting, so a decode that is
+            no longer wanted stops instead of running to completion on a worker
+            thread nobody is reading from.
 
     Returns:
         A list of ``(png_bytes, metadata)`` tuples.
@@ -494,10 +585,10 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
         path = handle.name
     try:
         if suffix == ".tgs":
-            return _frames_with_lottie(path, count)
+            return _frames_with_lottie(path, count, cancelled)
         if suffix in PILLOW_ANIMATED_SUFFIXES:
             try:
-                return _frames_with_pillow(path, count)
+                return _frames_with_pillow(path, count, cancelled)
             except DecoderMismatch:
                 # Only "Pillow cannot read this format" is worth a second decoder.
                 # A frame-count refusal or "not animated" is a decision about the
@@ -505,7 +596,7 @@ def extract_frames(data: bytes, suffix: str, count: int = 4) -> list[tuple[bytes
                 # class here handed the refused file straight to ffmpeg.
                 if suffix not in FFMPEG_SUFFIXES:
                     raise
-        return _frames_with_ffmpeg(path, count)
+        return _frames_with_ffmpeg(path, count, cancelled)
     finally:
         try:
             os.unlink(path)

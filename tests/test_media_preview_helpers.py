@@ -6,7 +6,10 @@ one matters most: it picks which DECODER runs, and the value it works from is
 the sender's own extension or mime type.
 """
 
+import asyncio
 import io
+import threading
+import time
 
 import pytest
 from PIL import Image as PILImage
@@ -70,7 +73,10 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count: [(png, {"frame_index": 0}), (png, {"frame_index": 1})],
+        lambda raw, suffix, count, cancelled=None: [
+            (png, {"frame_index": 0}),
+            (png, {"frame_index": 1}),
+        ],
     )
 
     metas, images = media_preview._encode_frames(b"ignored", ".webp", count=2, max_dimension=64)
@@ -81,8 +87,70 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
 
 
 def test_no_frames_extracted_yields_no_images_rather_than_an_error(monkeypatch):
-    monkeypatch.setattr(media_preview, "extract_frames", lambda raw, suffix, count: [])
+    monkeypatch.setattr(
+        media_preview, "extract_frames", lambda raw, suffix, count, cancelled=None: []
+    )
 
     metas, images = media_preview._encode_frames(b"", ".webp", count=4, max_dimension=64)
 
+    assert metas == [] and images == []
+
+
+# --- cancelling the caller has to reach the worker thread ----------------------
+
+
+@pytest.mark.asyncio
+async def test_cancelling_the_caller_stops_the_decode(monkeypatch):
+    """`asyncio.to_thread` alone leaves the worker running: Python cannot stop a
+    thread from outside, and a started concurrent.futures job cannot be cancelled.
+    So a client that disconnected still paid for every remaining frame, and ffmpeg
+    kept burning CPU with nobody left to read the answer.
+
+    No sleep decides this test. The worker signals when it has really begun, and
+    signals again when it has noticed - both waits are bounded.
+    """
+    running = threading.Event()
+    noticed = threading.Event()
+
+    def _slow_extract(raw, suffix, count, cancelled=None):
+        running.set()
+        for _ in range(200):
+            if cancelled is not None and cancelled.is_set():
+                noticed.set()
+                raise media_preview.FrameExtractionError("cancelled")
+            time.sleep(0.02)
+        raise AssertionError("the decode ran to completion after being cancelled")
+
+    monkeypatch.setattr(media_preview, "extract_frames", _slow_extract)
+
+    task = asyncio.create_task(
+        media_preview.encode_frames_cancellable(b"", ".webp", 4, max_dimension=64)
+    )
+    assert await asyncio.to_thread(running.wait, 5), "the worker never started"
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert await asyncio.to_thread(
+        noticed.wait, 5
+    ), "the worker was never told the caller had gone"
+
+
+@pytest.mark.asyncio
+async def test_a_decode_that_is_not_cancelled_gets_no_signal(monkeypatch):
+    """The event must stay clear on the happy path, or every decode would abort."""
+    seen = {}
+
+    def _extract(raw, suffix, count, cancelled=None):
+        seen["set"] = cancelled is not None and cancelled.is_set()
+        return []
+
+    monkeypatch.setattr(media_preview, "extract_frames", _extract)
+
+    metas, images = await media_preview.encode_frames_cancellable(
+        b"", ".webp", 4, max_dimension=64
+    )
+
+    assert seen["set"] is False
     assert metas == [] and images == []

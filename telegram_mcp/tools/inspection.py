@@ -23,7 +23,7 @@ from telegram_mcp.media_transfer import (  # noqa: F401  (re-exported for tests 
 from telegram_mcp.media_preview import (  # noqa: F401  (re-exported for tests and tools)
     DEFAULT_EMOJI_BYTES,
     _custom_emoji_preview,
-    _encode_frames,
+    encode_frames_cancellable,
     _encode_one,
     _media_suffix,
     _premium_effect_frames,
@@ -574,8 +574,8 @@ async def get_media_frames(
             return f"Telegram returned no media data for message {message_id}."
 
         # ffmpeg subprocesses and Pillow decoding are blocking; run them in a thread.
-        records, images = await asyncio.to_thread(
-            _encode_frames, data, _media_suffix(details), count, max_dimension
+        records, images = await encode_frames_cancellable(
+            data, _media_suffix(details), count, max_dimension
         )
 
         return [

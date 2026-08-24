@@ -33,7 +33,7 @@ import time
 from typing import Any, Optional, Union
 
 from telegram_mcp.runtime import *
-from telegram_mcp.media_preview import _encode_frames, _encode_one, _media_suffix
+from telegram_mcp.media_preview import encode_frames_cancellable, _encode_one, _media_suffix
 from telegram_mcp.media_transfer import (
     MAX_FRAME_SOURCE_BYTES,
     NAME_ATTEMPTS,
@@ -498,8 +498,8 @@ async def save_disappearing_media(
                 if kind == "photo":
                     metas, images = await asyncio.to_thread(_encode_one, data, max_dimension)
                 else:
-                    metas, images = await asyncio.to_thread(
-                        _encode_frames, data, _media_suffix(details), count, max_dimension
+                    metas, images = await encode_frames_cancellable(
+                        data, _media_suffix(details), count, max_dimension
                     )
                 record["preview"] = metas
             except (FrameExtractionError, ImageError) as error:

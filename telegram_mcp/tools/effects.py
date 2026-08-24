@@ -22,7 +22,7 @@ from telegram_mcp.media_transfer import (
     _download_thumb_capped,
     _stream_capped,
 )
-from telegram_mcp.media_preview import _encode_frames, _encode_one
+from telegram_mcp.media_preview import encode_frames_cancellable, _encode_one
 from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
@@ -304,9 +304,7 @@ async def get_message_effect(
         if fmt == "static_image" and suffix != ".tgs":
             records, images = await asyncio.to_thread(_encode_one, raw, max_dimension)
         else:
-            records, images = await asyncio.to_thread(
-                _encode_frames, raw, suffix, count, max_dimension
-            )
+            records, images = await encode_frames_cancellable(raw, suffix, count, max_dimension)
         for record in records:
             record["source_asset"] = f"message_effect_{asset}"
             record["composite_fidelity"] = "asset-only"

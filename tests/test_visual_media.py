@@ -11,6 +11,7 @@ import io
 import os
 import subprocess
 import tempfile
+import threading
 import time
 from types import SimpleNamespace
 
@@ -316,7 +317,9 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
     monkeypatch.setattr(frames, "ffmpeg_available", lambda: True)
     # (duration, frame_rate, codec) - the codec joined when the extractor had to
     # decide whether to name the VP9 decoder.
-    monkeypatch.setattr(frames, "_probe", lambda path: (None, None, None))
+    monkeypatch.setattr(
+        frames, "_probe", lambda path, deadline=None, cancelled=None: (None, None, None)
+    )
     messages = iter(
         [
             b"first: moov atom not found",
@@ -326,7 +329,7 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
         ]
     )
 
-    def _fake_run(command, timeout, deadline=None):
+    def _fake_run(command, timeout, deadline=None, cancelled=None):
         # The temp path ffmpeg was handed is the one that must not reach the model.
         spooled = command[command.index("-i") + 1]
         return subprocess.CompletedProcess(
@@ -350,7 +353,7 @@ def test_extract_frames_refuses_a_suffix_it_cannot_decode(monkeypatch, hostile):
     real temp filename and the decoder selector."""
     seen = {}
 
-    def _fake_ffmpeg(path, count):
+    def _fake_ffmpeg(path, count, cancelled=None):
         seen["path"] = path
         return [(b"\x89PNG", {"frame_index": 0})]
 
@@ -615,51 +618,115 @@ def test_naming_the_vp9_decoder_does_not_break_an_h264_source(tmp_path):
 # --- one request, one decoding budget ------------------------------------------
 
 
-def test_a_subprocess_is_bounded_by_the_request_budget_not_just_its_own_timeout():
-    """Ten frames at 30s each, after a 15s probe, is 315 seconds one caller can
-    ask for. The per-call timeout bounds a subprocess; only a shared deadline
-    bounds the request."""
-    recorded = {}
+class _NeverFinishes:
+    """A child that never exits, so only the caller's own bounds can end the wait."""
 
-    def _fake_run(command, capture_output, timeout, check, stdin):
-        recorded["timeout"] = timeout
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+    def __init__(self, *args, **kwargs):
+        self.returncode = None
+        self.killed = False
+        self.reaped = False
+        self.stdout = None
+        self.stderr = None
 
-    original = frames.subprocess.run
-    frames.subprocess.run = _fake_run
-    try:
-        # Only two seconds of budget left, far less than the per-call timeout.
-        frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() + 2)
-    finally:
-        frames.subprocess.run = original
+    def communicate(self, timeout=None):
+        if timeout is None:
+            # The post-kill reap, which must not hang.
+            self.reaped = True
+            return b"", b""
+        raise subprocess.TimeoutExpired("fake", timeout)
 
-    assert recorded["timeout"] <= 2, (
-        f"the call was given its full {30}s despite the request having 2s left: "
-        f"{recorded['timeout']}"
-    )
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
 
 
-def test_an_exhausted_budget_refuses_instead_of_starting_another_decoder():
+def _with_fake_child(monkeypatch):
+    created = []
+
+    def _factory(*args, **kwargs):
+        child = _NeverFinishes()
+        created.append(child)
+        return child
+
+    monkeypatch.setattr(frames.subprocess, "Popen", _factory)
+    return created
+
+
+def test_a_decode_is_bounded_by_the_request_budget_not_just_its_own_timeout(monkeypatch):
+    """Ten frames at 30s each, after a 15s probe, is 315 seconds one caller can ask
+    for. A per-call timeout bounds a subprocess; only a shared deadline bounds the
+    request, so the smaller of the two has to win."""
+    created = _with_fake_child(monkeypatch)
+
+    started = time.monotonic()
+    with pytest.raises(frames.FrameExtractionError, match="timed out"):
+        frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() + 0.3)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5, f"waited {elapsed:.1f}s: the 30s per-call timeout won over the budget"
+    assert created[0].killed, "the child outlived the call that started it"
+
+
+def test_a_call_with_no_deadline_still_honours_its_own_timeout(monkeypatch):
+    created = _with_fake_child(monkeypatch)
+
+    started = time.monotonic()
+    with pytest.raises(frames.FrameExtractionError, match="timed out"):
+        frames._run(["ffprobe"], timeout=0.3)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5, f"waited {elapsed:.1f}s for a 0.3s timeout"
+    assert created[0].killed
+
+
+def test_an_exhausted_budget_refuses_instead_of_starting_another_decoder(monkeypatch):
+    """Past the deadline nothing should be launched at all."""
+    created = _with_fake_child(monkeypatch)
+
     with pytest.raises(frames.FrameExtractionError, match="budget"):
         frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() - 1)
 
+    assert created == [], "a decoder was started after the budget was already gone"
 
-def test_a_call_with_no_deadline_keeps_its_own_timeout():
-    """The probe path and existing callers must not change behaviour."""
-    recorded = {}
 
-    def _fake_run(command, capture_output, timeout, check, stdin):
-        recorded["timeout"] = timeout
-        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+def test_a_cancelled_decode_terminates_its_subprocess(monkeypatch):
+    """Cancelling the coroutine cannot kill the worker thread the decode runs on, so
+    the thread has to look for itself. Without this the process kept burning CPU
+    until its own timeout fired - up to the whole request budget after everyone had
+    stopped waiting for the answer."""
+    created = _with_fake_child(monkeypatch)
+    cancelled = threading.Event()
+    cancelled.set()
 
-    original = frames.subprocess.run
-    frames.subprocess.run = _fake_run
-    try:
-        frames._run(["ffprobe"], timeout=15)
-    finally:
-        frames.subprocess.run = original
+    started = time.monotonic()
+    with pytest.raises(frames.DecodingCancelled, match="cancelled"):
+        frames._run(["ffmpeg"], timeout=600, deadline=time.monotonic() + 600, cancelled=cancelled)
+    elapsed = time.monotonic() - started
 
-    assert recorded["timeout"] == 15
+    assert elapsed < 5, f"took {elapsed:.1f}s to notice a cancellation already set"
+    assert created[0].killed, "the subprocess survived the cancellation"
+    assert created[0].reaped, "the killed child was never reaped"
+
+
+def test_a_cancellation_is_still_a_frame_extraction_error():
+    """Every tool-layer handler catches FrameExtractionError. A cancellation type
+    outside that hierarchy would become a new uncaught escape path."""
+    assert issubclass(frames.DecodingCancelled, frames.FrameExtractionError)
+
+
+def test_an_uncancelled_decode_is_untouched(monkeypatch):
+    """The event is optional and absent everywhere it is not wired up yet."""
+
+    class _Finishes(_NeverFinishes):
+        def communicate(self, timeout=None):
+            self.returncode = 0
+            return b"PNG", b""
+
+    monkeypatch.setattr(frames.subprocess, "Popen", lambda *a, **k: _Finishes())
+
+    result = frames._run(["ffmpeg"], timeout=30)
+
+    assert result.returncode == 0 and result.stdout == b"PNG"
 
 
 # --- decoders get a size ceiling too, not only a time one ----------------------
@@ -694,13 +761,13 @@ def test_the_ffmpeg_command_scales_before_it_encodes_a_png():
     so an 8K video built an 8K PNG per frame purely to throw it away."""
     seen = {}
 
-    def _fake_run(command, timeout, deadline=None):
+    def _fake_run(command, timeout, deadline=None, cancelled=None):
         seen["command"] = command
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no frame")
 
     original_run, original_probe = frames._run, frames._probe
     frames._run = _fake_run
-    frames._probe = lambda path: (1.0, 25.0, "h264")
+    frames._probe = lambda path, deadline=None, cancelled=None: (1.0, 25.0, "h264")
     try:
         with pytest.raises(frames.FrameExtractionError):
             frames._frames_with_ffmpeg("clip.mp4", count=1)

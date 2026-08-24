@@ -20,6 +20,8 @@ string rules under ``message_view``, ``media_transfer`` holds the bounded
 download under these previews.
 """
 
+import threading
+
 from telegram_mcp.runtime import *
 from telegram_mcp.effect_catalog import sniff_asset_format
 from telegram_mcp.media_transfer import (
@@ -66,14 +68,46 @@ def _encode_one(raw: bytes, max_dimension: int) -> tuple:
     return [meta], [Image(data=png, format="png")]
 
 
-def _encode_frames(raw: bytes, suffix: str, count: int, max_dimension: int) -> tuple:
+def _encode_frames(
+    raw: bytes,
+    suffix: str,
+    count: int,
+    max_dimension: int,
+    cancelled: Optional[threading.Event] = None,
+) -> tuple:
     """Frames of an animation as ``([metadata], [Image])``. Blocking: call in a thread."""
     metas, images = [], []
-    for png, meta in extract_frames(raw, suffix, count):
+    for png, meta in extract_frames(raw, suffix, count, cancelled):
         encoded, encoded_meta = encode_image(open_image_bytes(png), max_dimension=max_dimension)
         metas.append({**meta, **encoded_meta})
         images.append(Image(data=encoded, format="png"))
     return metas, images
+
+
+async def encode_frames_cancellable(
+    raw: bytes, suffix: str, count: int, max_dimension: int
+) -> tuple:
+    """Extract and encode frames off the event loop, and let cancellation reach them.
+
+    ``asyncio.to_thread`` alone is not enough. Cancelling the awaiting coroutine
+    raises in the caller and frees it, but the worker thread keeps running: Python
+    cannot stop a thread from outside, and a ``concurrent.futures`` job that has
+    already started cannot be cancelled either. So the decoders kept going - and
+    ffmpeg kept burning CPU - until their own timeouts fired, long after anyone was
+    left to read the answer.
+
+    The event is how the thread gets told. Every caller goes through here rather
+    than reaching for ``asyncio.to_thread`` itself, so this exists once instead of
+    at six call sites each free to forget it.
+    """
+    cancelled = threading.Event()
+    try:
+        return await asyncio.to_thread(
+            _encode_frames, raw, suffix, count, max_dimension, cancelled
+        )
+    except asyncio.CancelledError:
+        cancelled.set()
+        raise
 
 
 async def _premium_effect_frames(
@@ -144,7 +178,7 @@ async def _premium_effect_frames(
     # decision existed here and in tools/effects.py with two slightly different
     # rules, each guarded by only one of the two suites.
     suffix, asset_format = sniff_asset_format(raw)
-    records, images = await asyncio.to_thread(_encode_frames, raw, suffix, count, max_dimension)
+    records, images = await encode_frames_cancellable(raw, suffix, count, max_dimension)
     for record in records:
         record["source_asset"] = "premium_effect"
         record["composite_fidelity"] = "asset-only"
@@ -288,8 +322,8 @@ async def _custom_emoji_preview(
         record["source_bytes"] = len(raw)
         if render_lottie or mime.startswith("video/"):
             suffix = ".tgs" if render_lottie else _MIME_SUFFIXES.get(mime, ".webm")
-            record["preview"], images = await asyncio.to_thread(
-                _encode_frames, raw, suffix, count, max_dimension
+            record["preview"], images = await encode_frames_cancellable(
+                raw, suffix, count, max_dimension
             )
         else:
             record["preview"], images = await asyncio.to_thread(_encode_one, raw, max_dimension)
