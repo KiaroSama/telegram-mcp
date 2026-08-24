@@ -59,6 +59,9 @@ def test_a_bare_session_name_lands_in_the_private_state_directory(tmp_path, monk
     process happened to start there, and inherits that directory's permissions."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    # An empty stand-in for the installation directory, so the result does not
+    # depend on whether this checkout has ever been used to run the server.
+    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
 
     resolved = connection.session_file_path("telegram_session")
 
@@ -77,7 +80,12 @@ def test_a_session_already_beside_the_installation_keeps_working(tmp_path, monke
     must not be moved out from under a live client that may hold it open."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
-    legacy = tmp_path / "telegram_session.session"
+    # Beside the INSTALLATION, which is the case this is about - the working
+    # directory is a separate fallback with its own test.
+    install = tmp_path / "install"
+    install.mkdir()
+    monkeypatch.setattr(connection, "script_dir", str(install))
+    legacy = install / "telegram_session.session"
     legacy.write_bytes(b"")
 
     assert connection.session_file_path("telegram_session") == legacy
@@ -87,6 +95,7 @@ def test_the_extension_is_not_doubled(tmp_path, monkeypatch):
     """Telethon appends `.session` itself unless the name already ends in it."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
 
     resolved = connection.session_file_path("telegram_session.session")
 

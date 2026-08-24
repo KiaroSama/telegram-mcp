@@ -25,7 +25,8 @@ from telethon import events as _events
 from telethon import utils
 
 from telegram_mcp.paging import LIMITS, bounded, bounded_slice
-from telegram_mcp.runtime import *  # mcp, clients, ToolAnnotations, log_and_format_error
+from telegram_mcp.runtime import *
+from telegram_mcp.safe_log import log_event  # mcp, clients, ToolAnnotations, log_and_format_error
 
 # (account_label, chat_id) -> {first_ts, last_ts, count, first_id, last_id, name,
 # username, account}
@@ -89,8 +90,12 @@ def _positive_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         value = math.nan
     if not math.isfinite(value) or value < 1:
-        logging.getLogger("telegram_mcp").warning(
-            "%s=%r is not a usable limit; using %d", name, raw, default
+        log_event(
+            logging.WARNING,
+            "event-limit-unusable",
+            setting=name,
+            supplied=raw,
+            using=default,
         )
         return default
     return int(value)
@@ -330,8 +335,8 @@ def _rotate_feed_if_needed(path: Path) -> None:
         # os.replace, not a copy: atomic, and it drops the previous generation in
         # the same step rather than leaving a window with three of them.
         os.replace(path, rotated)
-    except OSError:
-        logging.getLogger("telegram_mcp").exception("cannot rotate the event feed file")
+    except OSError as error:
+        log_event(logging.ERROR, "event-feed-rotate-failed", error=error)
         return
     # Both names now refer to different files than they did.
     _owner_only_paths.discard(str(path))
@@ -423,9 +428,10 @@ async def _stop_feed(task: asyncio.Task) -> bool:
     task.cancel()
     done, _still_running = await asyncio.wait({task}, timeout=_FEED_STOP_TIMEOUT_SECONDS)
     if not done:
-        logging.getLogger("telegram_mcp").warning(
-            "incoming feed task did not stop within %.0fs of being cancelled",
-            _FEED_STOP_TIMEOUT_SECONDS,
+        log_event(
+            logging.WARNING,
+            "event-feed-stop-timeout",
+            seconds=_FEED_STOP_TIMEOUT_SECONDS,
         )
     return bool(done)
 
