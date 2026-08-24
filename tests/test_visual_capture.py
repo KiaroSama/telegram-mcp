@@ -6,7 +6,6 @@ exercised here; the rest is skipped off Windows or with no window open. The
 in-memory image and frame helpers are covered in test_visual_media.py.
 """
 
-import ctypes
 import importlib.util
 import sys
 
@@ -109,43 +108,6 @@ def test_capture_window_still_falls_back_to_the_screen_when_not_minimized(monkey
     assert "fallback" in meta
 
 
-class _StandInWintypes:
-    """The three ``ctypes.wintypes`` structures capture.py actually uses.
-
-    Defined from plain ctypes so they exist on every platform. ``wintypes`` is a
-    Windows-only module, and importing it inline was the single reason the logic
-    below - filtering, per-window failure isolation, GDI cleanup - could not be
-    tested anywhere else. None of that logic is Windows-specific; only the
-    library binding in ``_win32`` is, and every test here replaces that.
-    """
-
-    DWORD = ctypes.c_ulong
-    LONG = ctypes.c_long
-    WORD = ctypes.c_ushort
-
-    class RECT(ctypes.Structure):
-        _fields_ = [
-            ("left", ctypes.c_long),
-            ("top", ctypes.c_long),
-            ("right", ctypes.c_long),
-            ("bottom", ctypes.c_long),
-        ]
-
-    class POINT(ctypes.Structure):
-        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-def _fake_win32_types(monkeypatch):
-    """Make the Windows-only ctypes surface available to any platform.
-
-    ``_enum_callback`` becomes the identity so the fake EnumWindows can call the
-    collector as an ordinary Python function; the real one wraps it in a stdcall
-    thunk that only exists on Windows.
-    """
-    monkeypatch.setattr(capture, "_wintypes", lambda: _StandInWintypes)
-    monkeypatch.setattr(capture, "_enum_callback", lambda function: function)
-
-
 class _FakeUser32:
     """Enough of user32 for the enumeration tests.
 
@@ -211,13 +173,13 @@ class _FakeUser32:
 
 
 def _fake_enumeration(monkeypatch, user32):
-    _fake_win32_types(monkeypatch)
     monkeypatch.setattr(capture, "_win32", lambda: (user32, None, None))
     monkeypatch.setattr(capture, "_require_windows", lambda: None)
     monkeypatch.setattr(capture, "_ensure_dpi_awareness", lambda: None)
     monkeypatch.setattr(capture, "_process_image_path", lambda pid: r"C:\T\Telegram.exe")
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_list_windows_skips_a_window_whose_rectangle_could_not_be_read(monkeypatch):
     """A window destroyed mid-enumeration leaves rect zero-filled, and reporting
     it surfaces a real-looking window with width/height 0."""
@@ -229,6 +191,7 @@ def test_list_windows_skips_a_window_whose_rectangle_could_not_be_read(monkeypat
     assert all(window.width > 0 for window in windows)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_list_windows_is_not_truncated_by_one_failing_window(monkeypatch):
     """ctypes converts an exception escaping the callback into a 0 return, and a
     0 return stops EnumWindows — so one bad window hid every window after it."""
@@ -258,6 +221,7 @@ class _FakeGdi32:
         return 1
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_capture_print_window_reports_a_refused_select_object(monkeypatch):
     """A NULL SelectObject leaves the DC holding its 1x1 default bitmap, so the
     blank capture that follows was being blamed on PrintWindow."""
@@ -272,13 +236,13 @@ def test_capture_print_window_reports_a_refused_select_object(monkeypatch):
         def ReleaseDC(self, _hwnd, _dc):
             return 1
 
-    _fake_win32_types(monkeypatch)
     monkeypatch.setattr(capture, "_win32", lambda: (_StubUser32(), _FakeGdi32(), None))
 
     with pytest.raises(capture.CaptureError, match="SelectObject"):
         capture._capture_print_window(_telegram_window(), client_only=False)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_capture_print_window_deselects_the_bitmap_before_reading_it(monkeypatch):
     """GetDIBits on a bitmap still selected into a DC is forbidden by the API; it
     happens to work here and elsewhere returns 0 or stale scanlines. The lone
@@ -318,7 +282,6 @@ def test_capture_print_window_deselects_the_bitmap_before_reading_it(monkeypatch
         def ReleaseDC(self, _hwnd, _dc):
             return 1
 
-    _fake_win32_types(monkeypatch)
     monkeypatch.setattr(capture, "_win32", lambda: (_RecordingUser32(), _RecordingGdi32(), None))
 
     image = capture._capture_print_window(_telegram_window(), client_only=False)

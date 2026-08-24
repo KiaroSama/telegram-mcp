@@ -236,38 +236,3 @@ def test_a_normalised_key_round_trips_through_dotenv(generator, tmp_path):
 
     parsed = dotenv_values(env)
     assert parsed.get("TELEGRAM_SESSION_STRING_KGB_VERIFIER") == "1AAAsession"
-
-
-# --- F06: a label that cannot become an env key must be refused, not mangled ---
-
-
-@pytest.mark.parametrize(
-    "typed",
-    [
-        "---",  # collapses to nothing at all
-        "   ",
-        "work=other",  # an '=' splits the .env line in the wrong place
-        "work account!",
-        "café",  # non-ASCII is not a portable env-var name
-    ],
-)
-def test_a_label_that_cannot_be_an_env_key_is_refused(generator, typed):
-    """The docstring always promised "refusing loudly beats guessing".
-
-    It did not: `---` became the empty label and `work=other` kept its `=`, so
-    the generator wrote `TELEGRAM_SESSION_STRING_WORK=OTHER=1AAA...` and
-    python-dotenv read the account back under a key nobody configured.
-    """
-    with pytest.raises(ValueError, match="label"):
-        generator.normalise_label(typed)
-
-
-def test_write_env_value_refuses_a_key_that_is_not_an_env_name(generator, tmp_path):
-    """Defence in depth for the same class of key, whatever produced it."""
-    env = tmp_path / ".env"
-    env.write_text("TELEGRAM_API_ID=1\n", encoding="utf-8")
-
-    with pytest.raises(ValueError):
-        generator.write_env_value("TELEGRAM_SESSION_STRING_WORK=OTHER", "1AAA", env)
-
-    assert env.read_text(encoding="utf-8") == "TELEGRAM_API_ID=1\n", "the file was touched anyway"

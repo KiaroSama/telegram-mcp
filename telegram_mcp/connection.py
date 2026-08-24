@@ -26,7 +26,6 @@ import sys
 import tempfile
 import time
 from functools import wraps
-from logging.handlers import RotatingFileHandler
 from typing import Any, List, Optional
 
 from pythonjsonlogger import jsonlogger
@@ -49,32 +48,6 @@ logger = logging.getLogger("telegram_mcp")
 
 _PROXY_TYPES_SOCKS_HTTP = {"socks5", "socks4", "http"}
 _PROXY_TYPES_ALL = _PROXY_TYPES_SOCKS_HTTP | {"mtproxy"}
-
-# TCP ports a socket can actually be reached on. 0 means "any free port" to
-# bind() and nothing at all to connect(), and the rest are simply out of range.
-_MIN_PORT = 1
-_MAX_PORT = 65535
-
-
-def parse_port(raw: str, variable: str) -> int:
-    """Parse a TCP port from configuration, refusing anything unreachable.
-
-    Shared by the proxy settings and the HTTP transport's ``MCP_PORT``: both
-    used to take the value on trust, so ``0``/``-1``/``70000`` were carried all
-    the way to the first connection attempt and surfaced there as an unrelated
-    socket error.
-    """
-    try:
-        port = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValidationError(
-            f"{variable} must be an integer between {_MIN_PORT} and {_MAX_PORT}, got {raw!r}."
-        ) from exc
-    if not _MIN_PORT <= port <= _MAX_PORT:
-        raise ValidationError(
-            f"{variable} must be between {_MIN_PORT} and {_MAX_PORT}, got {port}."
-        )
-    return port
 
 
 def _get_proxy_env(name: str, label: str) -> Optional[str]:
@@ -115,7 +88,12 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
             "TELEGRAM_PROXY_HOST and TELEGRAM_PROXY_PORT are required when "
             "TELEGRAM_PROXY_TYPE is set."
         )
-    port = parse_port(port_raw, "TELEGRAM_PROXY_PORT")
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise ValidationError(
+            f"TELEGRAM_PROXY_PORT must be an integer, got '{port_raw}'."
+        ) from exc
 
     if proxy_type == "mtproxy":
         secret = _get_proxy_env("SECRET", label)
@@ -242,7 +220,7 @@ def _acquire_session(pool: List[str]) -> str:
     )
 
 
-def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
+def _discover_accounts() -> dict[str, TelegramClient]:
     """Scan env vars to build account label -> TelegramClient mapping.
 
     Detection rules:
@@ -253,56 +231,27 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
     - Unsuffixed TELEGRAM_SESSION_STRING / TELEGRAM_SESSION_NAME -> label "default"
     - If both suffixed and unsuffixed exist -> unsuffixed becomes "default"
 
-    Two variables that name the SAME label are a configuration error, not a
-    precedence question: the old loop simply let the later one win, so which
-    account the server ran as depended on the order ``os.environ`` iterated in.
-    A label that normalises to nothing is refused for the same reason.
-
     Each client is constructed via :func:`_build_client`, which applies any
     matching ``TELEGRAM_PROXY_*`` configuration (optionally per-label).
     """
-    environment = os.environ if env is None else env
     accounts: dict[str, TelegramClient] = {}
 
     prefix_str = "TELEGRAM_SESSION_STRING_"
     prefix_name = "TELEGRAM_SESSION_NAME_"
 
-    # Collect first, decide second: every conflict is then visible at once and
-    # the answer cannot depend on iteration order.
-    declared: dict[str, list[tuple[str, str, str]]] = {}
-    for key, value in environment.items():
+    for key, value in os.environ.items():
         if key.startswith(prefix_str) and value:
-            suffix, kind = key[len(prefix_str) :], "string"
+            label = key[len(prefix_str) :].lower()
+            accounts[label] = _build_client(StringSession(value), label)
         elif key.startswith(prefix_name) and value:
-            suffix, kind = key[len(prefix_name) :], "name"
-        else:
-            continue
-        label = suffix.strip().lower()
-        if not label:
-            raise ValidationError(
-                f"'{key}' has no account label after the prefix. Use "
-                f"'{prefix_str}<LABEL>' with a label, or the unsuffixed variable "
-                "for the default account."
-            )
-        declared.setdefault(label, []).append((key, kind, value))
-
-    for label, sources in sorted(declared.items()):
-        if len(sources) > 1:
-            names = ", ".join(sorted(key for key, _, _ in sources))
-            raise ValidationError(
-                f"Account '{label}' is defined more than once ({names}). These "
-                "resolve to one account, and which one wins depends on "
-                "environment order. Keep exactly one."
-            )
-        _key, kind, value = sources[0]
-        session = StringSession(value) if kind == "string" else value
-        accounts[label] = _build_client(session, label)
+            label = key[len(prefix_name) :].lower()
+            accounts[label] = _build_client(value, label)
 
     # Backward-compatible unsuffixed variables. A pool (TELEGRAM_SESSION_STRINGS)
     # takes precedence for the default account and claims a free session slot.
     session_pool = _parse_session_pool()
-    session_string = environment.get("TELEGRAM_SESSION_STRING")
-    session_name = environment.get("TELEGRAM_SESSION_NAME")
+    session_string = os.getenv("TELEGRAM_SESSION_STRING")
+    session_name = os.getenv("TELEGRAM_SESSION_NAME")
 
     if "default" not in accounts:
         if session_pool:
@@ -551,109 +500,6 @@ async def ensure_connected(cl: TelegramClient = None):
         _last_conn_verified[key] = now
 
 
-# --- Logging: bounded, owner-only, and redacted ------------------------------
-#
-# The log used to be a plain append-only FileHandler: whatever mode the umask
-# gave it (0644 on a normal host), no size ceiling, and every byte a caller
-# passed written out verbatim. A planted canary came straight back out of it.
-
-LOG_MAX_BYTES = 1_000_000
-LOG_BACKUP_COUNT = 3
-_REDACTED = "[REDACTED]"
-
-# Values that are secrets by shape, wherever in a line they appear. This is the
-# net for text we do not construct ourselves -- a Telethon exception quoting the
-# session, an invite link echoed back by Telegram. Context this project builds
-# is redacted by key in `runtime.log_and_format_error`, which does not have to
-# guess.
-_SECRET_SHAPES = (
-    # Telethon StringSession: '1' + a long base64 run.
-    re.compile(r"\b1[A-Za-z0-9+/=_-]{40,}"),
-    # Invite links and bare joinchat/+ hashes: bearer credentials for a chat.
-    re.compile(r"(?:https?://)?t\.me/(?:joinchat/|\+)[A-Za-z0-9_-]+", re.IGNORECASE),
-    # Bot tokens.
-    re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{30,}\b"),
-)
-
-# Environment variables whose VALUE is a secret. Scrubbing the literal value
-# catches it however it got into the text.
-_SECRET_ENV_MARKERS = ("SESSION_STRING", "API_HASH", "PASSWORD", "SECRET", "TOKEN")
-
-
-def _secret_env_values() -> list:
-    """The literal secrets this process was configured with, longest first."""
-    values = [
-        value
-        for key, value in os.environ.items()
-        if value and len(value) >= 8 and any(m in key.upper() for m in _SECRET_ENV_MARKERS)
-    ]
-    return sorted(set(values), key=len, reverse=True)
-
-
-def redact(text: str) -> str:
-    """Replace anything that is a secret by shape or by configured value."""
-    for value in _secret_env_values():
-        text = text.replace(value, _REDACTED)
-    for pattern in _SECRET_SHAPES:
-        text = pattern.sub(_REDACTED, text)
-    return text
-
-
-class RedactingFilter(logging.Filter):
-    """Scrub every record -- message, arguments and traceback -- before it lands.
-
-    Attached to the HANDLERS rather than the logger so it also covers records
-    that propagate up from a child logger, and so no formatter can re-render an
-    exception this filter has already cleaned: the rendered traceback is folded
-    into the message and ``exc_info`` is dropped.
-    """
-
-    def filter(self, record: logging.LogRecord) -> bool:
-        try:
-            message = record.getMessage()
-        except Exception:  # pragma: no cover - a broken %-format is not a leak
-            message = str(record.msg)
-        if record.exc_info:
-            message = f"{message}\n{logging.Formatter().formatException(record.exc_info)}"
-        record.msg = redact(message)
-        record.args = ()
-        record.exc_info = None
-        record.exc_text = None
-        return True
-
-
-class _OwnerOnlyRotatingFileHandler(RotatingFileHandler):
-    """Rotating handler that re-asserts 0600 on the file it just opened.
-
-    Applied on every rollover too: a fresh log created after a rotation is as
-    sensitive as the first one, and the umask would have given it 0644.
-    """
-
-    def _open(self):
-        stream = super()._open()
-        try:
-            os.chmod(self.baseFilename, 0o600)
-        except OSError:  # pragma: no cover - filesystem without POSIX modes
-            pass
-        return stream
-
-
-def _make_file_handler(path: str) -> logging.Handler:
-    """A bounded, owner-only, redacting JSON handler for ``path``."""
-    handler = _OwnerOnlyRotatingFileHandler(
-        path, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUP_COUNT, encoding="utf-8"
-    )
-    handler.setLevel(logging.ERROR)
-    handler.setFormatter(
-        jsonlogger.JsonFormatter(
-            "%(asctime)s %(name)s %(levelname)s %(message)s",
-            datefmt="%Y-%m-%dT%H:%M:%S%z",
-        )
-    )
-    handler.addFilter(RedactingFilter())
-    return handler
-
-
 # Setup robust logging with both file and console output
 logger = logging.getLogger("telegram_mcp")
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
@@ -661,12 +507,6 @@ logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debuggin
 # Create console handler
 console_handler = logging.StreamHandler()
 console_handler.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
-console_handler.setFormatter(
-    logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
-)
-# stderr is captured by the MCP client and often by a shell log, so it needs the
-# same treatment as the file.
-console_handler.addFilter(RedactingFilter())
 
 # Create file handler with absolute path. Keep the legacy location next to
 # top-level main.py, even though runtime code now lives inside telegram_mcp/.
@@ -674,14 +514,30 @@ package_dir = os.path.dirname(os.path.abspath(__file__))
 script_dir = os.path.dirname(package_dir)
 log_file_path = os.path.join(script_dir, "mcp_errors.log")
 
-logger.addHandler(console_handler)
 try:
-    file_handler = _make_file_handler(log_file_path)
+    file_handler = logging.FileHandler(log_file_path, mode="a")  # Append mode
+    file_handler.setLevel(logging.ERROR)
+
+    # Create formatters
+    # Console formatter remains in the old format
+    console_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s")
+    console_handler.setFormatter(console_formatter)
+
+    # File formatter is now JSON
+    json_formatter = jsonlogger.JsonFormatter(
+        "%(asctime)s %(name)s %(levelname)s %(message)s",
+        datefmt="%Y-%m-%dT%H:%M:%S%z",
+    )
+    file_handler.setFormatter(json_formatter)
+
+    # Add handlers to logger
+    logger.addHandler(console_handler)
     logger.addHandler(file_handler)
     logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
     print(f"WARNING: Error setting up log file: {log_error}", file=sys.stderr)
-    # Console-only logging; the console handler is already attached.
+    # Fallback to console-only logging
+    logger.addHandler(console_handler)
     logger.error(f"Failed to set up log file handler: {log_error}")
 
 

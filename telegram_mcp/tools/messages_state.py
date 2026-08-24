@@ -20,6 +20,11 @@ from telegram_mcp.runtime import *
 # path only a live call reaches.
 from telegram_mcp.message_view import display_text
 
+# Telegram's own limits for a poll. Checked here so an over-long question comes
+# back as an argument error rather than an RPC refusal after the round trip.
+_POLL_QUESTION_LIMIT = 255
+_POLL_OPTION_LIMIT = 100
+
 
 @mcp.tool(
     annotations=ToolAnnotations(title="List Inline Buttons", openWorldHint=True, readOnlyHint=True)
@@ -342,6 +347,7 @@ async def create_poll(
     quiz_mode: bool = False,
     public_votes: bool = True,
     close_date: str = None,
+    correct_option_index: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
@@ -349,22 +355,61 @@ async def create_poll(
 
     Args:
         chat_id: The ID of the chat to send the poll to
-        question: The poll question
-        options: List of answer options (2-10 options)
+        question: The poll question (1-255 characters)
+        options: List of answer options (2-10 options, 1-100 characters each)
         multiple_choice: Whether users can select multiple answers
-        quiz_mode: Whether this is a quiz (has correct answer)
+        quiz_mode: Whether this is a quiz. A quiz is graded, so it REQUIRES
+            correct_option_index, and Telegram does not allow a quiz to be
+            multiple-choice.
         public_votes: Whether votes are public
-        close_date: Optional close date in ISO format (YYYY-MM-DD HH:MM:SS)
+        close_date: Optional close date in ISO format (YYYY-MM-DD HH:MM:SS),
+            which must be in the future
+        correct_option_index: Zero-based index into `options` of the one correct
+            answer. Required for quiz_mode, rejected without it.
     """
     try:
         cl = get_client(account)
-        entity = await resolve_entity(chat_id, cl)
 
-        # Validate options
+        # Everything below is decided from the arguments alone, so it is settled
+        # before a chat is resolved or a poll is sent: a quiz Telegram cannot
+        # grade must not reach the chat and then need deleting.
+        if not str(question).strip():
+            return "Error: The poll question cannot be empty."
+        if len(question) > _POLL_QUESTION_LIMIT:
+            return f"Error: The poll question is limited to {_POLL_QUESTION_LIMIT} characters."
         if len(options) < 2:
             return "Error: Poll must have at least 2 options."
         if len(options) > 10:
             return "Error: Poll can have at most 10 options."
+        for index, option in enumerate(options):
+            if not str(option).strip():
+                return f"Error: Poll option {index} is empty."
+            if len(option) > _POLL_OPTION_LIMIT:
+                return (
+                    f"Error: Poll option {index} exceeds the "
+                    f"{_POLL_OPTION_LIMIT}-character limit."
+                )
+
+        if quiz_mode:
+            if multiple_choice:
+                return (
+                    "Error: a quiz has exactly one correct answer, so it cannot also be "
+                    "multiple choice. Drop multiple_choice or drop quiz_mode."
+                )
+            if correct_option_index is None:
+                return (
+                    "Error: quiz_mode needs correct_option_index. Without it Telegram has "
+                    "no correct answer to grade against and marks every voter wrong."
+                )
+            if not isinstance(correct_option_index, int) or isinstance(correct_option_index, bool):
+                return "Error: correct_option_index must be an integer."
+            if not 0 <= correct_option_index < len(options):
+                return (
+                    f"Error: correct_option_index {correct_option_index} is not one of the "
+                    f"options. Valid indexes are 0-{len(options) - 1}."
+                )
+        elif correct_option_index is not None:
+            return "Error: correct_option_index only applies to a quiz. Pass quiz_mode=True."
 
         # Parse close date if provided
         close_date_obj = None
@@ -373,6 +418,11 @@ async def create_poll(
                 close_date_obj = datetime.fromisoformat(close_date.replace("Z", "+00:00"))
             except ValueError:
                 return "Invalid close_date format. Use YYYY-MM-DD HH:MM:SS format."
+            now = datetime.now(close_date_obj.tzinfo)
+            if close_date_obj <= now:
+                return "Error: close_date is in the past; a poll cannot close before it opens."
+
+        entity = await resolve_entity(chat_id, cl)
 
         # Create the poll using InputMediaPoll with SendMediaRequest
         from telethon.tl.types import InputMediaPoll, Poll, PollAnswer, TextWithEntities
@@ -394,10 +444,20 @@ async def create_poll(
             close_date=close_date_obj,
         )
 
+        # ponytail: Telethon 1.44 declares and serialises `correct_answers` as
+        # Vector<int> while the published schema calls it Vector<bytes>; handing it
+        # the answer's `option` blob raises struct.error, so the index goes out as
+        # the int the installed library asks for. If a live quiz ever grades the
+        # wrong answer, the upgrade path is a project-local InputMediaPoll wire
+        # class next to the ones in tools/topics.py.
+        media = InputMediaPoll(poll=poll)
+        if quiz_mode:
+            media.correct_answers = [int(correct_option_index)]
+
         result = await cl(
             functions.messages.SendMediaRequest(
                 peer=entity,
-                media=InputMediaPoll(poll=poll),
+                media=media,
                 message="",
                 random_id=random.randint(0, 2**63 - 1),
             )
@@ -420,10 +480,11 @@ async def create_poll(
             {"chat_id": str(chat_id), "created": True},
         )
     except Exception as e:
-        logger.exception(f"create_poll failed (chat_id={chat_id}, question='{question}')")
-        return log_and_format_error(
-            "create_poll", e, chat_id=chat_id, question=question, options=options
-        )
+        # The question and its options are user-supplied text. They identify
+        # nothing a reader of the log needs and they are exactly what a failure
+        # report must not copy, so only the shape of the poll goes out.
+        logger.exception(f"create_poll failed (chat_id={chat_id})")
+        return log_and_format_error("create_poll", e, chat_id=chat_id, option_count=len(options))
 
 
 @mcp.tool(

@@ -394,3 +394,139 @@ def test_create_poll_accepts_a_chat_reference_not_only_a_number():
 
     annotation = inspect.signature(messages_state.create_poll).parameters["chat_id"].annotation
     assert annotation is not int, "chat_id is int-only again; 'me' and @usernames cannot be used"
+
+
+# --- a quiz has to carry its correct answer ---------------------------------
+
+
+@pytest.fixture
+def _wire_state(monkeypatch):
+    """create_poll on a fake client that keeps the requests it was handed."""
+    from telegram_mcp.tools import messages_state
+
+    class _StateClient:
+        def __init__(self):
+            self.requests = []
+
+        async def __call__(self, request):
+            self.requests.append(request)
+            return SimpleNamespace(updates=[SimpleNamespace(message=SimpleNamespace(id=4242))])
+
+        def sent(self, name):
+            return next((r for r in self.requests if type(r).__name__ == name), None)
+
+    client = _StateClient()
+    monkeypatch.setattr(messages_state, "get_client", lambda account=None: client)
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    monkeypatch.setattr(messages_state, "ensure_connected", _ensure, raising=False)
+    monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
+    return client
+
+
+@pytest.mark.asyncio
+async def test_a_quiz_carries_the_correct_answer_it_was_given(_wire_state):
+    """`InputMediaPoll.correct_answers=None` on a `quiz=True` poll marks nothing
+    correct, so Telegram grades every answer wrong for every voter."""
+    from telegram_mcp.tools import messages_state
+
+    await messages_state.create_poll(
+        "me", "2+2?", ["3", "4", "5"], quiz_mode=True, correct_option_index=1, account="a"
+    )
+
+    media = _wire_state.sent("SendMediaRequest").media
+    assert media.poll.quiz is True
+    assert media.correct_answers, "quiz sent with no correct answer at all"
+    assert list(media.correct_answers) == [1]
+
+
+@pytest.mark.asyncio
+async def test_a_quiz_without_a_correct_answer_is_refused_before_sending(_wire_state):
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "2+2?", ["3", "4"], quiz_mode=True, account="a"
+    )
+
+    assert "correct_option_index" in result
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_a_quiz_correct_index_outside_the_options_is_refused(_wire_state):
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "2+2?", ["3", "4"], quiz_mode=True, correct_option_index=7, account="a"
+    )
+
+    assert "0-1" in result
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_a_quiz_cannot_also_be_multiple_choice(_wire_state):
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me",
+        "2+2?",
+        ["3", "4"],
+        quiz_mode=True,
+        multiple_choice=True,
+        correct_option_index=0,
+        account="a",
+    )
+
+    assert "multiple" in result.lower()
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_a_correct_index_without_quiz_mode_is_refused(_wire_state):
+    from telegram_mcp.tools import messages_state
+
+    result = await messages_state.create_poll(
+        "me", "2+2?", ["3", "4"], correct_option_index=0, account="a"
+    )
+
+    assert "quiz_mode" in result
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_an_empty_question_or_option_is_refused(_wire_state):
+    from telegram_mcp.tools import messages_state
+
+    assert "question" in (await messages_state.create_poll("me", "  ", ["a", "b"], account="a"))
+    assert "option" in (await messages_state.create_poll("me", "q?", ["a", " "], account="a"))
+    assert _wire_state.sent("SendMediaRequest") is None
+
+
+@pytest.mark.asyncio
+async def test_poll_text_stays_out_of_the_error_report(_wire_state, monkeypatch):
+    """The question and its options are user content; an error report is not a
+    place to copy them into."""
+    from telegram_mcp.tools import messages_state
+
+    seen = {}
+
+    def _fake(name, error, **kwargs):
+        seen.update(kwargs)
+        return "boom"
+
+    monkeypatch.setattr(messages_state, "log_and_format_error", _fake)
+
+    async def _explode(_chat_id, _client):
+        raise RuntimeError("nope")
+
+    monkeypatch.setattr(messages_state, "resolve_entity", _explode)
+
+    await messages_state.create_poll("me", "secret question", ["secret option"], account="a")
+
+    assert "question" not in seen and "options" not in seen
