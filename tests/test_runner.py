@@ -121,14 +121,43 @@ class _FakeMcp:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("transport", ["stdio", "unknown"])
-async def test_serve_defaults_to_stdio(monkeypatch, transport):
+async def test_serve_defaults_to_stdio(monkeypatch):
     fake = _FakeMcp()
     monkeypatch.setattr(runner, "mcp", fake)
 
-    await runner._serve(transport)
+    await runner._serve("stdio")
 
     assert fake.ran == "stdio"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["htpp", "HTTPS", "", "streamable"])
+async def test_serve_refuses_a_transport_it_does_not_know(monkeypatch, transport):
+    """`MCP_TRANSPORT=htpp` used to start stdio and say nothing.
+
+    The operator sees a server that started fine and a client that can never
+    reach it, with no line anywhere connecting the two.
+    """
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+
+    with pytest.raises(runner.ValidationError, match="MCP_TRANSPORT"):
+        await runner._serve(transport)
+
+    assert fake.ran is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("port", ["0", "-1", "70000", "not-a-port"])
+async def test_serve_refuses_an_unusable_mcp_port(monkeypatch, port):
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+    monkeypatch.setenv("MCP_PORT", port)
+
+    with pytest.raises(runner.ValidationError, match="MCP_PORT"):
+        await runner._serve("http")
+
+    assert fake.ran is None
 
 
 @pytest.mark.asyncio
@@ -245,7 +274,7 @@ def test_lock_grace_refuses_a_non_finite_or_negative_value(monkeypatch):
     """`nan` made the deadline comparison never true: the wait was unbounded."""
     for raw in ("nan", "inf", "-1", "not-a-number"):
         monkeypatch.setenv("TELEGRAM_LOCK_GRACE_SECONDS", raw)
-        with pytest.raises(ValueError, match="TELEGRAM_LOCK_GRACE_SECONDS"):
+        with pytest.raises(runner.ValidationError, match="TELEGRAM_LOCK_GRACE_SECONDS"):
             runner._lock_grace_seconds()
 
 

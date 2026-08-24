@@ -49,6 +49,32 @@ logger = logging.getLogger("telegram_mcp")
 _PROXY_TYPES_SOCKS_HTTP = {"socks5", "socks4", "http"}
 _PROXY_TYPES_ALL = _PROXY_TYPES_SOCKS_HTTP | {"mtproxy"}
 
+# TCP ports a socket can actually be reached on. 0 means "any free port" to
+# bind() and nothing at all to connect(), and the rest are simply out of range.
+_MIN_PORT = 1
+_MAX_PORT = 65535
+
+
+def parse_port(raw: str, variable: str) -> int:
+    """Parse a TCP port from configuration, refusing anything unreachable.
+
+    Shared by the proxy settings and the HTTP transport's ``MCP_PORT``: both
+    used to take the value on trust, so ``0``/``-1``/``70000`` were carried all
+    the way to the first connection attempt and surfaced there as an unrelated
+    socket error.
+    """
+    try:
+        port = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(
+            f"{variable} must be an integer between {_MIN_PORT} and {_MAX_PORT}, got {raw!r}."
+        ) from exc
+    if not _MIN_PORT <= port <= _MAX_PORT:
+        raise ValidationError(
+            f"{variable} must be between {_MIN_PORT} and {_MAX_PORT}, got {port}."
+        )
+    return port
+
 
 def _get_proxy_env(name: str, label: str) -> Optional[str]:
     """Resolve a TELEGRAM_PROXY_* env var with optional ``_<LABEL>`` suffix.
@@ -88,12 +114,7 @@ def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
             "TELEGRAM_PROXY_HOST and TELEGRAM_PROXY_PORT are required when "
             "TELEGRAM_PROXY_TYPE is set."
         )
-    try:
-        port = int(port_raw)
-    except ValueError as exc:
-        raise ValidationError(
-            f"TELEGRAM_PROXY_PORT must be an integer, got '{port_raw}'."
-        ) from exc
+    port = parse_port(port_raw, "TELEGRAM_PROXY_PORT")
 
     if proxy_type == "mtproxy":
         secret = _get_proxy_env("SECRET", label)
@@ -220,7 +241,7 @@ def _acquire_session(pool: List[str]) -> str:
     )
 
 
-def _discover_accounts() -> dict[str, TelegramClient]:
+def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
     """Scan env vars to build account label -> TelegramClient mapping.
 
     Detection rules:
@@ -231,27 +252,56 @@ def _discover_accounts() -> dict[str, TelegramClient]:
     - Unsuffixed TELEGRAM_SESSION_STRING / TELEGRAM_SESSION_NAME -> label "default"
     - If both suffixed and unsuffixed exist -> unsuffixed becomes "default"
 
+    Two variables that name the SAME label are a configuration error, not a
+    precedence question: the old loop simply let the later one win, so which
+    account the server ran as depended on the order ``os.environ`` iterated in.
+    A label that normalises to nothing is refused for the same reason.
+
     Each client is constructed via :func:`_build_client`, which applies any
     matching ``TELEGRAM_PROXY_*`` configuration (optionally per-label).
     """
+    environment = os.environ if env is None else env
     accounts: dict[str, TelegramClient] = {}
 
     prefix_str = "TELEGRAM_SESSION_STRING_"
     prefix_name = "TELEGRAM_SESSION_NAME_"
 
-    for key, value in os.environ.items():
+    # Collect first, decide second: every conflict is then visible at once and
+    # the answer cannot depend on iteration order.
+    declared: dict[str, list[tuple[str, str, str]]] = {}
+    for key, value in environment.items():
         if key.startswith(prefix_str) and value:
-            label = key[len(prefix_str) :].lower()
-            accounts[label] = _build_client(StringSession(value), label)
+            suffix, kind = key[len(prefix_str) :], "string"
         elif key.startswith(prefix_name) and value:
-            label = key[len(prefix_name) :].lower()
-            accounts[label] = _build_client(value, label)
+            suffix, kind = key[len(prefix_name) :], "name"
+        else:
+            continue
+        label = suffix.strip().lower()
+        if not label:
+            raise ValidationError(
+                f"'{key}' has no account label after the prefix. Use "
+                f"'{prefix_str}<LABEL>' with a label, or the unsuffixed variable "
+                "for the default account."
+            )
+        declared.setdefault(label, []).append((key, kind, value))
+
+    for label, sources in sorted(declared.items()):
+        if len(sources) > 1:
+            names = ", ".join(sorted(key for key, _, _ in sources))
+            raise ValidationError(
+                f"Account '{label}' is defined more than once ({names}). These "
+                "resolve to one account, and which one wins depends on "
+                "environment order. Keep exactly one."
+            )
+        _key, kind, value = sources[0]
+        session = StringSession(value) if kind == "string" else value
+        accounts[label] = _build_client(session, label)
 
     # Backward-compatible unsuffixed variables. A pool (TELEGRAM_SESSION_STRINGS)
     # takes precedence for the default account and claims a free session slot.
     session_pool = _parse_session_pool()
-    session_string = os.getenv("TELEGRAM_SESSION_STRING")
-    session_name = os.getenv("TELEGRAM_SESSION_NAME")
+    session_string = environment.get("TELEGRAM_SESSION_STRING")
+    session_name = environment.get("TELEGRAM_SESSION_NAME")
 
     if "default" not in accounts:
         if session_pool:

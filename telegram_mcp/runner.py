@@ -12,7 +12,7 @@ import math
 from telethon.errors import AuthKeyDuplicatedError
 
 from telegram_mcp import runtime as _runtime
-from telegram_mcp.connection import _BURNED_SESSION_MESSAGE
+from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, parse_port
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
@@ -25,6 +25,9 @@ import telegram_mcp.tools  # noqa: F401 - registers MCP tools via decorators
 # Populated as each account's session lock is acquired; released in _main's
 # finally block so a lock is never held past this process's lifetime.
 _session_locks: dict[str, SessionLock] = {}
+
+# Every transport this server can actually run. Anything else is a typo.
+_TRANSPORTS = ("stdio", "http", "sse")
 
 
 def _lock_grace_seconds() -> float:
@@ -40,12 +43,12 @@ def _lock_grace_seconds() -> float:
     try:
         value = float(raw)
     except ValueError as exc:
-        raise ValueError(
+        raise ValidationError(
             f"TELEGRAM_LOCK_GRACE_SECONDS must be a number of seconds, got {raw!r}."
         ) from exc
     if not math.isfinite(value) or value < 0:
-        raise ValueError(
-            "TELEGRAM_LOCK_GRACE_SECONDS must be finite and non-negative, " f"got {raw!r}."
+        raise ValidationError(
+            f"TELEGRAM_LOCK_GRACE_SECONDS must be finite and non-negative, got {raw!r}."
         )
     return value
 
@@ -143,10 +146,19 @@ async def _serve(transport: str) -> None:
     throttles/flags). "http" is streamable HTTP — the current MCP transport
     that Claude Code (`--transport http`) and Codex (`--url`) speak natively;
     "sse" is kept for clients that only support the legacy SSE transport.
+
+    An unrecognised name is refused rather than quietly falling back to stdio:
+    `MCP_TRANSPORT=htpp` used to produce a server that reported a healthy start
+    and an HTTP client that could never reach it.
     """
+    if transport not in _TRANSPORTS:
+        raise ValidationError(
+            f"Invalid MCP_TRANSPORT {transport!r}. Expected one of: "
+            f"{', '.join(sorted(_TRANSPORTS))}."
+        )
     if transport in ("http", "sse"):
         mcp.settings.host = os.getenv("MCP_HOST", "127.0.0.1")
-        mcp.settings.port = int(os.getenv("MCP_PORT", "8765"))
+        mcp.settings.port = parse_port(os.getenv("MCP_PORT", "8765"), "MCP_PORT")
         _configure_transport_security()
         if transport == "http":
             await mcp.run_streamable_http_async()

@@ -46,6 +46,12 @@ _QR_MAX_REFRESHES = 10
 load_dotenv()
 
 
+_ENV_KEY_RE = re.compile(r"\A[A-Za-z_][A-Za-z0-9_]*\Z")
+# A label is a SUFFIX of an env key, so it may start with a digit; it may not
+# contain anything an env-var name cannot hold.
+_LABEL_RE = re.compile(r"\A[A-Za-z0-9_]+\Z")
+
+
 def normalise_label(raw: str) -> str:
     r"""Turn a typed label into one that can survive a round trip through `.env`.
 
@@ -55,12 +61,22 @@ def normalise_label(raw: str) -> str:
     `TELEGRAM_SESSION_STRING_KGB VERIFIER=...` - an account that sat in the file,
     looked correct, and could never load.
 
-    Spaces and hyphens become underscores; everything else is left alone, because
-    there is no safe mapping to invent for it and refusing loudly beats guessing.
-    The account manager applies the same rule before it ever gets here, so this is
-    the guard for the standalone path.
+    Spaces and hyphens become underscores; anything the result still cannot be
+    is refused, because there is no safe mapping to invent for it and refusing
+    loudly beats guessing. That promise used to be documented and not kept:
+    `---` collapsed to the empty label and `work=other` kept its `=`, which
+    moves the split point of the `.env` line and files the account under a key
+    nobody configured. The account manager applies the same rule before it ever
+    gets here, so this is the guard for the standalone path.
     """
-    return re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+    label = re.sub(r"[\s\-]+", "_", raw.strip()).strip("_")
+    if not _LABEL_RE.match(label):
+        raise ValueError(
+            f"{raw!r} is not a usable account label: a label becomes part of an "
+            "environment variable name, so it must be ASCII letters, digits and "
+            "underscores, and cannot be empty."
+        )
+    return label
 
 
 def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Optional[Path]:
@@ -80,6 +96,10 @@ def write_env_value(key: str, value: str, env_path: Path = Path(".env")) -> Opti
         # python-dotenv drops such a line on read, so the write would look like a
         # success and produce a setting that never loads.
         raise ValueError(f"an env key cannot contain whitespace: {key!r}")
+    if not _ENV_KEY_RE.match(key):
+        # An '=' or any other punctuation moves where the line splits, so the
+        # value is read back under a different key than the one written.
+        raise ValueError(f"not a usable env key: {key!r}")
 
     backup = None
     if env_path.exists():
@@ -289,6 +309,21 @@ def main() -> None:
             # Non-interactive stdin (piped/scripted runs): fall back to the default label.
             label = ""
 
+    # Before the login, not after it: a label that cannot become an env key used
+    # to be discovered once the session already existed, and the run then either
+    # wrote an unreadable line or threw the freshly minted session away.
+    if label:
+        try:
+            safe_label = normalise_label(label)
+        except ValueError as exc:
+            print(failure(str(exc)))
+            sys.exit(1)
+        if safe_label != label.strip():
+            print(hint(f"Saving under '{safe_label}' - a key cannot contain a space."))
+        env_var = f"TELEGRAM_SESSION_STRING_{safe_label.upper()}"
+    else:
+        env_var = "TELEGRAM_SESSION_STRING"
+
     if args.qr:
         method = "1"
     elif args.phone:
@@ -312,14 +347,6 @@ def main() -> None:
                 _phone_login(client)
 
         session_string = StringSession.save(client.session)
-
-        if label:
-            safe = normalise_label(label)
-            if safe != label.strip():
-                print(hint(f"Saving under '{safe}' - a key cannot contain a space."))
-            env_var = f"TELEGRAM_SESSION_STRING_{safe.upper()}"
-        else:
-            env_var = "TELEGRAM_SESSION_STRING"
 
         print()
         print(heading("Authentication successful."))
