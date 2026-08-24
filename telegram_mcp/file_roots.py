@@ -65,37 +65,6 @@ ROOTS_STATUS_SERVER_FALLBACK = "server_fallback"
 ROOTS_STATUS_ERROR = "error"
 
 
-def _fsync_dir(directory: Path) -> None:
-    """Make a directory entry survive a crash, where the platform has one to sync.
-
-    ``os.replace`` publishes a name, and the name is metadata: without this the
-    rename can still be in the log when the machine stops, and the file the
-    caller was told about is not there when it comes back. Windows exposes no
-    directory handle to sync and orders this metadata itself, so it is a no-op
-    there rather than an error.
-    """
-    if os.name == "nt":
-        return
-    fd = os.open(directory, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-def _fsync_file(path: Path) -> None:
-    """Push a finished file's bytes to durable storage.
-
-    Opened read-write because Windows' ``_commit`` refuses a read-only handle,
-    and a file this package is about to install is one it already owns.
-    """
-    fd = os.open(path, os.O_RDWR)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
     seen: set[str] = set()
     result: List[Path] = []
@@ -556,8 +525,6 @@ __all__ = [
     "_ensure_extension_allowed",
     "_ensure_size_within_limit",
     "_first_resolution_root",
-    "_fsync_dir",
-    "_fsync_file",
     "_get_effective_allowed_roots",
     "_get_effective_allowed_roots_with_status",
     "_is_roots_unsupported_error",

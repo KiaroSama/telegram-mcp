@@ -335,57 +335,67 @@ async def test_a_cancelled_save_leaves_no_file_behind(_wire_save, tmp_path, monk
 # --- the durability helpers, on both platforms, from either host -----------
 
 
-@pytest.fixture
-def _fake_fs(monkeypatch):
-    """Record what os.open/os.fsync were asked to do, without asking the host.
+class _RecordingCalls(handles.SystemCalls):
+    """Records what the handle asked the kernel for, without asking the host.
 
-    Whether a directory can be opened for reading is a platform property, so
+    Whether a directory can be opened at all is a platform property, so
     exercising the POSIX branch on Windows (or the reverse) has to be done at the
     syscall seam. Skipping one branch on the host that cannot run it is how a
-    Windows-only path reaches CI unexercised.
+    platform-specific path reaches CI unexercised.
     """
-    opened, synced = [], []
 
-    def _open(path, flags, *args, **kwargs):
-        opened.append((str(path), flags))
+    def __init__(self, dir_fd):
+        self.dir_fd = dir_fd
+        self.opened = []
+        self.synced = []
+
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
+        self.opened.append((str(path), flags, dir_fd))
         return 4242
 
-    monkeypatch.setattr(os, "open", _open)
-    monkeypatch.setattr(os, "fsync", synced.append)
-    monkeypatch.setattr(os, "close", lambda fd: None)
-    return opened, synced
+    def close(self, fd):
+        pass
+
+    def fsync(self, fd):
+        self.synced.append(fd)
 
 
-def test_a_posix_host_syncs_the_directory_entry_as_well(_fake_fs, monkeypatch, tmp_path):
-    opened, synced = _fake_fs
-    monkeypatch.setattr(os, "name", "posix")
+def test_a_posix_host_syncs_the_directory_entry_as_well(tmp_path):
+    """os.replace publishes a NAME, and a name is metadata: without this the
+    rename can still be in the log when the machine stops, and the file the
+    caller was told about is not there when it comes back."""
+    calls = _RecordingCalls(dir_fd=True)
+    directory = handles.DirHandle(tmp_path, 7, os.lstat(tmp_path), calls)
 
-    file_roots._fsync_dir(tmp_path)
+    directory.sync()
 
-    assert opened == [(str(tmp_path), os.O_RDONLY)]
-    assert synced == [4242], "the rename was published without syncing the directory"
+    assert calls.synced == [7], "the rename was published without syncing the directory"
 
 
-def test_a_windows_host_leaves_the_directory_to_the_filesystem(_fake_fs, monkeypatch, tmp_path):
+def test_a_windows_host_leaves_the_directory_to_the_filesystem(tmp_path):
     """Windows exposes no directory handle to sync and orders this metadata
     itself. Attempting it there is an error, not a stronger guarantee."""
-    opened, synced = _fake_fs
-    monkeypatch.setattr(os, "name", "nt")
+    calls = _RecordingCalls(dir_fd=False)
+    directory = handles.DirHandle(tmp_path, None, os.lstat(tmp_path), calls)
 
-    file_roots._fsync_dir(tmp_path)
+    directory.sync()
 
-    assert opened == [] and synced == []
+    assert calls.synced == []
 
 
-def test_the_file_sync_asks_for_a_writable_handle(_fake_fs, tmp_path):
+def test_the_file_sync_asks_for_a_writable_handle(tmp_path):
     """Windows' _commit refuses a read-only descriptor, so a read-only open would
     make every flush on that platform an error instead of a flush."""
-    opened, synced = _fake_fs
+    calls = _RecordingCalls(dir_fd=True)
+    directory = handles.DirHandle(tmp_path, 7, os.lstat(tmp_path), calls)
 
-    file_roots._fsync_file(tmp_path / "f")
+    directory.sync_child("part.jpg")
 
-    assert opened == [(str(tmp_path / "f"), os.O_RDWR)]
-    assert synced == [4242]
+    assert len(calls.opened) == 1
+    name, flags, dir_fd = calls.opened[0]
+    assert name == "part.jpg" and dir_fd == 7, "the child was reached by path, not by descriptor"
+    assert flags & os.O_RDWR == os.O_RDWR
+    assert calls.synced == [4242]
 
 
 # --- the destination replaced while the transfer is in flight ---------------

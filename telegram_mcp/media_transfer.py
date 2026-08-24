@@ -289,31 +289,3 @@ async def _download_size_capped(cl, owner, size, max_bytes: int) -> tuple:
         thumb_size=getattr(size, "type", ""),
     )
     return await _stream_capped(cl, location, max_bytes)
-
-
-# Two tools now write a caller-named file to disk, and neither may overwrite one
-# that is already there. Their default names are only second-precise, so two
-# saves in the same second collide on their own without anyone being hostile.
-NAME_ATTEMPTS = 100
-
-
-def reserve_free_path(target: Path) -> Optional[Path]:
-    """Create and return an unused path near ``target``, or None if there is none.
-
-    O_EXCL is the reservation: it fails if the name appeared between the check and
-    the create, so the caller owns the name it gets back rather than merely having
-    seen it free a moment ago.
-
-    Lives here rather than in either tool module because both need it, and a tool
-    module importing another tool module's privates is the dependency this module
-    exists to break.
-    """
-    stem, suffix, parent = target.stem, target.suffix, target.parent
-    for attempt in range(NAME_ATTEMPTS):
-        candidate = parent / (f"{stem}{suffix}" if attempt == 0 else f"{stem}-{attempt}{suffix}")
-        try:
-            os.close(os.open(candidate, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
-            return candidate
-        except FileExistsError:
-            continue
-    return None
