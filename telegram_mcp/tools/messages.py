@@ -35,6 +35,13 @@ MAX_MACHINE_VALUE = 2048
 # telegram.me kept resolving. The domain has been ACTIVE again since 2026-07-14.
 LINK_DOMAIN = os.getenv("TELEGRAM_LINK_DOMAIN", "t.me")
 
+# Bounds on the delete_chat_history continuation loop. Telegram answers each
+# deleteHistory with the number of events still to go and expects the call to be
+# repeated; these keep "repeat until zero" from becoming "repeat forever" when a
+# chat is enormous or the server stops making progress.
+_DELETE_HISTORY_MAX_PASSES = 20
+_DELETE_HISTORY_DEADLINE_SECONDS = 60.0
+
 
 def get_media_label(msg) -> str:
     """Short label of attached media for a message, or "" if none.
@@ -635,15 +642,28 @@ async def edit_message(
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def delete_message(chat_id: Union[int, str], message_id: int, account: str = None) -> str:
+async def delete_message(
+    chat_id: Union[int, str], message_id: int, revoke: bool = True, account: str = None
+) -> str:
     """
     Delete a message by ID.
+
+    Args:
+        chat_id: Chat ID or username.
+        message_id: The message to delete.
+        revoke: If True (default, matching delete_messages_bulk), the message is
+            deleted for EVERYONE in the chat wherever Telegram still permits it,
+            not only from this account's view. Pass False to remove it from this
+            account only. Ignored for channels, which always delete for everyone.
     """
     try:
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
-        await cl.delete_messages(entity, message_id)
-        return f"Message {message_id} deleted."
+        # Telethon's friendly method defaults to revoke=True, so this was already
+        # deleting for both sides -- it just never said so.
+        await cl.delete_messages(entity, message_id, revoke=revoke)
+        scope = "for both parties" if revoke else "for you only"
+        return f"Message {message_id} deleted {scope}."
     except Exception as e:
         return log_and_format_error("delete_message", e, chat_id=chat_id, message_id=message_id)
 
@@ -673,15 +693,49 @@ async def delete_chat_history(
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
-        result = await cl(
-            functions.messages.DeleteHistoryRequest(peer=entity, max_id=max_id, revoke=revoke)
-        )
-        pts_count = getattr(result, "pts_count", 0)
-        offset = getattr(result, "offset", 0)
+
+        # messages.affectedHistory.offset is a continuation signal: a positive
+        # value means the method has to be repeated with the same parameters
+        # until it answers zero. One call and a "cleared" report was a claim the
+        # server had not made -- it had said the opposite.
+        deleted = 0
+        offset = None
+        passes = 0
+        deadline = time.monotonic() + _DELETE_HISTORY_DEADLINE_SECONDS
+        stalled = False
+        while passes < _DELETE_HISTORY_MAX_PASSES:
+            result = await cl(
+                functions.messages.DeleteHistoryRequest(peer=entity, max_id=max_id, revoke=revoke)
+            )
+            passes += 1
+            deleted += getattr(result, "pts_count", 0) or 0
+            remaining = getattr(result, "offset", 0) or 0
+            if remaining <= 0:
+                offset = 0
+                break
+            # A remainder that does not shrink is not progress. Repeating the
+            # identical request against it is an unbounded spin, so it stops here
+            # and says what is left rather than looping on hope.
+            if offset is not None and remaining >= offset:
+                offset = remaining
+                stalled = True
+                break
+            offset = remaining
+            if time.monotonic() >= deadline:
+                break
+
         scope = "for both parties" if revoke else "for you"
+        if offset == 0:
+            return f"Chat {chat_id} history cleared {scope}: {deleted} messages deleted."
+        reason = (
+            "the server stopped reporting progress"
+            if stalled
+            else f"the {passes}-pass/{_DELETE_HISTORY_DEADLINE_SECONDS:g}s budget ran out"
+        )
         return (
-            f"Chat {chat_id} history cleared {scope}: "
-            f"{pts_count} messages deleted (offset={offset})."
+            f"Chat {chat_id} history deletion is INCOMPLETE {scope}: {deleted} messages "
+            f"deleted over {passes} pass(es), and Telegram still reports offset={offset} "
+            f"left because {reason}. Run delete_chat_history again to continue."
         )
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Cannot delete chat history: admin privileges are required."
