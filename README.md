@@ -693,6 +693,9 @@ telegram_mcp/settings.py      # environment configuration; the bottom of the imp
 telegram_mcp/runtime.py       # shared MCP setup, validation, entity resolution, formatting
 telegram_mcp/connection.py    # proxies, the session pool, account routing, reconnection
 telegram_mcp/file_roots.py    # allowed roots, and resolving a caller's path inside one
+telegram_mcp/handles.py       # file access bound to an open handle, not to a pathname
+telegram_mcp/safe_log.py      # the only module allowed to write a log line
+telegram_mcp/paging.py        # one limit rule for every list and search tool
 telegram_mcp/aliases.py       # calling a contact what the operator calls them
 telegram_mcp/runner.py        # application startup
 telegram_mcp/tools/           # tool modules grouped by domain
@@ -814,7 +817,9 @@ Proprietary, so this is the maintainer's own loop rather than a contribution gui
    CI and the pre-push hook — an unbounded run has no wall ceiling and no process-tree
    cleanup, so a hang cannot be proven cleaned up. This project drives ffmpeg, ffprobe and
    a native rlottie decoder, any of which can wedge without exiting, and a wedged child
-   outlives the pytest that spawned it:
+   outlives the pytest that spawned it. The run is therefore over only when pytest AND
+   everything it spawned are gone: a descendant still alive after pytest exits is a leak,
+   and the runner terminates the tree and exits 124 rather than reporting the pass:
 
    ```bash
    uv run python scripts/run_tests_guarded.py -- -q
