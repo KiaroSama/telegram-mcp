@@ -261,12 +261,16 @@ For `http` and `sse`, the server binds `MCP_HOST`:`MCP_PORT` (default
 `127.0.0.1:8765`); the streamable HTTP endpoint is `/mcp`, the SSE endpoint is
 `/sse`.
 
-If the server is reachable via a domain (e.g. behind a reverse proxy) rather
-than only `127.0.0.1`/`localhost`, set `MCP_ALLOWED_HOSTS` (and optionally
-`MCP_ALLOWED_ORIGINS`) to enable DNS-rebinding protection and allow that Host
-header, e.g. `MCP_ALLOWED_HOSTS=mcp.example.com`. Comma-separated; supports a
-`:*` suffix to allow any port. Left unset, DNS-rebinding protection stays off
-(the historical default).
+DNS-rebinding protection is **on by default**, not off: FastMCP enables it during
+construction because the server binds `127.0.0.1`, with an allow-list of
+`127.0.0.1:*`, `localhost:*` and `[::1]:*`.
+
+That default is why a domain needs configuring rather than merely permitting. If the
+server is reached through a reverse proxy or any name other than localhost, set
+`MCP_ALLOWED_HOSTS` (and optionally `MCP_ALLOWED_ORIGINS`) to allow that Host header,
+e.g. `MCP_ALLOWED_HOSTS=mcp.example.com`. Comma-separated; a `:*` suffix allows any
+port. Leave it unset while changing `MCP_HOST` and the localhost allow-list stays in
+force, so the symptom is every request being **rejected** — not an unprotected server.
 
 Prefer `http` when more than one MCP client (or many coding-agent sessions)
 will use the server: a single long-lived process holds one Telegram

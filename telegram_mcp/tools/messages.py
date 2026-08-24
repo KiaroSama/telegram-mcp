@@ -840,6 +840,7 @@ async def reply_to_message(
 __all__ = [
     "send_message",
     "forward_message",
+    "forward_messages",
     "edit_message",
     "delete_message",
     "delete_chat_history",

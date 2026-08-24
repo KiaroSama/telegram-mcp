@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=42", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -10,7 +10,8 @@ readme = "README.md"
 authors = [
     {name = "KiaroSama"}
 ]
-license = {text = "Proprietary"}
+license = "LicenseRef-Proprietary"
+license-files = ["LICENSE"]
 # "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
 # upload carrying it. That is deliberate: the telegram-mcp name on PyPI belongs to a
 # different project, and install_guard.py already refuses a PyPI-installed copy at
@@ -18,7 +19,6 @@ license = {text = "Proprietary"}
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: Other/Proprietary License",
     "Private :: Do Not Upload",
     # The floor is 3.11 because the suite needs it: tests/test_packaging.py imports
     # tomllib with no fallback. Nothing in the runtime forces it, so this is a
