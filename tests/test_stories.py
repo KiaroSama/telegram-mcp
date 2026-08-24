@@ -13,6 +13,8 @@ from types import SimpleNamespace
 import pytest
 from telethon.tl import functions, types
 
+from tests.helpers_handles import refuse_source, source_gate
+
 from telegram_mcp.tools import stories as mod
 from telegram_mcp.tools.stories import (
     PRIVACY_RULES,
@@ -294,11 +296,11 @@ async def test_posting_is_refused_cleanly_when_allowed_roots_are_unconfigured(mo
     client = _wire(_Client())
     seen = {}
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):
+    def _gate(*, raw_path, ctx, tool_name):
         seen["tool_name"] = tool_name
-        return None, f"{tool_name} is disabled until allowed roots are configured."
+        return refuse_source(f"{tool_name} is disabled until allowed roots are configured.")
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", _gate)
 
     result = await post_story("holiday.jpg", "contacts", account="a")
 
@@ -312,10 +314,10 @@ async def test_posting_is_refused_cleanly_when_allowed_roots_are_unconfigured(mo
 async def test_an_unknown_privacy_value_is_refused_before_anything_is_uploaded(monkeypatch, _wire):
     client = _wire(_Client())
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):  # pragma: no cover - must not run
-        raise AssertionError("the file was resolved before privacy was validated")
+    def _gate(*, raw_path, ctx, tool_name):  # pragma: no cover - must not run
+        raise AssertionError("the file was opened before privacy was validated")
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", _gate)
 
     result = await post_story("holiday.jpg", "friends-ish", account="a")
 
@@ -328,10 +330,10 @@ async def test_an_unknown_privacy_value_is_refused_before_anything_is_uploaded(m
 async def test_an_unsupported_lifetime_is_refused_with_the_accepted_ones(monkeypatch, _wire):
     _wire(_Client())
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):  # pragma: no cover - must not run
-        raise AssertionError("the file was resolved before the period was validated")
+    def _gate(*, raw_path, ctx, tool_name):  # pragma: no cover - must not run
+        raise AssertionError("the file was opened before the period was validated")
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", _gate)
 
     result = await post_story("holiday.jpg", "contacts", hours=36, account="a")
 
@@ -340,14 +342,15 @@ async def test_an_unsupported_lifetime_is_refused_with_the_accepted_ones(monkeyp
 
 
 @pytest.mark.asyncio
-async def test_posting_builds_the_request_with_the_chosen_privacy_and_period(monkeypatch, _wire):
+async def test_posting_builds_the_request_with_the_chosen_privacy_and_period(
+    monkeypatch, _wire, tmp_path
+):
     posted = SimpleNamespace(updates=[SimpleNamespace(story=SimpleNamespace(id=31))])
     client = _wire(_Client(result=posted))
+    photo = tmp_path / "holiday.jpg"
+    photo.write_bytes(b"jpeg")
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):
-        return "/tmp/holiday.jpg", None
-
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", source_gate(lambda raw: (photo, None)))
 
     payload = json.loads(
         await post_story("holiday.jpg", "close_friends", caption="hi", hours=48, account="a")
@@ -362,15 +365,16 @@ async def test_posting_builds_the_request_with_the_chosen_privacy_and_period(mon
 
 
 @pytest.mark.asyncio
-async def test_a_document_is_refused_instead_of_posted_as_a_broken_story(monkeypatch, _wire):
+async def test_a_document_is_refused_instead_of_posted_as_a_broken_story(
+    monkeypatch, _wire, tmp_path
+):
     """Telegram takes a photo or a video; uploading a PDF first and letting the
     server reject it wastes the upload and reports a confusing RPC error."""
     client = _wire(_Client())
+    report = tmp_path / "report.pdf"
+    report.write_bytes(b"%PDF")
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):
-        return "/tmp/report.pdf", None
-
-    async def _pdf(_self_path):
+    async def _pdf(_handle):
         return (
             None,
             types.InputMediaUploadedDocument(
@@ -379,7 +383,7 @@ async def test_a_document_is_refused_instead_of_posted_as_a_broken_story(monkeyp
             False,
         )
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", source_gate(lambda raw: (report, None)))
     monkeypatch.setattr(client, "_file_to_media", _pdf)
 
     result = await post_story("report.pdf", "contacts", account="a")

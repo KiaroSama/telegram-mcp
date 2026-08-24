@@ -446,22 +446,24 @@ async def post_story(
                 "24 is the lifetime every account can use; the others need Premium."
             )
 
-        safe_path, path_error = await _resolve_readable_file_path(
-            raw_path=file_path, ctx=ctx, tool_name="post_story"
-        )
-        if path_error:
-            return path_error
-
         cl = get_client(account)
         await ensure_connected(cl)
-        entity = await resolve_entity(chat_id, cl)
+        async with _open_verified_source(raw_path=file_path, ctx=ctx, tool_name="post_story") as (
+            source,
+            path_error,
+        ):
+            if path_error:
+                return path_error
+            entity = await resolve_entity(chat_id, cl)
 
-        # The same upload path send_file uses, so mime detection and the video
-        # attributes are not re-derived here.
-        # ponytail: Telethon-private helper; the public alternative is upload_file
-        # plus hand-built InputMediaUploaded* with duration/width/height, which is
-        # the duplication this reuse exists to avoid. Swap if Telethon renames it.
-        _handle, media, as_image = await cl._file_to_media(str(safe_path))
+            # The same upload path send_file uses, so mime detection and the
+            # video attributes are not re-derived here. It is handed the OPEN
+            # handle, so Telethon never reopens a name this call already judged.
+            # ponytail: Telethon-private helper; the public alternative is
+            # upload_file plus hand-built InputMediaUploaded* with
+            # duration/width/height, which is the duplication this reuse exists
+            # to avoid. Swap if Telethon renames it.
+            _handle, media, as_image = await cl._file_to_media(source.handle)
         if media is None:
             return f"Nothing uploadable was found at {file_path}."
         mime = getattr(media, "mime_type", "") or ""

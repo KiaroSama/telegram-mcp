@@ -20,7 +20,7 @@ historic seam.
 import argparse
 import logging
 import os
-import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
 from urllib.parse import unquote, urlparse
@@ -28,6 +28,13 @@ from urllib.parse import unquote, urlparse
 from mcp.server.fastmcp import Context
 from mcp.shared.exceptions import McpError
 
+from telegram_mcp.handles import (
+    DirHandle,
+    UnsafeTarget,
+    VerifiedFile,
+    open_allowed_directory,
+    open_verified_file,
+)
 from telegram_mcp.settings import _parse_bool_env
 
 logger = logging.getLogger("telegram_mcp")
@@ -89,31 +96,6 @@ def _fsync_file(path: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
-
-
-def _write_file_durably(destination: Path, data: bytes) -> None:
-    """Put ``data`` at ``destination`` so a reader sees all of it or none of it.
-
-    The bytes go to an unpredictable sibling first, are flushed to storage, and
-    only then take the destination's name. Writing into the destination directly
-    is what left a short file wearing the finished file's name: a full disk does
-    not fail at ``write()`` on a delayed-allocation filesystem, it fails at the
-    flush, which a direct write never performs.
-
-    The destination is expected to be a name the caller already reserved, so the
-    rename over it is deliberate. The temp file goes in ``finally`` whatever
-    happens -- including a ``CancelledError``, which no ``except`` here would see.
-    """
-    temp = destination.parent / f".{destination.name}.{secrets.token_hex(8)}.part"
-    try:
-        with open(temp, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp, destination)
-        _fsync_dir(destination.parent)
-    finally:
-        temp.unlink(missing_ok=True)
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -437,6 +419,87 @@ async def _resolve_writable_file_path(
     return candidate, None
 
 
+# --- from a verdict about a name to a handle on the object -------------------
+#
+# Everything above answers a question about a *pathname*, and a pathname is only
+# an instruction to look something up. The two gates below end that lookup: they
+# take the verdict, open the object it was about, prove the object they got is
+# the object that was judged, and hand back the open handle. Nothing downstream
+# -- Telethon, `open`, `os.replace`, `unlink` -- resolves the name a second time.
+
+
+@asynccontextmanager
+async def _open_verified_source(*, raw_path: str, ctx: Optional[Context], tool_name: str):
+    """Yield ``(source, error)``: an OPEN, verified file, never a pathname.
+
+    ``source.handle`` is what goes to Telethon. It accepts any seekable binary
+    stream and reads ``name`` for the mime type and the filename attribute, so
+    handing it the descriptor costs nothing and removes the reopen entirely --
+    along with the operator's directory layout, which used to travel with the
+    upload as a full path.
+
+    The size ceiling is applied to ``fstat`` of that descriptor. Measured off the
+    name it was a ceiling on whatever wore the name at the time of measuring.
+    """
+    candidate, error = await _resolve_readable_file_path(
+        raw_path=raw_path, ctx=ctx, tool_name=tool_name
+    )
+    if error:
+        yield None, error
+        return
+
+    roots, roots_error = await _ensure_allowed_roots(ctx, tool_name)
+    if roots_error:
+        yield None, roots_error
+        return
+
+    try:
+        with open_allowed_directory(candidate.parent, roots) as directory:
+            source = open_verified_file(
+                directory, candidate.name, max_bytes=MAX_FILE_BYTES.get(tool_name)
+            )
+    except UnsafeTarget as unsafe:
+        yield None, f"{tool_name} refused this file: {unsafe}."
+        return
+    except OSError:
+        yield None, f"File is not readable: {candidate}"
+        return
+
+    try:
+        yield source, None
+    finally:
+        source.close()
+
+
+@asynccontextmanager
+async def _open_verified_directory(*, path: Path, ctx: Optional[Context], tool_name: str):
+    """Yield ``(directory, error)``: an OPEN directory to create children in.
+
+    A write is a sequence -- reserve a name, stage the bytes, install them, clean
+    up -- and every step of it used to re-resolve the same string. Bound to a
+    handle instead, a directory swapped halfway through stops the sequence rather
+    than redirecting it.
+    """
+    roots, roots_error = await _ensure_allowed_roots(ctx, tool_name)
+    if roots_error:
+        yield None, roots_error
+        return
+
+    try:
+        directory = open_allowed_directory(path, roots)
+    except UnsafeTarget as unsafe:
+        yield None, f"{tool_name} refused this destination: {unsafe}."
+        return
+    except OSError:
+        yield None, f"Directory not writable: {path}"
+        return
+
+    try:
+        yield directory, None
+    finally:
+        directory.close()
+
+
 def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
     parser = argparse.ArgumentParser(
         prog="telegram-mcp",
@@ -468,6 +531,9 @@ def _configure_allowed_roots_from_cli(argv: Optional[List[str]] = None) -> None:
 
 __all__ = [
     "DEFAULT_DOWNLOAD_SUBDIR",
+    "DirHandle",
+    "UnsafeTarget",
+    "VerifiedFile",
     "DISALLOWED_PATH_PATTERNS",
     "EXTENSION_ALLOWLISTS",
     "MAX_FILE_BYTES",
@@ -493,10 +559,13 @@ __all__ = [
     "_get_effective_allowed_roots",
     "_get_effective_allowed_roots_with_status",
     "_is_roots_unsupported_error",
+    "_open_verified_directory",
+    "_open_verified_source",
     "_path_is_within_any_root",
     "_path_is_within_root",
     "_resolve_readable_file_path",
     "_resolve_writable_file_path",
     "_server_roots_fallback_enabled",
-    "_write_file_durably",
+    "open_allowed_directory",
+    "open_verified_file",
 ]

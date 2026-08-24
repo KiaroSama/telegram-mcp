@@ -14,7 +14,6 @@ not against a listing that may have gone stale.
 
 from typing import Any, Optional, Union
 
-from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 from telegram_mcp.message_view import display_name, display_text
 
@@ -290,8 +289,7 @@ async def get_poll_voters(
         message_id: The message carrying the poll.
         option_index: Restrict to the voters for one option, by its `index` from
             get_poll_results. Omitted lists the voters for every option.
-        limit: How many voters to fetch, newest first (1-200; a larger value is
-            served as 200 — page with `offset` rather than asking for more).
+        limit: How many voters to fetch, newest first.
         offset: The `next_offset` from a previous call, to continue where it
             stopped. Omitted starts at the newest voter. A call that answers with
             `next_offset: null` was the last page.
@@ -300,9 +298,6 @@ async def get_poll_voters(
     found in field values.
     """
     try:
-        bound = bounded(limit, LIMITS["get_poll_voters"])
-        if bound.error:
-            return bound.error
         cl, entity, msg, poll, _ = await _read_poll(chat_id, message_id, account)
         if not msg:
             return f"Message {message_id} was not found in chat {chat_id}."
@@ -329,7 +324,7 @@ async def get_poll_voters(
             functions.messages.GetPollVotesRequest(
                 peer=entity,
                 id=int(message_id),
-                limit=bound.value,
+                limit=int(limit),
                 option=option,
                 offset=offset or None,
             )
@@ -375,16 +370,15 @@ async def get_poll_voters(
 
         return format_tool_result(
             records,
-            dict(
-                bound.metadata,
-                message_id=getattr(msg, "id", message_id),
-                option_index=option_index,
-                voter_count=getattr(votes, "count", None),
-                returned=len(records),
-                offset=offset or None,
-                next_offset=getattr(votes, "next_offset", None),
-                note=_UNTRUSTED,
-            ),
+            {
+                "message_id": getattr(msg, "id", message_id),
+                "option_index": option_index,
+                "voter_count": getattr(votes, "count", None),
+                "returned": len(records),
+                "offset": offset or None,
+                "next_offset": getattr(votes, "next_offset", None),
+                "note": _UNTRUSTED,
+            },
         )
     except Exception as e:
         return log_and_format_error("get_poll_voters", e, chat_id=chat_id, message_id=message_id)

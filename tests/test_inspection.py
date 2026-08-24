@@ -218,16 +218,16 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
             ), "the effect asset was not requested"
             return _Iter([bytes([0x1F, 0x8B]) + b"lottie-payload"], [])
 
-    def _fake_frames(raw, suffix, count, max_dimension, cancelled=None):
+    async def _fake_frames(fn, raw, suffix, count, max_dimension, cancelled=None):
         # Verified against live Telegram data: the type="f" asset is a gzipped
         # Lottie, so asserting .webm here is what locked the bug in.
         assert suffix == ".tgs", f"the effect was decoded as {suffix}, not Lottie"
         return [{"frame_index": 0}], ["image"]
 
-    from telegram_mcp import media_preview
+    import telegram_mcp.tools.inspection as inspection
 
-    original = media_preview._encode_frames
-    media_preview._encode_frames = _fake_frames
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake_frames
     try:
         result = await _premium_effect_frames(
             _Client(),
@@ -238,7 +238,7 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
             max_bytes=50 * 1024 * 1024,
         )
     finally:
-        media_preview._encode_frames = original
+        inspection.asyncio.to_thread = original
 
     payload = json.loads(result[0])
     assert payload["results"][0]["source_asset"] == "premium_effect"
@@ -367,15 +367,15 @@ async def test_the_hard_ceiling_still_applies_when_max_bytes_is_raised():
 @pytest.mark.asyncio
 async def test_an_effect_at_exactly_the_limit_is_accepted():
     from telegram_mcp.tools.inspection import _premium_effect_frames
-    from telegram_mcp import media_preview
+    import telegram_mcp.tools.inspection as inspection
 
     client = _EffectClient(payload=b"x" * 1000)
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         return [{"frame_index": 0}], ["image"]
 
-    original = media_preview._encode_frames
-    media_preview._encode_frames = _fake
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
     try:
         result = await _premium_effect_frames(
             client,
@@ -386,7 +386,7 @@ async def test_an_effect_at_exactly_the_limit_is_accepted():
             max_bytes=1000,
         )
     finally:
-        media_preview._encode_frames = original
+        inspection.asyncio.to_thread = original
 
     assert not isinstance(result, str), f"the exact limit was refused: {result}"
     assert client.called is True
@@ -412,17 +412,17 @@ async def test_a_gzipped_effect_asset_is_decoded_as_lottie():
     """Live Telegram data: VideoSize type="f" carries a .tgs, not a WebM."""
     import json
 
-    from telegram_mcp import media_preview
+    import telegram_mcp.tools.inspection as inspection
     from telegram_mcp.tools.inspection import _premium_effect_frames
 
     seen = {}
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 
-    original = media_preview._encode_frames
-    media_preview._encode_frames = _fake
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
     try:
         result = await _premium_effect_frames(
             _EffectClient(payload=b"\x1f\x8b\x08gzipped-lottie"),
@@ -433,7 +433,7 @@ async def test_a_gzipped_effect_asset_is_decoded_as_lottie():
             max_bytes=1024,
         )
     finally:
-        media_preview._encode_frames = original
+        inspection.asyncio.to_thread = original
 
     assert seen["suffix"] == ".tgs"
     assert json.loads(result[0])["results"][0]["asset_format"] == "lottie_tgs"
@@ -444,17 +444,17 @@ async def test_a_non_gzip_effect_asset_still_falls_back_to_video():
     """Trust the bytes: a future format change must not be decoded as Lottie."""
     import json
 
-    from telegram_mcp import media_preview
+    import telegram_mcp.tools.inspection as inspection
     from telegram_mcp.tools.inspection import _premium_effect_frames
 
     seen = {}
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    async def _fake(fn, raw, suffix, count, max_dimension, cancelled=None):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 
-    original = media_preview._encode_frames
-    media_preview._encode_frames = _fake
+    original = inspection.asyncio.to_thread
+    inspection.asyncio.to_thread = _fake
     try:
         result = await _premium_effect_frames(
             _EffectClient(payload=b"\x1aE\xdf\xa3webm"),
@@ -465,7 +465,7 @@ async def test_a_non_gzip_effect_asset_still_falls_back_to_video():
             max_bytes=1024,
         )
     finally:
-        media_preview._encode_frames = original
+        inspection.asyncio.to_thread = original
 
     assert seen["suffix"] == ".webm"
     assert json.loads(result[0])["results"][0]["asset_format"] == "video"
@@ -666,7 +666,7 @@ async def test_one_unresolvable_emoji_does_not_sink_the_other_nine(monkeypatch):
 
     finished = []
 
-    async def _preview(client, document, count, max_dimension, max_bytes, ledger=None):
+    async def _preview(client, document, count, max_dimension, max_bytes):
         if document.id == 1:
             raise RuntimeError("file reference still stale after the retry")
         finished.append(document.id)
@@ -714,7 +714,7 @@ async def test_get_custom_emoji_never_exceeds_the_batch_budget(monkeypatch):
 
     live, peak = 0, 0
 
-    async def _preview(client, document, count, max_dimension, max_bytes, ledger=None):
+    async def _preview(client, document, count, max_dimension, max_bytes):
         nonlocal live, peak
         live += 1
         peak = max(peak, live)

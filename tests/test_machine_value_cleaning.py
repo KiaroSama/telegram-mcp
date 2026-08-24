@@ -28,7 +28,7 @@ import telegram_mcp.tools.buttons as buttons_tool
 # the number happens to be defined.
 from telegram_mcp.button_view import MAX_MACHINE_VALUE
 from telegram_mcp.message_view import describe_entities
-from telegram_mcp.tools.buttons import _resolve_icons, click_button, inspect_buttons
+from telegram_mcp.tools.buttons import _resolve_icons, click_button
 
 # RIGHT-TO-LEFT OVERRIDE: the classic way to make a URL read as something else.
 BIDI = "‮"
@@ -133,13 +133,7 @@ def _wire(monkeypatch):
 
 async def _pressed(wire, url):
     wire(SimpleNamespace(message="done", alert=None, url=url))
-    # The press token is minted by the listing and bound to that exact button, so
-    # a press goes through the listing here the way a caller's would.
-    listing = json.loads(await inspect_buttons(1, 7, account="default"))
-    token = listing["results"][0]["press_token"]
-    payload = json.loads(
-        await click_button(1, 7, 0, expect_text="Confirm", press_token=token, account="default")
-    )
+    payload = json.loads(await click_button(1, 7, 0, expect_text="Confirm", account="default"))
     return payload["results"][0]
 
 

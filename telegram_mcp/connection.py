@@ -29,12 +29,11 @@ from functools import wraps
 from logging.handlers import RotatingFileHandler
 from typing import Any, List, Optional
 
-from pythonjsonlogger.json import JsonFormatter
+from pythonjsonlogger import jsonlogger
 from telethon import TelegramClient, functions
 from telethon.errors import AuthKeyDuplicatedError, RPCError
 from telethon.sessions import StringSession
 
-from telegram_mcp.aliases import normalise_account_label
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, ValidationError
 from telegram_mcp.settings import _parse_bool_env
@@ -278,20 +277,13 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
             suffix, kind = key[len(prefix_name) :], "name"
         else:
             continue
-        # The SAME rule the account manager and session generator apply when
-        # they WRITE a label. Reading with a weaker one (a bare strip+lower) let
-        # `TELEGRAM_SESSION_STRING_WORK-2` register as `work-2`, a name no tool
-        # could ever produce - so the account existed and nothing could address
-        # it. Canonicalising here also makes `WORK-2` and `WORK_2` the same
-        # account, which is what the collision check below then refuses.
-        try:
-            label = normalise_account_label(suffix).lower()
-        except ValueError as error:
+        label = suffix.strip().lower()
+        if not label:
             raise ValidationError(
-                f"'{key}' does not name a usable account: {error} Use "
+                f"'{key}' has no account label after the prefix. Use "
                 f"'{prefix_str}<LABEL>' with a label, or the unsuffixed variable "
                 "for the default account."
-            ) from error
+            )
         declared.setdefault(label, []).append((key, kind, value))
 
     for label, sources in sorted(declared.items()):
@@ -299,9 +291,8 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
             names = ", ".join(sorted(key for key, _, _ in sources))
             raise ValidationError(
                 f"Account '{label}' is defined more than once ({names}). These "
-                "resolve to one account after normalisation - spaces and hyphens "
-                "both become underscores and case is folded - and which one wins "
-                "would depend on environment order. Keep exactly one."
+                "resolve to one account, and which one wins depends on "
+                "environment order. Keep exactly one."
             )
         _key, kind, value = sources[0]
         session = StringSession(value) if kind == "string" else value
@@ -658,7 +649,7 @@ def _make_file_handler(path: str) -> logging.Handler:
     )
     handler.setLevel(logging.ERROR)
     handler.setFormatter(
-        JsonFormatter(
+        jsonlogger.JsonFormatter(
             "%(asctime)s %(name)s %(levelname)s %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S%z",
         )

@@ -1,6 +1,5 @@
 """Profile MCP tools."""
 
-from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 
 
@@ -61,17 +60,14 @@ async def set_profile_photo(
     try:
         cl = get_client(account)
         await ensure_connected(cl)
-        safe_path, path_error = await _resolve_readable_file_path(
-            raw_path=file_path,
-            ctx=ctx,
-            tool_name="set_profile_photo",
-        )
-        if path_error:
-            return path_error
-        await cl(
-            functions.photos.UploadProfilePhotoRequest(file=await cl.upload_file(str(safe_path)))
-        )
-        return f"Profile photo updated from {safe_path}."
+        async with _open_verified_source(
+            raw_path=file_path, ctx=ctx, tool_name="set_profile_photo"
+        ) as (source, path_error):
+            if path_error:
+                return path_error
+            uploaded = await cl.upload_file(source.handle)
+            await cl(functions.photos.UploadProfilePhotoRequest(file=uploaded))
+            return f"Profile photo updated from {source.path}."
     except Exception as e:
         return log_and_format_error("set_profile_photo", e, file_path=file_path)
 
@@ -527,27 +523,14 @@ async def set_bot_commands(commands: list, account: str = None) -> str:
 async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: str = None) -> str:
     """
     Get profile photos of a user.
-
-    Args:
-        user_id: The user ID or username.
-        limit: How many photo ids to return (1-100; a larger value is served as 100).
     """
     try:
-        bound = bounded(limit, LIMITS["get_user_photos"])
-        if bound.error:
-            return bound.error
         cl = get_client(account)
         user = await resolve_entity(user_id, cl)
         photos = await cl(
-            functions.photos.GetUserPhotosRequest(
-                user_id=user, offset=0, max_id=0, limit=bound.value
-            )
+            functions.photos.GetUserPhotosRequest(user_id=user, offset=0, max_id=0, limit=limit)
         )
-        ids = [p.id for p in photos.photos]
-        return format_tool_result(
-            [{"photo_id": photo_id} for photo_id in ids],
-            dict(bound.metadata, returned=len(ids), has_more=len(ids) >= bound.value),
-        )
+        return json.dumps([p.id for p in photos.photos], indent=2)
     except Exception as e:
         return log_and_format_error("get_user_photos", e, user_id=user_id, limit=limit)
 

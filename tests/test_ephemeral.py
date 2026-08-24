@@ -11,6 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers_handles import refuse_source, source_gate
+
+from telegram_mcp import file_roots
 from telegram_mcp.tools import ephemeral as mod
 from telegram_mcp.tools.ephemeral import (
     VIEW_ONCE,
@@ -112,8 +115,10 @@ def _with_roots(monkeypatch, tmp_path):
             return [tmp_path], None
 
         monkeypatch.setattr(mod, "_resolve_writable_file_path", _resolve)
-        monkeypatch.setattr(mod, "_ensure_allowed_roots", _roots)
-        monkeypatch.setattr(mod, "_path_is_within_any_root", lambda path, roots: True)
+        # Patched in file_roots, not on the tool module: the directory gate
+        # lives there and calls this by its own name, so the REAL handle
+        # logic runs against a real temp directory.
+        monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
         return tmp_path
 
     return wire
@@ -242,7 +247,7 @@ async def test_a_save_that_cannot_read_the_roots_leaves_nothing_on_disk(
     async def _roots(ctx, tool_name):
         return None, "Path is outside allowed roots."
 
-    monkeypatch.setattr(mod, "_ensure_allowed_roots", _roots)
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
 
     result = await save_disappearing_media(1, 5, account="a")
 
@@ -288,11 +293,11 @@ async def test_sending_reuses_the_shared_path_gate_rather_than_widening_it(monke
     """The file-path surface is upstream's, gated by allowed roots; this must not bypass it."""
     seen = {}
 
-    async def _resolve_path(*, raw_path, ctx, tool_name):
+    def _gate(*, raw_path, ctx, tool_name):
         seen["tool_name"] = tool_name
-        return None, "disabled until allowed roots are configured."
+        return refuse_source("disabled until allowed roots are configured.")
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", _gate)
 
     result = await send_disappearing_media(1, "x.jpg", 30, account="a")
 
@@ -301,16 +306,16 @@ async def test_sending_reuses_the_shared_path_gate_rather_than_widening_it(monke
 
 
 @pytest.mark.asyncio
-async def test_zero_seconds_means_view_once_not_no_timer(monkeypatch):
+async def test_zero_seconds_means_view_once_not_no_timer(monkeypatch, tmp_path):
     """0 must not become ttl_seconds=0, which would send ordinary media."""
     sent = {}
-
-    async def _resolve_path(*, raw_path, ctx, tool_name):
-        return "/tmp/x.jpg", None
+    photo = tmp_path / "x.jpg"
+    photo.write_bytes(b"jpeg")
 
     class _SendClient:
         async def send_file(self, entity, path, ttl=None, caption=None, **kw):
             sent["ttl"] = ttl
+            sent["name"] = getattr(path, "name", path)
             return SimpleNamespace(id=9, media=SimpleNamespace(ttl_seconds=ttl))
 
     async def _ensure(_client):
@@ -319,7 +324,7 @@ async def test_zero_seconds_means_view_once_not_no_timer(monkeypatch):
     async def _resolve(chat_id, _client):
         return SimpleNamespace(id=chat_id)
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", source_gate(lambda raw: (photo, None)))
     monkeypatch.setattr(mod, "get_client", lambda account=None: _SendClient())
     monkeypatch.setattr(mod, "ensure_connected", _ensure)
     monkeypatch.setattr(mod, "resolve_entity", _resolve)
@@ -327,6 +332,7 @@ async def test_zero_seconds_means_view_once_not_no_timer(monkeypatch):
     payload = json.loads(await send_disappearing_media(1, "x.jpg", 0, account="a"))
 
     assert sent["ttl"] == VIEW_ONCE
+    assert sent["name"] == "x.jpg", "a pathname reached Telethon instead of a handle"
     assert payload["results"][0]["view_once"] is True
 
 
@@ -337,12 +343,11 @@ def test_the_ttl_ceiling_is_the_measured_one():
     assert MAX_TTL_SECONDS == 60
 
 
-def _sender(monkeypatch, media_ttl):
+def _sender(monkeypatch, media_ttl, tmp_path):
     """A client whose send_file reports whatever timer Telegram applied."""
     sent = {}
-
-    async def _resolve_path(*, raw_path, ctx, tool_name):
-        return "/tmp/x.jpg", None
+    photo = tmp_path / "x.jpg"
+    photo.write_bytes(b"jpeg")
 
     class _SendClient:
         async def send_file(self, entity, path, ttl=None, caption=None, **kw):
@@ -356,7 +361,7 @@ def _sender(monkeypatch, media_ttl):
     async def _resolve(chat_id, _client):
         return SimpleNamespace(id=chat_id)
 
-    monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+    monkeypatch.setattr(mod, "_open_verified_source", source_gate(lambda raw: (photo, None)))
     monkeypatch.setattr(mod, "get_client", lambda account=None: _SendClient())
     monkeypatch.setattr(mod, "ensure_connected", _ensure)
     monkeypatch.setattr(mod, "resolve_entity", _resolve)
@@ -364,10 +369,10 @@ def _sender(monkeypatch, media_ttl):
 
 
 @pytest.mark.asyncio
-async def test_a_timer_over_the_ceiling_is_refused_rather_than_sent_wrong(monkeypatch):
+async def test_a_timer_over_the_ceiling_is_refused_rather_than_sent_wrong(monkeypatch, tmp_path):
     """Telegram drops an out-of-range timer silently, so sending it would produce
     permanent media while the caller believed it was disappearing."""
-    sent = _sender(monkeypatch, "echo")
+    sent = _sender(monkeypatch, "echo", tmp_path)
 
     result = await send_disappearing_media(1, "x.jpg", 90, account="a")
 
@@ -377,9 +382,9 @@ async def test_a_timer_over_the_ceiling_is_refused_rather_than_sent_wrong(monkey
 
 
 @pytest.mark.asyncio
-async def test_a_dropped_timer_is_reported_loudly(monkeypatch):
+async def test_a_dropped_timer_is_reported_loudly(monkeypatch, tmp_path):
     """Defence in depth: the accepted range is Telegram's to change."""
-    _sender(monkeypatch, None)
+    _sender(monkeypatch, None, tmp_path)
 
     payload = json.loads(await send_disappearing_media(1, "x.jpg", 30, account="a"))
     record = payload["results"][0]
@@ -390,8 +395,8 @@ async def test_a_dropped_timer_is_reported_loudly(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_an_applied_timer_is_not_flagged(monkeypatch):
-    _sender(monkeypatch, "echo")
+async def test_an_applied_timer_is_not_flagged(monkeypatch, tmp_path):
+    _sender(monkeypatch, "echo", tmp_path)
 
     payload = json.loads(await send_disappearing_media(1, "x.jpg", 30, account="a"))
 

@@ -14,6 +14,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers_handles import source_gate, uploaded_names
+
 from telegram_mcp.tools import profile as mod
 from telegram_mcp.tools.profile import (
     delete_profile_photo,
@@ -59,18 +61,24 @@ class _Client:
 
 
 @pytest.fixture
-def _wire(monkeypatch):
-    def wire(client, path_error=None, resolved="C:/roots/avatar.jpg"):
+def _wire(monkeypatch, tmp_path):
+    def wire(client, path_error=None, resolved=None):
         monkeypatch.setattr(mod, "get_client", lambda account=None: client)
 
         async def _ensure(_client):
             return None
 
-        async def _resolve_path(*, raw_path, ctx, tool_name):
-            return (None, path_error) if path_error else (resolved, None)
+        if resolved is None:
+            resolved = tmp_path / "avatar.jpg"
+            if not resolved.exists():
+                resolved.write_bytes(b"jpeg-bytes")
 
         monkeypatch.setattr(mod, "ensure_connected", _ensure)
-        monkeypatch.setattr(mod, "_resolve_readable_file_path", _resolve_path)
+        monkeypatch.setattr(
+            mod,
+            "_open_verified_source",
+            source_gate(lambda raw: (None, path_error) if path_error else (resolved, None)),
+        )
         return client
 
     return wire
@@ -106,11 +114,13 @@ async def test_a_refused_photo_path_uploads_nothing(_wire):
 @pytest.mark.asyncio
 async def test_an_accepted_photo_path_uploads_then_sets(_wire):
     """The upload must use the path the gate resolved, not the raw argument."""
-    client = _wire(_Client(), resolved="C:/roots/avatar.jpg")
+    client = _wire(_Client())
 
     await set_profile_photo("avatar.jpg", account="a")
 
-    assert client.uploads == ["C:/roots/avatar.jpg"], "the unresolved argument was uploaded"
+    # An open handle, not the raw argument and not a name Telethon would
+    # have had to resolve for a second time.
+    assert uploaded_names(client.uploads) == ["avatar.jpg"]
     assert client.names == ["UploadProfilePhotoRequest"]
 
 

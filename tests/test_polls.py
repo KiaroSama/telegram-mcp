@@ -12,7 +12,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram_mcp.tools import messages_state
 from telegram_mcp.tools import polls as mod
 from telegram_mcp.tools.polls import (
     _describe,
@@ -561,19 +560,9 @@ def _in(monkeypatch):
     from telegram_mcp.tools import messages_state
 
     class _Clock(datetime):
-        # Frozen, but movable on purpose: `_slow_resolve` charges the round trip
-        # that resolving a chat costs, which is the whole point of rechecking the
-        # deadline after it rather than before.
-        offset = timedelta(0)
-
-        @classmethod
-        def advance(cls, seconds):
-            cls.offset += timedelta(seconds=seconds)
-
         @classmethod
         def now(cls, tz=None):
-            moment = _FROZEN + cls.offset
-            return moment if tz is None else moment.astimezone(tz)
+            return _FROZEN if tz is None else _FROZEN.astimezone(tz)
 
     monkeypatch.setattr(messages_state, "datetime", _Clock)
     return lambda seconds: (_FROZEN + timedelta(seconds=seconds)).isoformat()
@@ -623,110 +612,15 @@ async def test_a_close_date_in_the_past_still_says_so_plainly(_wire_state, _in):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("seconds", [messages_state.EARLIEST_POLL_CLOSE_SECONDS, 2628000])
+@pytest.mark.parametrize("seconds", [5, 2628000])
 async def test_the_ends_of_the_close_window_are_accepted(_wire_state, _in, seconds):
     """Both boundaries are legal values, and an off-by-one here refuses a poll
-    Telegram would have taken. The near end is Telegram's 5-second floor plus the
-    slack the request needs to still be inside it when it lands."""
+    Telegram would have taken."""
     from telegram_mcp.tools import messages_state
 
     await messages_state.create_poll("me", "q?", ["a", "b"], close_date=_in(seconds), account="a")
 
     assert _wire_state.sent("SendMediaRequest") is not None
-
-
-# --- the deadline has to still be legal when the request LANDS --------------
-
-
-@pytest.fixture
-def _slow_resolve(monkeypatch, _wire_state, _in):
-    """Charge `resolve_entity` a number of seconds on the frozen clock.
-
-    Resolving a chat is a round trip. `_in` freezes time, so without this the
-    clock the tool reads before resolving is the clock it reads after, and the
-    whole class of "legal when parsed, expired when sent" is untestable.
-    """
-    from telegram_mcp.tools import messages_state
-
-    def charge(seconds):
-        async def _resolve(chat_id, _client):
-            messages_state.datetime.advance(seconds)
-            return SimpleNamespace(id=chat_id)
-
-        monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
-
-    return charge
-
-
-@pytest.mark.asyncio
-async def test_a_deadline_spent_resolving_the_chat_is_refused_without_sending(
-    _wire_state, _in, _slow_resolve
-):
-    """The gap this closes: close_date was checked BEFORE resolve_entity, and
-    resolving a chat costs a round trip. A deadline that was comfortably inside
-    Telegram's window when parsed could be under the five-second floor by the time
-    SendMediaRequest went out, and Telegram refused the poll after the send."""
-    from telegram_mcp.tools import messages_state
-
-    _slow_resolve(20)
-
-    result = await messages_state.create_poll(
-        "me", "q?", ["a", "b"], close_date=_in(15), account="a"
-    )
-
-    assert _wire_state.sent("SendMediaRequest") is None, "sent a poll whose deadline had expired"
-    assert "close_date" in result
-    assert "later" in result
-
-
-@pytest.mark.asyncio
-async def test_a_deadline_left_below_the_send_margin_is_refused_without_sending(
-    _wire_state, _in, _slow_resolve
-):
-    """Still in the future, but too close to survive serialising and the wire —
-    which is the same refusal, arriving from Telegram instead, one send later."""
-    from telegram_mcp.tools import messages_state
-
-    _slow_resolve(60 - messages_state.EARLIEST_POLL_CLOSE_SECONDS + 1)
-
-    result = await messages_state.create_poll(
-        "me", "q?", ["a", "b"], close_date=_in(60), account="a"
-    )
-
-    assert _wire_state.sent("SendMediaRequest") is None
-    assert "close_date" in result
-
-
-@pytest.mark.asyncio
-async def test_a_deadline_with_room_to_spare_survives_the_resolution_delay(
-    _wire_state, _in, _slow_resolve
-):
-    """The recheck must not turn a normal round trip into a refusal."""
-    from telegram_mcp.tools import messages_state
-
-    _slow_resolve(3)
-
-    await messages_state.create_poll("me", "q?", ["a", "b"], close_date=_in(600), account="a")
-
-    request = _wire_state.sent("SendMediaRequest")
-    assert request is not None
-    assert request.media.poll.close_date is not None
-
-
-@pytest.mark.asyncio
-async def test_telegrams_bare_five_second_floor_is_not_enough_to_send_from(_wire_state, _in):
-    """5 s is what Telegram documents, measured on ITS clock when the request
-    lands. Accepting it here means sending something guaranteed to arrive late."""
-    from telegram_mcp.tools import messages_state
-
-    assert messages_state.EARLIEST_POLL_CLOSE_SECONDS > 5
-
-    result = await messages_state.create_poll(
-        "me", "q?", ["a", "b"], close_date=_in(5), account="a"
-    )
-
-    assert _wire_state.sent("SendMediaRequest") is None
-    assert "close_date" in result
 
 
 # --- how many options Telegram actually accepts ----------------------------

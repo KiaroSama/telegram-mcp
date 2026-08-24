@@ -5,13 +5,23 @@ from telegram_mcp.tools import media
 
 
 class _DummyClient:
+    """Reads what it was handed while it still holds it.
+
+    The gate hands over an OPEN file and closes it when the tool returns, so
+    a handle inspected after the call is a closed one. Telethon reads during
+    the call; so does this.
+    """
+
     def __init__(self):
         self.sent = None
 
     async def send_file(self, entity, file_paths, caption=None, reply_to=None):
+        given = file_paths if isinstance(file_paths, list) else [file_paths]
         self.sent = {
             "entity": entity,
             "file_paths": file_paths,
+            "names": [handle.name for handle in given],
+            "bytes": [handle.read() for handle in given],
             "caption": caption,
             "reply_to": reply_to,
         }
@@ -49,12 +59,13 @@ async def test_album_mode_sends_multiple_files_as_one_media_group(
     )
 
     assert result == "Album sent to chat AgenticAIChat with 2 files."
-    assert client.sent == {
-        "entity": "entity:AgenticAIChat",
-        "file_paths": [str(first), str(second)],
-        "caption": "pick one",
-        "reply_to": None,
-    }
+    assert client.sent["entity"] == "entity:AgenticAIChat"
+    assert client.sent["caption"] == "pick one"
+    assert client.sent["reply_to"] is None
+    # Open handles, not names. Telethon reopening a path is exactly the
+    # second lookup the gate exists to remove.
+    assert client.sent["names"] == [first.name, second.name]
+    assert client.sent["bytes"] == [b"png-one", b"png-two"]
 
 
 @pytest.mark.asyncio
@@ -109,12 +120,11 @@ async def test_send_file_passes_topic_id_as_reply_to(tmp_path, monkeypatch):
     result = await media.send_file("ForumChat", "doc.pdf", caption="hello", topic_id=42)
 
     assert result == f"File sent to chat ForumChat from {path}."
-    assert client.sent == {
-        "entity": "entity:forum",
-        "file_paths": str(path),
-        "caption": "hello",
-        "reply_to": 42,
-    }
+    assert client.sent["entity"] == "entity:forum"
+    assert client.sent["caption"] == "hello"
+    assert client.sent["reply_to"] == 42
+    assert client.sent["names"] == ["doc.pdf"]
+    assert client.sent["bytes"] == [b"%PDF"]
 
 
 @pytest.mark.asyncio

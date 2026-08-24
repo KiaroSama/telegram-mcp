@@ -167,10 +167,6 @@ async def test_serve_http_transports_bind_host_and_port(monkeypatch, transport):
     monkeypatch.setattr(runner, "mcp", fake)
     monkeypatch.setenv("MCP_HOST", "0.0.0.0")
     monkeypatch.setenv("MCP_PORT", "9000")
-    # 0.0.0.0 is every interface, and serving there now requires saying which
-    # thing authenticates callers. Declaring the proxy contract keeps this test
-    # about host/port plumbing while exercising the path a real remote bind takes.
-    monkeypatch.setenv("MCP_TRUSTED_PROXY_AUTH", "1")
 
     await runner._serve(transport)
 
@@ -387,90 +383,3 @@ async def test_a_duplicated_auth_key_is_not_retried(monkeypatch):
 
     assert client.attempts == 1, "the burned key was retried"
     assert slept == [], "the run slept waiting for a key that can never come back"
-
-
-# --- an address anyone can reach is not a configuration detail -----------------
-
-
-@pytest.fixture
-def _no_remote_env(monkeypatch):
-    for name in (
-        "MCP_TRUSTED_PROXY_AUTH",
-        "MCP_ALLOW_UNAUTHENTICATED_REMOTE",
-        "MCP_ALLOWED_HOSTS",
-        "MCP_ALLOWED_ORIGINS",
-    ):
-        monkeypatch.delenv(name, raising=False)
-
-
-@pytest.mark.parametrize("host", ["127.0.0.1", "localhost", "::1", "", "127.0.0.5"])
-def test_a_loopback_bind_needs_no_permission(host, _no_remote_env):
-    """The default has to stay frictionless, or the gate gets switched off wholesale."""
-    runner._refuse_unauthenticated_remote_bind(host)
-
-
-@pytest.mark.parametrize(
-    "host",
-    [
-        "0.0.0.0",  # every interface, which is the common accident
-        "::",
-        "192.168.1.50",
-        "10.0.0.7",
-        "203.0.113.9",
-        "mcp.example.com",  # a name is almost always a deliberate public bind
-    ],
-)
-def test_a_reachable_bind_is_refused_when_nothing_authenticates(host, _no_remote_env):
-    """Every tool here acts as the Telegram account. Open on a routable address,
-    reaching the port IS the authorization."""
-    with pytest.raises(runner.ValidationError) as caught:
-        runner._refuse_unauthenticated_remote_bind(host)
-
-    message = str(caught.value)
-    assert host in message
-    # The message has to say what to DO, or it just gets worked around.
-    assert "MCP_TRUSTED_PROXY_AUTH" in message
-    assert "127.0.0.1" in message
-
-
-def test_allowed_hosts_alone_does_not_open_the_gate(monkeypatch, _no_remote_env):
-    """The trap this exists to close. `MCP_ALLOWED_HOSTS` enables DNS-rebinding
-    protection, which checks which NAME a request arrived under - it stops a
-    browser being tricked into calling this server and asks nothing about who is
-    calling. Treating it as authentication is the mistake the README used to
-    invite, and it is exactly the configuration a public deployment would reach
-    for first.
-    """
-    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "mcp.example.com")
-    monkeypatch.setenv("MCP_ALLOWED_ORIGINS", "https://mcp.example.com")
-
-    with pytest.raises(runner.ValidationError) as caught:
-        runner._refuse_unauthenticated_remote_bind("0.0.0.0")
-
-    assert "MCP_ALLOWED_HOSTS is not an answer" in str(caught.value)
-
-
-def test_a_declared_authenticating_proxy_is_accepted(monkeypatch, _no_remote_env):
-    """The server cannot verify that a proxy authenticates; the operator asserts it.
-    An assertion that has to be written down is still worth more than a default."""
-    monkeypatch.setenv("MCP_TRUSTED_PROXY_AUTH", "1")
-
-    runner._refuse_unauthenticated_remote_bind("0.0.0.0")
-
-
-def test_the_dangerous_override_works_and_says_so(monkeypatch, capsys, _no_remote_env):
-    """Kept, because a private lab network is a real case - but it announces itself
-    on every start rather than being a quiet flag someone set once and forgot."""
-    monkeypatch.setenv("MCP_ALLOW_UNAUTHENTICATED_REMOTE", "1")
-
-    runner._refuse_unauthenticated_remote_bind("0.0.0.0")
-
-    warning = capsys.readouterr().err
-    assert "no authentication" in warning
-    assert "controls the configured Telegram account" in warning
-
-
-def test_an_unparseable_host_is_treated_as_remote(_no_remote_env):
-    """Wrong in the safe direction. Guessing "probably local" about an address that
-    decides who can read someone's messages is not a guess worth making."""
-    assert runner._binds_beyond_this_machine("not-an-address at all") is True

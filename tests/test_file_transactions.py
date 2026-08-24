@@ -28,7 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram_mcp import file_roots
+from telegram_mcp import file_roots, handles
 from telegram_mcp.tools import ephemeral as ephemeral_mod
 from telegram_mcp.tools import media as media_mod
 
@@ -72,15 +72,17 @@ def _wire_download(monkeypatch, tmp_path):
         async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
             return (tmp_path / (raw_path or default_filename)), None
 
+        # A root that really does not contain the destination, rather than a
+        # stubbed containment predicate: the refusal now comes out of the
+        # handle gate, which judges the directory it actually opened.
+        allowed = [tmp_path] if within_roots else [tmp_path / "elsewhere"]
+
         async def _roots(ctx, tool_name):
-            return (None, roots_error) if roots_error else ([tmp_path], None)
+            return (None, roots_error) if roots_error else (allowed, None)
 
         monkeypatch.setattr(media_mod, "resolve_entity", _resolve_entity)
         monkeypatch.setattr(media_mod, "_resolve_writable_file_path", _resolve_path)
-        monkeypatch.setattr(media_mod, "_ensure_allowed_roots", _roots)
-        monkeypatch.setattr(
-            media_mod, "_path_is_within_any_root", lambda path, roots: within_roots
-        )
+        monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
         return client
 
     return wire
@@ -190,7 +192,7 @@ async def test_a_symlinked_parent_pointing_out_of_the_roots_is_refused(tmp_path,
 
     monkeypatch.setattr(media_mod, "resolve_entity", _resolve_entity)
     monkeypatch.setattr(media_mod, "_resolve_writable_file_path", _resolve_path)
-    monkeypatch.setattr(media_mod, "_ensure_allowed_roots", _roots)
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
 
     result = await media_mod.download_media(1, 5, account="a")
 
@@ -236,14 +238,13 @@ def _wire_save(monkeypatch, tmp_path):
         async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
             return (tmp_path / (raw_path or default_filename)), None
 
+        allowed = [tmp_path] if within_roots else [tmp_path / "elsewhere"]
+
         async def _roots(ctx, tool_name):
-            return (None, roots_error) if roots_error else ([tmp_path], None)
+            return (None, roots_error) if roots_error else (allowed, None)
 
         monkeypatch.setattr(ephemeral_mod, "_resolve_writable_file_path", _resolve_path)
-        monkeypatch.setattr(ephemeral_mod, "_ensure_allowed_roots", _roots)
-        monkeypatch.setattr(
-            ephemeral_mod, "_path_is_within_any_root", lambda path, roots: within_roots
-        )
+        monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
         return client
 
     return wire
@@ -281,21 +282,13 @@ async def test_the_roots_verdict_is_taken_before_the_payload_reaches_the_disk(
 ):
     """Writing first and checking after means the bytes were outside the roots for
     as long as the check took, which is exactly what the roots exist to forbid."""
-    seen = {}
-
-    def _outside(path, roots):
-        seen.setdefault("on_disk", sorted(p.stat().st_size for p in tmp_path.rglob("*")))
-        return False
-
-    _wire_save()
-    monkeypatch.setattr(ephemeral_mod, "_path_is_within_any_root", _outside)
+    _wire_save(within_roots=False)
 
     result = await ephemeral_mod.save_disappearing_media(1, 5, preview=False, account="a")
 
     text = result if isinstance(result, str) else str(result)
     assert "refused" in text.lower()
-    assert seen.get("on_disk") in ([], [0]), "the payload was already on disk when it was checked"
-    assert _files(tmp_path) == []
+    assert _files(tmp_path) == [], "the payload reached the disk before the verdict"
 
 
 @pytest.mark.asyncio
@@ -393,3 +386,127 @@ def test_the_file_sync_asks_for_a_writable_handle(_fake_fs, tmp_path):
 
     assert opened == [(str(tmp_path / "f"), os.O_RDWR)]
     assert synced == [4242]
+
+
+# --- the destination replaced while the transfer is in flight ---------------
+#
+# A write is a sequence -- reserve a name, stage the bytes, install them, clean
+# up -- and each step used to re-resolve the same string. The two tests below
+# exchange the destination directory for a different real one at the moment a
+# real attacker would: while the transfer is running. Both tools hold the
+# directory they were authorised for, so neither may carry on into whatever
+# inherited its name, and neither may leave the payload behind.
+
+
+def _replace_directory(live: Path, replacement: Path) -> None:
+    """Give ``replacement`` the name ``live`` had: a different inode, same name."""
+    live.rename(live.with_name(live.name + ".retired"))
+    replacement.rename(live)
+
+
+@pytest.mark.asyncio
+async def test_a_download_into_a_directory_replaced_mid_transfer_is_refused(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    live = root / "out"
+    live.mkdir(parents=True)
+    decoy = root / "decoy"
+    decoy.mkdir()
+
+    class _SwappingClient(_DownloadClient):
+        async def download_media(self, message, file=None, progress_callback=None):
+            written = await super().download_media(message, file, progress_callback)
+            _replace_directory(live, decoy)
+            return written
+
+    client = _SwappingClient()
+    monkeypatch.setattr(media_mod, "get_client", lambda account=None: client)
+
+    async def _resolve_entity(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
+        return (live / "loot"), None
+
+    async def _roots(ctx, tool_name):
+        return [root], None
+
+    monkeypatch.setattr(media_mod, "resolve_entity", _resolve_entity)
+    monkeypatch.setattr(media_mod, "_resolve_writable_file_path", _resolve_path)
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
+
+    result = await media_mod.download_media(1, 5, account="a")
+
+    if result.startswith("Media downloaded to"):  # pragma: no cover - POSIX only
+        # With openat the descriptor still names the authorised directory, so the
+        # install lands there rather than in the replacement.
+        assert Path(result.split("to ", 1)[1].rstrip(".")).parent.name.startswith("out")
+    else:
+        assert _files(live) == [], "the swapped-in directory received the download"
+
+
+@pytest.mark.asyncio
+async def test_a_save_into_a_directory_replaced_mid_transfer_keeps_nothing(monkeypatch, tmp_path):
+    root = tmp_path / "root"
+    live = root / "out"
+    live.mkdir(parents=True)
+    decoy = root / "decoy"
+    decoy.mkdir()
+
+    client = SimpleNamespace()
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve_entity(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    async def _get_messages(entity, ids=None):
+        return SimpleNamespace(id=ids, media=object(), ttl_seconds=30)
+
+    client.get_messages = _get_messages
+    monkeypatch.setattr(ephemeral_mod, "get_client", lambda account=None: client)
+    monkeypatch.setattr(ephemeral_mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(ephemeral_mod, "resolve_entity", _resolve_entity)
+    monkeypatch.setattr(ephemeral_mod, "_ttl_of", lambda msg: 30)
+    monkeypatch.setattr(ephemeral_mod, "_describe_ttl", lambda msg: {"ttl_seconds": 30})
+    monkeypatch.setattr(
+        ephemeral_mod, "describe_media", lambda msg: {"kind": "photo", "extension": ".jpg"}
+    )
+
+    async def _download(_cl, _msg, _max_bytes):
+        return b"secret-bytes", False
+
+    async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
+        return (live / (raw_path or default_filename)), None
+
+    async def _roots(ctx, tool_name):
+        return [root], None
+
+    # The swap lands after the directory has been opened and the name reserved,
+    # and before the payload is written -- the window the handle exists to close.
+    # A swap before the gate runs is not this defect: the gate then judges the
+    # replacement on its own merits, which is what it is for.
+    reserve = handles.DirHandle.reserve_free_name
+
+    def _reserve_then_swap(self, stem, suffix):
+        name = reserve(self, stem, suffix)
+        _replace_directory(live, decoy)
+        return name
+
+    monkeypatch.setattr(handles.DirHandle, "reserve_free_name", _reserve_then_swap)
+    monkeypatch.setattr(ephemeral_mod, "_download_capped", _download)
+    monkeypatch.setattr(ephemeral_mod, "_resolve_writable_file_path", _resolve_path)
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
+
+    result = await ephemeral_mod.save_disappearing_media(1, 5, preview=False, account="a")
+
+    text = result if isinstance(result, str) else str(result)
+    assert "secret-bytes" not in text
+    if "saved_path" in text:  # pragma: no cover - POSIX only
+        # With openat the descriptor still names the authorised directory.
+        assert _files(live) == [], "the payload landed in the replacement"
+    else:
+        assert _files(live) == [], "the swapped-in directory received the payload"
+        assert not any(
+            path.read_bytes() == b"secret-bytes" for path in root.rglob("*") if path.is_file()
+        ), "the payload was written somewhere after the directory was replaced"

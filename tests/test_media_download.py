@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from telegram_mcp import file_roots
 from telegram_mcp.tools import media as mod
 
 
@@ -67,13 +68,19 @@ def _wire(monkeypatch, tmp_path):
         async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
             return (tmp_path / (raw_path or default_filename)), None
 
+        # A root that does not contain the destination, rather than a stubbed
+        # containment predicate: the refusal now comes out of the real handle
+        # gate, so the test has to give it a real reason to refuse.
+        allowed = [tmp_path] if within_roots else [tmp_path / "elsewhere"]
+
         async def _roots(ctx, tool_name):
-            return (None, roots_error) if roots_error else ([tmp_path], None)
+            return (None, roots_error) if roots_error else (allowed, None)
 
         monkeypatch.setattr(mod, "resolve_entity", _resolve_entity)
         monkeypatch.setattr(mod, "_resolve_writable_file_path", _resolve_path)
-        monkeypatch.setattr(mod, "_ensure_allowed_roots", _roots)
-        monkeypatch.setattr(mod, "_path_is_within_any_root", lambda path, roots: within_roots)
+        # Patched where the gate reads it: `_open_verified_directory` lives in
+        # file_roots and calls this by its own module name.
+        monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
         return client
 
     return wire
