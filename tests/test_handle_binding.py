@@ -46,7 +46,15 @@ class _RacingCalls(SystemCalls):
     The swap runs *before* the call it is attached to, which is what makes a
     race deterministic: the replacement is already in place when the primitive
     under test looks.
+
+    ``pins = False`` because these tests drive the *decision* path -- the branch
+    that has no way to hold the object and must therefore prove its identity by
+    hand. On a host that can pin, the swap these tests perform is refused by the
+    kernel outright and there is nothing left to decide; that guarantee is
+    asserted against the real filesystem in ``tests/test_object_binding.py``.
     """
+
+    pins = False
 
     def __init__(self, method: str, nth: int, swap):
         self._method = method
@@ -107,7 +115,12 @@ def test_a_parent_swapped_while_it_is_being_authorised_is_refused(tmp_path):
 def test_a_parent_swapped_after_authorisation_stops_every_later_operation(tmp_path):
     """The write steps -- reserve, stage, install, clean up -- all name children
     of one directory. Once that name stops meaning the directory that was
-    authorised, none of them may proceed."""
+    authorised, none of them may proceed.
+
+    Three outcomes count, one per platform primitive. With ``openat`` the
+    descriptor keeps naming the authorised object and the swap is irrelevant.
+    With a Win32 pin the kernel refuses the swap. With neither, the identity
+    check refuses every operation that follows it."""
     root = tmp_path / "root"
     live = root / "out"
     live.mkdir(parents=True)
@@ -116,9 +129,14 @@ def test_a_parent_swapped_after_authorisation_stops_every_later_operation(tmp_pa
 
     parent = handles.open_allowed_directory(live, [root])
     try:
-        _swap_directory(live, decoy)()
         if parent.fd is not None:  # pragma: no cover - POSIX only
             pytest.skip("with openat the descriptor keeps naming the authorised object")
+        if parent.held is not None:
+            with pytest.raises(OSError):
+                _swap_directory(live, decoy)()
+            assert handles.same_object(os.lstat(str(live)), parent.identity)
+            return
+        _swap_directory(live, decoy)()  # pragma: no cover - hosts with neither primitive
         with pytest.raises(UnsafeTarget):
             parent.reserve_free_name("a", ".bin")
         with pytest.raises(UnsafeTarget):
@@ -280,7 +298,11 @@ def test_a_staging_directory_is_created_exclusively_and_removed_through_the_hand
         assert (root / name).is_dir()
         (Path(staging.path) / "part.jpg").write_bytes(b"x")
         staging.remove_tree()
-        parent.rmdir(name)
+        # Through its own handle: the directory this call made, not the name it
+        # was given. A pinning host will not let anything delete a directory it
+        # is holding open, so removing it by name from the parent cannot work
+        # while the staging handle is still live either.
+        staging.remove_self()
         assert not (root / name).exists()
     finally:
         parent.close()
@@ -297,10 +319,15 @@ def test_cleanup_does_not_follow_a_name_that_now_points_somewhere_else(tmp_path)
         name, staging = parent.make_private_subdirectory(".dl-")
         (Path(staging.path) / "part").write_bytes(b"mine")
 
-        # Somebody else's directory takes over the name.
+        # Somebody else's directory tries to take over the name.
         stolen = root / "stolen"
         stolen.mkdir()
         (stolen / "precious").write_bytes(b"not mine")
+        if staging.held is not None:
+            with pytest.raises(OSError):
+                Path(staging.path).rename(root / (name + ".moved"))
+            assert (stolen / "precious").read_bytes() == b"not mine"
+            return
         Path(staging.path).rename(root / (name + ".moved"))
         stolen.rename(root / name)
 
@@ -321,11 +348,17 @@ def test_the_install_refuses_when_the_destination_directory_was_replaced(tmp_pat
 
     parent = handles.open_allowed_directory(live, [root])
     try:
-        name, staging = parent.make_private_subdirectory(".dl-")
+        _name, staging = parent.make_private_subdirectory(".dl-")
         (Path(staging.path) / "part").write_bytes(b"payload")
 
         retired = root / "out.retired"
-        live.rename(retired)
+        if parent.held is not None:
+            # The kernel will not let the destination be exchanged at all, which
+            # is the same guarantee arrived at one layer lower down.
+            with pytest.raises(OSError):
+                live.rename(retired)
+            return
+        live.rename(retired)  # pragma: no cover - hosts with neither primitive
         decoy.rename(live)
 
         with pytest.raises(UnsafeTarget):

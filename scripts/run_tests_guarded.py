@@ -403,6 +403,15 @@ def _open_tree(process: subprocess.Popen) -> Optional[Any]:
         # It is deliberately not used to answer "is anything alive" - see
         # _WindowsTree for the measurement that ruled that out.
         if not kernel32.AssignProcessToJobObject(job, int(handle)):
+            # Detection does not depend on the job - that is what the per-descendant
+            # handles are for - and termination falls back to killing each held
+            # handle. But a silent downgrade is how a weaker guarantee gets mistaken
+            # for the full one, so it says so.
+            print(
+                "GUARDED RUNNER: no job object for this run; the process tree will be "
+                "ended handle by handle instead of in one call.",
+                file=sys.stderr,
+            )
             kernel32.CloseHandle(job)
             job = None
         tree = _WindowsTree(process.pid, job)
@@ -532,8 +541,9 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
         # Detached: an interactive prompt in automation is a hang, and it must
         # fail rather than wait for a human who is not there.
         stdin=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
+        # Bytes, unbuffered. The pump below reads chunks rather than lines, and a
+        # text-mode line-buffered stream cannot deliver a partial line.
+        bufsize=0,
         env=child_env,
         **popen_extras,
     )
@@ -553,13 +563,28 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
     lock = threading.Lock()
 
     def pump() -> None:
+        """Forward the child's output, counting every byte as progress.
+
+        Read in chunks, not lines. `for line in stdout` yields only on a newline, so
+        a run printing a progress bar with carriage returns - or any long line still
+        being written - looked completely idle, and the idle clock fired on a child
+        that was demonstrably working. Bytes are what "progress" means here.
+        """
         nonlocal last_output
         assert process.stdout is not None
-        for line in process.stdout:
+        descriptor = process.stdout.fileno()
+        while True:
+            try:
+                # Returns as soon as ANY bytes are available, unlike read(n).
+                chunk = os.read(descriptor, 65536)
+            except OSError:
+                return
+            if not chunk:
+                return
             with lock:
                 last_output = time.monotonic()
-            sys.stdout.write(line)
-            sys.stdout.flush()
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
 
     # A daemon thread, so a wedged read on a killed child cannot keep the
     # interpreter alive after the watchdog has given up on it.

@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **165** |
+| MCP tools registered | **168** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -102,6 +102,17 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
+Added since, 165 → **168**, ported from the upstream project rather than merged (a
+history rewrite here left the two with no merge base):
+
+| Capability | Tools | Module |
+|---|---|---|
+| Peer photos | `list_photos`, `open_photo`, `get_photo_sheet` | `tools/photos.py` |
+
+`photos.GetUserPhotos` was already used by `get_user_photos`, so the photos.* row
+above is unchanged: what is new is that a group or channel now has an avatar history
+too, rebuilt from the service messages that recorded each change, because Telegram
+offers no call for it.
 That is **23 new tools**, 142 → 165, and it closes Phase 1's identity gap and all of
 Phase 1b. Two things learned while building them are worth more than the count:
 

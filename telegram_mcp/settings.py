@@ -32,6 +32,20 @@ class ValidationError(Exception):
     pass
 
 
+class StartupMessage(RuntimeError):
+    """A startup failure whose message this package wrote, word for word.
+
+    The startup path prints these verbatim, because a server that will not
+    start has to say what to change and an operator who cannot read it has
+    nothing else to go on. That allowance used to be granted to `RuntimeError`
+    as a whole, which also covered any RuntimeError a dependency happened to
+    raise during startup - carrying whatever the failing call was given.
+
+    Subclasses RuntimeError so existing `except RuntimeError` handlers keep
+    catching it.
+    """
+
+
 def _require_credential(name: str) -> str:
     """Read a mandatory credential, or say which one is missing and where it comes from.
 

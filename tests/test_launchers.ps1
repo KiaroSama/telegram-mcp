@@ -64,13 +64,21 @@ try {
 
     $wrapperTerminalText = $wrapperOutput -join [Environment]::NewLine
     [string] $wrapperLogText = Get-Content -LiteralPath $wrapperTestLog -Raw
+    # Inverted deliberately. This used to require the traceback in BOTH places; a
+    # traceback carries the arguments and repr of every frame - chat titles,
+    # usernames, phone numbers, paths - and the log file is the artefact an
+    # operator attaches to a bug report. The terminal is not a file, so it keeps
+    # the full text; the log gets the shape of the failure and nothing else.
     foreach ($expected in 'Traceback (most recent call last)', 'RuntimeError: wrapper-test-error') {
         if ($wrapperTerminalText -notmatch [regex]::Escape($expected)) {
             throw "Python tee wrapper terminal output is missing: $expected"
         }
-        if ($wrapperLogText -notmatch [regex]::Escape($expected)) {
-            throw "Python tee wrapper log is missing: $expected"
+        if ($wrapperLogText -match [regex]::Escape($expected)) {
+            throw "The log persisted raw failure text it must never keep: $expected"
         }
+    }
+    if ($wrapperLogText -notmatch 'RuntimeError at ') {
+        throw "The log lost the bounded failure record: $wrapperLogText"
     }
 
     $interruptScript = Join-Path $wrapperTestDirectory 'keyboard_interrupt.py'
@@ -123,9 +131,14 @@ try {
 
     $null = & $python -c $wrapperMatch.Groups['body'].Value $chattyLog 4096 $chattyScript 2>&1
     if ($LASTEXITCODE -ne 0) { throw "Python tee wrapper returned $LASTEXITCODE for the size test." }
+    # The ceiling itself, not twice it. This allowed 8192 against a 4096 limit,
+    # because the tee wrote first and measured afterwards - so the cap only ever
+    # applied to the write AFTER the one that crossed it, and a single large write
+    # could pass the limit by any amount. Rolling before the write makes the
+    # ceiling mean what it says.
     $liveSize = (Get-Item -LiteralPath $chattyLog).Length
-    if ($liveSize -gt 8192) {
-        throw "The tee wrote $liveSize bytes past a 4096-byte ceiling without rolling."
+    if ($liveSize -gt 4096) {
+        throw "The tee holds $liveSize bytes against a 4096-byte ceiling."
     }
     if (-not (Test-Path -LiteralPath "$chattyLog.1")) {
         throw 'The tee never rolled, so the ceiling is not enforced.'
@@ -134,6 +147,29 @@ try {
         throw 'Rolling kept more than one previous part.'
     }
     Write-Output 'ok  the launcher tee rolls at its size ceiling and keeps one part'
+
+    # One write far larger than the ceiling. Measuring after writing cannot bound
+    # this at all: the overshoot is whatever the caller happened to emit.
+    $burstScript = Join-Path $wrapperTestDirectory 'burst.py'
+    $burstLog = Join-Path $wrapperTestDirectory 'burst.log'
+    [IO.File]::WriteAllText(
+        $burstScript,
+        "import sys$([Environment]::NewLine)print('y' * 40, file=sys.stderr)$([Environment]::NewLine)print('z' * 9000, file=sys.stderr)$([Environment]::NewLine)",
+        [Text.UTF8Encoding]::new($false)
+    )
+    $null = & $python -c $wrapperMatch.Groups['body'].Value $burstLog 1024 $burstScript 2>&1
+    if ($LASTEXITCODE -ne 0) { throw "Python tee wrapper returned $LASTEXITCODE for the burst test." }
+    if (-not (Test-Path -LiteralPath "$burstLog.1")) {
+        throw 'A write larger than the ceiling did not trigger a roll.'
+    }
+    foreach ($part in @($burstLog, "$burstLog.1")) {
+        $size = (Get-Item -LiteralPath $part).Length
+        if ($size -gt 1024) {
+            throw "$(Split-Path -Leaf $part) holds $size bytes against a 1024-byte ceiling."
+        }
+    }
+    Write-Output 'ok  a single oversized write rolls before it is written, not after'
+
 
     # Under the stdio transport stdout carries the MCP protocol -- complete tool
     # results, i.e. the user's own messages, contacts and files. It reaches the

@@ -59,6 +59,10 @@ LIMITS: dict[str, int] = {
     "get_poll_voters": 200,
     "get_message_reactions": 200,
     "get_user_photos": 100,
+    "list_photos": 100,  # ids and dates only; the images are fetched separately
+    # A sheet is bounded by its own geometry, not by record cost: 24 tiles at 4
+    # columns is already the largest grid worth sending as one image block.
+    "get_photo_sheet": 24,
     "list_disappearing_media": 200,
     "get_gif_search": 50,
     # Pending incoming bursts held in memory, not fetched from Telegram.

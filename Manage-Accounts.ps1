@@ -191,7 +191,12 @@ function Backup-EnvFile {
             [IO.File]::Copy($envPath, $backup, $false)
         }
         catch [IO.IOException] {
-            continue  # that name was taken between the check and the copy
+            # Only a name that is genuinely taken is worth another attempt. A
+            # permission failure, a full disk or an unreadable source all raise
+            # IOException too, and retrying those a hundred times turns one clear
+            # error into a hang and then a wrong message about collisions.
+            if (-not (Test-Path -LiteralPath $backup)) { throw }
+            continue
         }
         [void] (Set-OwnerOnlyAcl -Path $backup)
         Remove-StaleFiles -Directory (Split-Path -Parent $envPath) `
@@ -255,6 +260,36 @@ function Set-EnvValue {
     if (-not $written) { $updated = @($updated) + "$Key=$Value" }
     Write-FileAtomic -Path $envPath `
         -Text (($updated -join [Environment]::NewLine) + [Environment]::NewLine)
+}
+
+function Rename-EnvKey {
+    <#
+      Move a key's value to a new key in ONE pass and ONE atomic write.
+
+      Rename used to call Remove-EnvKey and then Set-EnvValue, which is two
+      separate atomic writes with a window between them. An error, a full disk or
+      a closed lid in that window left the file with the account deleted and not
+      re-added - the session string is only in a backup at that point, and the
+      operator asked to RENAME an account, not to lose one.
+
+      Every other line survives untouched: comments, ordering, blanks and keys
+      this script knows nothing about.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $From,
+        [Parameter(Mandatory)] [string] $To
+    )
+    $moved = $false
+    $updated = foreach ($line in @(Get-EnvLines)) {
+        if ($line.Trim() -match "^$([regex]::Escape($From))\s*=(.*)$") {
+            $moved = $true
+            "$To=$($Matches[1].Trim())"
+        }
+        else { $line }
+    }
+    if (-not $moved) { throw "'$From' is not defined in .env, so there is nothing to rename." }
+    Write-FileAtomic -Path $envPath `
+        -Text ((@($updated) -join [Environment]::NewLine) + [Environment]::NewLine)
 }
 
 function Remove-EnvKey {
@@ -673,16 +708,21 @@ function Rename-Account {
     if ($accounts.Contains($to)) { Write-Host "'$to' is already taken." -ForegroundColor Yellow; return }
 
     $oldKey = $accounts[$from]
-    $value = $null
-    foreach ($line in Get-EnvLines) {
-        if ($line.Trim() -match "^$([regex]::Escape($oldKey))\s*=(.*)$") { $value = $Matches[1].Trim() }
+
+    # The PREFIX decides what the value MEANS. A file-based account is defined by
+    # TELEGRAM_SESSION_NAME_*, and rewriting it as TELEGRAM_SESSION_STRING_* hands
+    # the server a session PATH where it expects a session STRING - so the rename
+    # succeeds, says so, and the account silently stops loading.
+    $prefix = if ($oldKey.StartsWith('TELEGRAM_SESSION_NAME_')) {
+        'TELEGRAM_SESSION_NAME_'
     }
-    if (-not $value) { Write-Host "Could not read $oldKey from .env." -ForegroundColor Red; return }
+    else { 'TELEGRAM_SESSION_STRING_' }
+    $newKey = "$prefix$($to.ToUpperInvariant())"
 
     $backup = Backup-EnvFile
-    Remove-EnvKey -Key $oldKey
-    Set-EnvValue -Key "TELEGRAM_SESSION_STRING_$($to.ToUpperInvariant())" -Value $value
-    $value = $null
+    # One write. The value is never read into a variable here - it moves inside
+    # the transform, so nothing in this scope ever holds a session string.
+    Rename-EnvKey -From $oldKey -To $newKey
 
     Write-Log "Renamed account '$from' to '$to'"
     Write-Host ''

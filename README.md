@@ -3,14 +3,14 @@
 </div>
 
 ![MCP Badge](https://badge.mcpx.dev)
-[![Licence: Proprietary](https://img.shields.io/badge/licence-proprietary-red?style=flat-square)](LICENSE)
+[![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
 [![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
-**This is proprietary software.** See [LICENSE](LICENSE) — it is not open source, and it is not
-accepting outside contributions.
+**Free software under the GNU GPL v3 or later.** See [LICENSE](LICENSE). You may use, study,
+modify and redistribute it; anything you distribute that builds on it carries the same licence.
 
 ## 🤖 MCP in Action
 
@@ -68,6 +68,13 @@ Aliases live in `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/aliases.json` (o
 
 **Aliases belong to the account that saved them.** A chat ID only identifies a person within one login, so the same alias on a different account would name someone else entirely, or nobody. Two accounts can therefore each save their own `мама`, and neither can send to the other's. Aliases saved before this scoping existed are adopted automatically when there is exactly one login configured; with several, the account that saved them cannot be known, so they are offered as something to confirm rather than resolved into a recipient.
 - **Media:** send files, download media, upload files, send voice notes, stickers, GIFs, and inspect message media.
+- **Peer photos:** `list_photos` indexes a peer's pictures, `open_photo` returns one, and
+  `get_photo_sheet` returns them as a single labelled grid instead of one image block each.
+  Two sources, because Telegram has no single photo list: `avatars` is the profile-picture
+  history (Telegram's own call for a user; rebuilt from service messages for a group or
+  channel), and `messages` is photos sent in the conversation, keyed by message id. An id
+  from one source names nothing in the other. Every transfer is capped, and each sheet cell
+  carries the id `open_photo` takes back.
 - **Profile and privacy:** get your own account info, update profile fields, set or delete profile photos, inspect privacy settings, get user info/photos/status, and manage bot commands.
 - **Folders and drafts:** list, create, update, reorder, and delete Telegram folders; save, list, and clear drafts.
 - **Events:** wait for incoming messages with debounce (`wait_for_new_message`, `wait_for_settled_message`), optionally for one chat only via `chat_id` — without it any unrelated conversation wakes the wait — or enable the opt-in incoming event feed for callback-style delivery (see below).
@@ -779,12 +786,16 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   interactive phone-code login over stdio.
 - **Invalid API credentials:** verify `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` at [my.telegram.org/apps](https://my.telegram.org/apps).
 - **Database is locked:** prefer string sessions, or make sure no other process is using the same file session.
-- **Where is my `.session` file?** A bare `TELEGRAM_SESSION_NAME` now resolves to
+- **Where is my `.session` file?** A bare `TELEGRAM_SESSION_NAME` resolves to
   `$XDG_STATE_HOME/telegram-mcp/` (`~/.local/state/telegram-mcp/` by default), a directory the
-  server creates readable by you alone — the database holds your auth key, so anyone who can read
-  it is signed in as you. A session already sitting beside the installation or in the working
-  directory keeps being used where it is, and is hardened there; nothing is moved out from under a
-  running client. Give `TELEGRAM_SESSION_NAME` a path to choose the location yourself.
+  server makes readable by you alone *before* Telethon creates the database in it — the database
+  holds your auth key, so anyone who can read it is signed in as you, and the `-journal`/`-wal`/
+  `-shm` files SQLite adds later are the same credential. A session an older version left beside
+  the installation or in the working directory is moved there once, with its sidecars: those
+  directories cannot be made private without stripping the permissions off everything else in
+  them. Give `TELEGRAM_SESSION_NAME` a path to choose the location yourself — but that directory
+  must already be readable by your account alone, or the account refuses to start rather than run
+  from a credential anyone can read.
 - **`AuthKeyDuplicatedError` / "Another telegram-mcp process is already connected with this session":** two processes tried to connect the same Telegram session at once (e.g. an MCP client restarted the connector before the old process exited), which Telegram rejects and can invalidate the session for both. The server now takes an exclusive lock per session before connecting; a second concurrent launch waits briefly (default 20s, override with `TELEGRAM_LOCK_GRACE_SECONDS`) for the first to release it and otherwise exits without ever calling `connect()`, instead of racing into a duplicate connection. Retry once only one instance is running.
 - **File tools are disabled:** pass allowed roots or configure MCP Roots in your client.
 - **Path rejected:** ensure the path is inside an allowed root and does not use traversal or wildcard patterns.
@@ -802,7 +813,8 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 ## Working on it
 
-Proprietary, so this is the maintainer's own loop rather than a contribution guide.
+This is the maintainer's own loop. Issues and pull requests are welcome; the same checks
+below are what a change has to pass.
 
 1. Clone the repository.
 2. Install dependencies and git hooks:
@@ -920,13 +932,19 @@ Four of these carry a caveat that is part of the feature rather than a footnote:
 
 ## Licence
 
-Proprietary. See [LICENSE](LICENSE). Not open source; no licence to use, copy, modify or
-distribute is granted without written permission.
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+Portions originated in an Apache-2.0 project (below), and that licence permits their
+inclusion in a GPLv3 work — the Apache Software Foundation states it plainly: *"Apache 2
+software can therefore be included in GPLv3 projects."* The compatibility runs one way
+only, so the program as a whole is GPLv3 while the prior Apache-2.0 grant continues to
+cover what it originally covered.
 
 ## Built on
 
 - [Telethon](https://github.com/LonamiWebs/Telethon)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
-Portions of this codebase originated in an Apache-2.0 project by chigwell and l1v0n1 and have
-been substantially modified since; that attribution is recorded in [LICENSE](LICENSE) §4.
+Portions of this codebase originated in [telegram-mcp](https://github.com/chigwell/telegram-mcp)
+by chigwell and l1v0n1, under the Apache License 2.0, and have been substantially modified and
+extended since. That attribution is recorded in [LICENSE](LICENSE).
