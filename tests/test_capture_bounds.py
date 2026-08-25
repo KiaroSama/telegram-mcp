@@ -165,6 +165,22 @@ def test_a_zero_sized_window_is_still_refused():
         capture._capture_print_window(_telegram_window(0, 0), client_only=False)
 
 
+def test_the_screen_grab_is_bounded_by_the_same_rule(monkeypatch):
+    """ImageGrab allocates the whole box too, so it needs the same check.
+
+    Guarding only PrintWindow would leave method='screen' as the way around it,
+    and the method is a plain tool argument.
+    """
+    import PIL.ImageGrab
+
+    monkeypatch.setattr(
+        PIL.ImageGrab, "grab", lambda **kwargs: pytest.fail("the screen area was allocated")
+    )
+
+    with pytest.raises(CaptureError, match="too large"):
+        capture._capture_screen_region(_telegram_window(100_000, 100_000))
+
+
 # --- native resolution is not unlimited resolution ----------------------------
 
 
@@ -246,6 +262,21 @@ capture.capture_window(hwnd=1, method="window")
 
 def _hanging_worker(*_args, **_kwargs):
     return [sys.executable, "-c", HANGING_PRINTWINDOW]
+
+
+def test_listing_the_windows_is_bounded_the_same_way(monkeypatch):
+    """GetWindowTextW waits for the window to answer a message, so enumerating a
+    hung Telegram blocks exactly as capturing one does - and a bound on only the
+    capture leaves list_telegram_windows as the way to wedge the server."""
+    created = _watch_children(monkeypatch)
+    monkeypatch.setattr(capture, "_capture_worker_command", _hanging_worker)
+
+    started = time.monotonic()
+    with pytest.raises(CaptureError, match="timed out"):
+        capture.list_windows_bounded(timeout=1.0)
+
+    assert time.monotonic() - started < 30
+    assert created and created[0].poll() is not None
 
 
 def test_a_printwindow_that_never_returns_is_killed_rather_than_waited_out(monkeypatch):

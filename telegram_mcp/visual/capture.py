@@ -627,6 +627,12 @@ def _capture_screen_region(window: WindowInfo, client_only: bool = False):
             "Use method='window' to capture Telegram's own rendering instead."
         )
     box = _client_geometry(window.hwnd)[2] if client_only else window.rect
+    # The same check the PrintWindow path makes, for the same reason: ImageGrab
+    # allocates the whole box before anything downstream sees a pixel, so a
+    # rectangle nobody questioned is a rectangle nobody bounded.
+    refusal = _within_capture_limits(box[2] - box[0], box[3] - box[1])
+    if refusal:
+        raise CaptureError(refusal)
     image = ImageGrab.grab(bbox=box, all_screens=True)
     return image.convert("RGB")
 
@@ -859,6 +865,49 @@ def capture_frames(
         raise CaptureError("The capture helper produced no frames.")
     check_response_bytes(sum(len(data) for data, _meta in frames))
     return window, frames
+
+
+# Enumeration is cheap when the windows answer and unbounded when one does not,
+# so it gets a bound of its own rather than a share of the capture's.
+LIST_WINDOWS_TIMEOUT_SECONDS = 30.0
+
+
+def list_windows_bounded(
+    process_name: Optional[str] = None,
+    timeout: float = LIST_WINDOWS_TIMEOUT_SECONDS,
+    cancelled: Optional[Any] = None,
+) -> list[dict[str, Any]]:
+    """``describe_windows`` in a child process, bounded and reaped.
+
+    Blocking: call it off the event loop. The enumeration reads each window's
+    title, and ``GetWindowTextW`` waits for the window to answer a message - so a
+    hung Telegram blocks the listing as completely as it blocks a capture, and on
+    a thread there is nothing to interrupt.
+    """
+    _require_windows()
+    request = {"job": "list", "process_name": process_name or DEFAULT_PROCESS_NAME}
+    try:
+        result = run_bounded(
+            _capture_worker_command(request),
+            label="The Telegram window listing",
+            timeout=timeout,
+            cancelled=cancelled,
+            # A few hundred bytes per window; a megabyte is thousands of them.
+            max_output_bytes=1024 * 1024,
+            max_stderr_bytes=64 * 1024,
+        )
+    except ProcessCancelled as error:
+        raise CaptureCancelled(str(error)) from error
+    except ProcessError as error:
+        raise CaptureError(str(error)) from error
+
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    if result.returncode != 0:
+        raise CaptureError(stderr or f"The window listing failed (exit {result.returncode}).")
+    try:
+        return list(json.loads(result.stdout or b"{}")["windows"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise CaptureError("The window listing returned a reply this build cannot read.")
 
 
 def describe_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[dict[str, Any]]:

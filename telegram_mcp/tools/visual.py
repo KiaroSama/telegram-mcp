@@ -18,7 +18,7 @@ from telegram_mcp.visual.capture import (
     DEFAULT_PROCESS_NAME,
     CaptureError,
     capture_frames,
-    describe_windows,
+    list_windows_bounded,
 )
 from telegram_mcp.visual.images import (
     IMAGE_FORMATS,
@@ -180,7 +180,12 @@ async def list_telegram_windows(process_name: Optional[str] = None) -> str:
     """
     try:
         target = process_name or DEFAULT_PROCESS_NAME
-        windows = await asyncio.to_thread(describe_windows, target)
+        # In the capture helper's child, not on a worker thread: the enumeration
+        # reads each window's title, and GetWindowTextW waits for the window to
+        # answer - so a hung Telegram blocks this exactly as it blocks a capture.
+        windows = await run_cancellable(
+            lambda cancelled: list_windows_bounded(target, cancelled=cancelled)
+        )
         metadata = None
         if not windows:
             # An empty list on its own reads like "captured nothing"; say why.

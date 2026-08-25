@@ -33,6 +33,22 @@ EXIT_CAPTURE_REFUSED = 3  # a CaptureError, whose message already says what to d
 EXIT_IMAGE_REFUSED = 4
 
 
+def list_windows(request: dict) -> int:
+    """The window enumeration, in the same child for the same reason.
+
+    ``GetWindowTextW`` sends WM_GETTEXT to the window and waits for the window to
+    answer, so enumerating an unresponsive Telegram blocks exactly the way
+    PrintWindow does - and on a worker thread it is exactly as unrecoverable.
+    """
+    from telegram_mcp.visual.capture import DEFAULT_PROCESS_NAME, describe_windows
+
+    windows = describe_windows(request.get("process_name") or DEFAULT_PROCESS_NAME)
+    out = sys.stdout.buffer
+    out.write(json.dumps({"windows": windows}).encode("utf-8") + b"\n")
+    out.flush()
+    return 0
+
+
 def run(request: dict) -> int:
     from telegram_mcp.visual.capture import (
         CAPTURE_FRAME_SECONDS,
@@ -103,7 +119,10 @@ def main(argv: list) -> int:
         print("usage: capture_worker.py <json-request>", file=sys.stderr)
         return 2
     try:
-        return run(json.loads(argv[0]))
+        request = json.loads(argv[0])
+        if request.get("job") == "list":
+            return list_windows(request)
+        return run(request)
     except CaptureError as error:
         print(str(error), file=sys.stderr)
         return EXIT_CAPTURE_REFUSED
