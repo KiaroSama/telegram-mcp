@@ -229,7 +229,7 @@ async def download_media(
             # parent. mkdir is the reservation -- it fails on a name that exists
             # -- and the result is opened straight away, so nothing downstream
             # resolves the name again.
-            staging_name, staging = parent.make_private_subdirectory(".download-")
+            _staging_name, staging = parent.make_private_subdirectory(".download-")
 
             try:
                 # Telethon picks the extension from the content, so it is handed
@@ -287,8 +287,12 @@ async def download_media(
                 except BaseException:
                     # The reservation is a real, empty file. Leaving it behind
                     # wearing the name the caller was about to be given is the
-                    # defect this whole path exists to avoid.
-                    parent.unlink(final_name)
+                    # defect this whole path exists to avoid. `discard` rather
+                    # than `unlink`: if the install refused because that name
+                    # stopped being this call's placeholder, removing it is the
+                    # same mistake again, and the original failure is the one
+                    # worth reporting.
+                    parent.discard(final_name)
                     raise
                 parent.sync()
                 return f"Media downloaded to {Path(parent.path) / final_name}."
@@ -302,7 +306,9 @@ async def download_media(
                 # directory it is in.
                 try:
                     staging.remove_tree()
-                    parent.rmdir(staging_name)
+                    # Through its own handle, not by the name it was given: a
+                    # name can have changed hands, and this is a removal.
+                    staging.remove_self()
                 except (OSError, UnsafeTarget) as cleanup_error:
                     log_event(
                         logging.WARNING,

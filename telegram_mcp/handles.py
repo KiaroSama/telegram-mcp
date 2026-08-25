@@ -21,19 +21,27 @@ that descriptor:
 
 **Platform.** POSIX has ``openat``: ``os.supports_dir_fd`` is populated, and
 ``O_NOFOLLOW``/``O_DIRECTORY`` exist, so a name can be resolved *by the kernel*
-relative to a held descriptor and never re-walked from the root. Windows has
-none of the three -- ``os.open`` on a directory fails outright -- but it does
-report real object identity (``st_dev`` is the volume serial, ``st_ino`` the file
-index) and a reparse-point flag. The Windows branch therefore keeps the
-directory's identity from the moment it was authorised and re-proves it
-immediately before every operation, refusing the moment the name stops naming
-that object. That is a smaller window than a bare path, not a descriptor.
+relative to a held descriptor and never re-walked from the root.
 
-``ponytail:`` the Windows branch is identity re-verification, not a kernel
-handle. A real ``CreateFileW`` directory handle with
-``FILE_FLAG_BACKUP_SEMANTICS`` would close the residual window; it needs ctypes
-and is worth it only if this server is ever run somewhere hostile to its own
-state directory.
+Windows has none of the three -- ``os.open`` on a directory fails outright -- so
+it holds the object a different way, through :mod:`telegram_mcp.win_handles`. A
+``CreateFileW`` handle on the directory, opened with ``FILE_LIST_DIRECTORY`` and
+a share mask that omits ``FILE_SHARE_DELETE``, makes the kernel refuse to rename
+or delete that directory *or any directory above it* for as long as the handle
+lives. Measured: the rename fails with ``ERROR_SHARING_VIOLATION``, the parent's
+with ``ERROR_ACCESS_DENIED``, and both succeed the moment the handle closes. So
+a child name built from the held directory's path resolves through a prefix that
+cannot have changed -- which is the guarantee ``openat`` gives, obtained from the
+one primitive Windows does provide. The final component is not covered by the
+pin, so the operations that touch it -- install and every kind of removal -- open
+that child, prove it is the object this call created, and then act on the
+handle rather than on the name.
+
+Identity is compared through ``os.fstat`` on both platforms. The Windows handle
+is adopted into a real descriptor for exactly that reason: ``st_dev`` from
+``fstat`` and ``dwVolumeSerialNumber`` from ``GetFileInformationByHandle`` are
+different numbers on current CPython, so ``same_object`` has to see one of them
+consistently.
 
 **The syscall seam.** Every primitive goes through :class:`SystemCalls` so the
 decisions above can be driven deterministically from a test -- including the
@@ -46,7 +54,12 @@ import os
 import secrets
 import stat as stat_module
 from pathlib import Path
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+
+if os.name == "nt":  # pragma: no cover - platform-selected at import
+    from telegram_mcp import win_handles
+else:  # pragma: no cover - platform-selected at import
+    win_handles = None
 
 # Windows marks junctions, symlinks and every other reparse point with this bit.
 # `stat.S_ISLNK` is false for a directory junction, so the flag is the half of
@@ -57,6 +70,10 @@ _REPARSE_POINT = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
 # saves in the same second collide on their own; a hundred is somebody being
 # deliberate.
 NAME_ATTEMPTS = 100
+
+# "look up what this call created" as distinct from "expect nothing in
+# particular", which `None` already means.
+_UNSET = object()
 
 
 class UnsafeTarget(Exception):
@@ -72,10 +89,32 @@ class SystemCalls:
     """
 
     dir_fd = bool(getattr(os, "supports_dir_fd", set()))
+    #: Whether this host can hold a directory open so its name cannot be moved.
+    #: Where neither this nor ``dir_fd`` is available there is no way to bind an
+    #: authorisation to an object, and :func:`open_allowed_directory` refuses.
+    pins = win_handles is not None
     O_NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
     O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
     O_BINARY = getattr(os, "O_BINARY", 0)
     O_NOINHERIT = getattr(os, "O_NOINHERIT", 0)
+
+    # -- holding an object on a host without openat --------------------------
+
+    def pin_directory(self, path) -> int:
+        """A descriptor whose existence stops this directory's name from moving."""
+        return win_handles.pin_directory(str(path))
+
+    def open_for_change(self, path) -> int:
+        """A descriptor on a child, opened so the child can be moved or removed."""
+        return win_handles.open_for_change(str(path))
+
+    def mark_deleted(self, fd) -> None:
+        """Delete the object behind ``fd``, whatever its name now says."""
+        win_handles.mark_deleted(fd)
+
+    def rename_object(self, fd, destination, *, replace: bool) -> None:
+        """Move the object behind ``fd`` to ``destination``."""
+        win_handles.rename_to(fd, str(destination), replace=replace)
 
     def open(self, path, flags, mode=0o777, *, dir_fd=None):
         if dir_fd is None:
@@ -151,12 +190,28 @@ def is_link(entry: Any) -> bool:
     return bool(getattr(entry, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
-def _within(candidate: Path, roots: List[Path]) -> bool:
+def permitted_children(candidate: Path, roots: List[Path]) -> Optional[FrozenSet[str]]:
+    """Which children of ``candidate`` the roots authorise. Raises if none do.
+
+    ``None`` means all of them: ``candidate`` is a configured root, or lives
+    inside one. A set of names means the only thing authorising ``candidate`` is
+    that a root names a single **file** in it -- which the roots layer has always
+    advertised (``_path_is_within_root`` special-cases ``root.is_file()``) and
+    which used to be unreachable, because the read gate opens the file's parent
+    and no file root contains its own parent. So a single-file root refused every
+    read, always. The parent is opened now, and the root's own name is the whole
+    of what may be done in it.
+    """
+    named: set = set()
     for root in roots:
         root = Path(root).resolve()
         if candidate == root or root in candidate.parents:
-            return True
-    return False
+            return None
+        if root.parent == candidate and root.is_file():
+            named.add(root.name)
+    if named:
+        return frozenset(named)
+    raise UnsafeTarget("the directory is outside the allowed roots")
 
 
 # --- an open directory -------------------------------------------------------
@@ -166,21 +221,58 @@ class DirHandle:
     """A directory this process has open, and the only way to reach its children.
 
     On POSIX ``fd`` is a real descriptor and every child name is resolved by the
-    kernel relative to it. On Windows ``fd`` is ``None``; ``identity`` is what was
-    authorised and :meth:`verify` re-proves it before each operation.
+    kernel relative to it.
+
+    On Windows ``fd`` is ``None`` and ``held`` is a descriptor on a Win32
+    directory handle whose existence stops the kernel letting anyone rename this
+    directory or any directory above it. Child names are therefore built from
+    ``path``, but the part of that path an attacker could change is nailed down
+    for as long as the handle lives. The final component is not, so anything that
+    removes or replaces a child opens it, proves it is the object this call
+    created, and acts on that handle.
+
+    ``permitted`` is ``None`` for an ordinary directory and a set of names when
+    the only thing authorising this directory is a root that names one file in
+    it. ``made`` records what this call created, so cleanup can tell its own
+    placeholder from whatever later took the name.
     """
 
-    def __init__(self, path: Path, fd: Optional[int], identity, calls: SystemCalls):
+    def __init__(
+        self,
+        path: Path,
+        fd: Optional[int],
+        identity,
+        calls: SystemCalls,
+        *,
+        held: Optional[int] = None,
+        permitted: Optional[FrozenSet[str]] = None,
+        parent: Optional["DirHandle"] = None,
+    ):
         self.path = Path(path)
         self.fd = fd
+        self.held = held
         self.identity = identity
+        self.permitted = permitted
+        self._parent = parent
         self._calls = calls
+        self._made: Dict[str, Any] = {}
         self._closed = False
 
     # -- plumbing ------------------------------------------------------------
 
+    def _permit(self, name: str) -> None:
+        """Refuse a child the roots did not authorise.
+
+        Only ever restrictive: ``permitted`` is ``None`` unless a root named a
+        single file, in which case that name is the entire authorisation and its
+        neighbours are not covered by it.
+        """
+        if self.permitted is not None and name not in self.permitted:
+            raise UnsafeTarget(f"{name!r} is not the file the allowed roots name")
+
     def _at(self, name: str):
         """The name to pass, and the keyword that binds it to this directory."""
+        self._permit(name)
         if self.fd is not None:
             return name, {"dir_fd": self.fd}
         self.verify()
@@ -189,16 +281,23 @@ class DirHandle:
     def verify(self) -> None:
         """Re-prove that this directory's name still names this directory.
 
-        A no-op where a descriptor is held: the kernel is already answering about
-        the object rather than the name.
+        A no-op where a POSIX descriptor is held: the kernel is already answering
+        about the object rather than the name. Where a Win32 handle is held the
+        kernel has already refused to let the name move, and this proves that
+        against the *object behind the handle* rather than against an ``lstat``
+        remembered at authorisation time -- so a filesystem that did not honour
+        the pin is caught rather than assumed away.
         """
         if self.fd is not None or self._closed:
             return
+        reference = self.identity
         try:
+            if self.held is not None:
+                reference = self._calls.fstat(self.held)
             current = self._calls.lstat(str(self.path))
         except OSError as error:
             raise UnsafeTarget(f"the directory {self.path.name!r} is gone") from error
-        if is_link(current) or not same_object(current, self.identity):
+        if is_link(current) or not same_object(current, reference):
             raise UnsafeTarget(
                 f"the directory {self.path.name!r} was replaced after it was authorised"
             )
@@ -207,12 +306,15 @@ class DirHandle:
         if self._closed:
             return
         self._closed = True
-        if self.fd is not None:
+        for attribute in ("fd", "held"):
+            descriptor = getattr(self, attribute)
+            if descriptor is None:
+                continue
             try:
-                self._calls.close(self.fd)
+                self._calls.close(descriptor)
             except OSError:
                 pass
-            self.fd = None
+            setattr(self, attribute, None)
 
     def __enter__(self) -> "DirHandle":
         return self
@@ -224,6 +326,7 @@ class DirHandle:
 
     def child_stat(self, name: str):
         """``lstat`` a child *through* this directory, never following a link."""
+        self._permit(name)
         if self.fd is not None:
             return self._calls.lstat(name, dir_fd=self.fd)
         self.verify()
@@ -253,7 +356,14 @@ class DirHandle:
             | self._calls.O_NOFOLLOW
             | self._calls.O_NOINHERIT
         )
-        return self._calls.open(target, flags, mode, **where)
+        fd = self._calls.open(target, flags, mode, **where)
+        try:
+            # What this call created, so a later removal or install can tell it
+            # apart from whatever may be wearing the name by then.
+            self._made[name] = self._calls.fstat(fd)
+        except OSError:  # pragma: no cover - a substituted SystemCalls in a test
+            pass
+        return fd
 
     def reserve_free_name(self, stem: str, suffix: str) -> Optional[str]:
         """Create and return an unused child name near ``stem+suffix``.
@@ -288,6 +398,22 @@ class DirHandle:
             return name, self.open_subdirectory(name)
         raise UnsafeTarget("could not create a private transfer directory")
 
+    def make_subdirectory(self, name: str) -> "DirHandle":
+        """Create a child directory if it is missing, and open it, through here.
+
+        The write gate used to run ``parent.mkdir(parents=True)`` while resolving
+        a *pathname*: real directories created by name, before anything held
+        them, and left behind when the authorisation that followed refused. Each
+        level is now created through the handle on the level above it, so the
+        chain is bound from the first component to the last.
+        """
+        target, where = self._at(name)
+        try:
+            self._calls.mkdir(target, 0o700, **where)
+        except FileExistsError:
+            pass
+        return self.open_subdirectory(name)
+
     def open_subdirectory(self, name: str) -> "DirHandle":
         """Open a child directory, proving it is the directory just seen there."""
         named = self.child_stat(name)
@@ -295,22 +421,80 @@ class DirHandle:
             raise UnsafeTarget(f"{name!r} is not a plain directory")
         if self.fd is None:
             self.verify()
-            return DirHandle(self.path / name, None, named, self._calls)
+            if not self._calls.pins:
+                return DirHandle(self.path / name, None, named, self._calls, parent=self)
+            held = self._calls.pin_directory(self.path / name)
+            try:
+                opened = self._calls.fstat(held)
+                if not same_object(opened, named):
+                    raise UnsafeTarget(f"{name!r} was replaced while it was being opened")
+            except BaseException:
+                self._calls.close(held)
+                raise
+            return DirHandle(self.path / name, None, opened, self._calls, held=held, parent=self)
         flags = os.O_RDONLY | self._calls.O_NOFOLLOW | self._calls.O_DIRECTORY
         fd = self._calls.open(name, flags, dir_fd=self.fd)
         opened = self._calls.fstat(fd)
         if not same_object(opened, named):
             self._calls.close(fd)
             raise UnsafeTarget(f"{name!r} was replaced while it was being opened")
-        return DirHandle(self.path / name, fd, opened, self._calls)
+        return DirHandle(self.path / name, fd, opened, self._calls, parent=self)
 
-    def unlink(self, name: str) -> None:
+    def _remove_object(self, name: str, expect) -> bool:
+        """Remove a child by opening it and deleting the handle. Windows only.
+
+        Returns ``False`` where this host has no such primitive, so the caller
+        falls back to the name-based call. ``expect`` is what this call created;
+        when it is known and no longer matches, the name has been given to
+        something else and removing it would be destroying a stranger's file
+        rather than tidying up after this one.
+        """
+        if self.held is None or not self._calls.pins:
+            return False
+        self._permit(name)
+        self.verify()
+        target = self._calls.open_for_change(self.path / name)
+        try:
+            if expect is not None and not same_object(self._calls.fstat(target), expect):
+                raise UnsafeTarget(f"{name!r} is no longer the object this call created")
+            self._calls.mark_deleted(target)
+        finally:
+            self._calls.close(target)
+        return True
+
+    def unlink(self, name: str, expect=_UNSET) -> None:
+        expect = self._made.get(name) if expect is _UNSET else expect
+        if self._remove_object(name, expect):
+            self._made.pop(name, None)
+            return
         target, where = self._at(name)
         self._calls.unlink(target, **where)
+        self._made.pop(name, None)
 
-    def rmdir(self, name: str) -> None:
+    def rmdir(self, name: str, expect=_UNSET) -> None:
+        expect = self._made.get(name) if expect is _UNSET else expect
+        if self._remove_object(name, expect):
+            self._made.pop(name, None)
+            return
         target, where = self._at(name)
         self._calls.rmdir(target, **where)
+        self._made.pop(name, None)
+
+    def remove_self(self) -> None:
+        """Remove the directory this handle holds, as the object it holds.
+
+        Removing it by name from the caller is the same defect one level up:
+        between the last look and the ``rmdir``, that name can belong to a
+        directory this call never made. The pin has to be released first --
+        nothing can delete a directory this process is holding open -- so the
+        identity taken from the handle is what the removal is checked against.
+        """
+        if self._parent is None:
+            raise UnsafeTarget("this directory was not opened through a parent handle")
+        identity = self.identity
+        name = self.path.name
+        self.close()
+        self._parent.rmdir(name, expect=identity)
 
     def remove_tree(self) -> None:
         """Empty this directory through its own handle.
@@ -335,24 +519,52 @@ class DirHandle:
                 self.rmdir(name)
 
     def install(self, source: "DirHandle", source_name: str, name: str) -> None:
-        """Give ``source_name`` its final name in *this* directory, atomically.
+        """Give ``source_name`` its final name in *this* directory.
 
         Both ends are bound to a held directory, so neither the origin nor the
         destination can be a name that started meaning something else.
+
+        Where ``name`` is a placeholder this call reserved, the object wearing it
+        is proved to still be that placeholder. Publishing over a name that has
+        since been given to somebody else's file is not an install -- it is
+        deleting data the caller never offered up. On Windows the check and the
+        move are the same act: the placeholder is deleted through its own handle
+        and the staged file is renamed in with ``ReplaceIfExists`` **off**, so a
+        name that changed hands in between makes the rename fail rather than
+        clobber. POSIX keeps ``renameat`` between two held descriptors, which is
+        atomic and cannot be redirected.
         """
         self.verify()
         source.verify()
+        self._permit(name)
+        expect = self._made.get(name)
+        if self.held is not None and source.held is not None and self._calls.pins:
+            if expect is not None:
+                self._remove_object(name, expect)
+                self._made.pop(name, None)
+            moving = self._calls.open_for_change(source.path / source_name)
+            try:
+                self._calls.rename_object(moving, self.path / name, replace=expect is None)
+            finally:
+                self._calls.close(moving)
+            source._made.pop(source_name, None)
+            return
+        if expect is not None and not same_object(self.child_stat(name), expect):
+            raise UnsafeTarget(f"{name!r} is no longer the placeholder this call reserved")
         if self.fd is not None and source.fd is not None:
             self._calls.replace(source_name, name, src_dir_fd=source.fd, dst_dir_fd=self.fd)
-            return
-        self._calls.replace(str(source.path / source_name), str(self.path / name))
+        else:
+            self._calls.replace(str(source.path / source_name), str(self.path / name))
+        self._made.pop(name, None)
+        source._made.pop(source_name, None)
 
     def discard(self, name: str) -> None:
         """Best-effort removal of a child this call made. Never raises.
 
         Cleanup that throws replaces the failure worth reporting, and a directory
-        that has stopped being the authorised one is a directory nothing here may
-        delete from -- so a refusal to clean up is also a correct outcome.
+        that has stopped being the authorised one -- or a name that has stopped
+        being the object this call created -- is something nothing here may
+        delete, so a refusal to clean up is also a correct outcome.
         """
         try:
             self.unlink(name)
@@ -419,19 +631,23 @@ class DirHandle:
 # --- getting one -------------------------------------------------------------
 
 
-def open_allowed_directory(path, roots: List[Path], *, calls: SystemCalls = SYSTEM) -> DirHandle:
-    """Judge a directory against the roots, then open the directory that was judged.
+def _open_judged(path, roots: List[Path], calls: SystemCalls) -> DirHandle:
+    """Judge an existing directory against the roots, then open the one judged.
 
     The order is the whole point. The verdict is taken about a resolved path; the
     open is done without following a link; the object that came back is then
     reconciled with what the name reaches *now*, and the name is resolved a
     second time and re-judged. A swap before the verdict is caught by the
     verdict, a swap after it by the reconciliation, and a swap after the open
-    does not matter because the descriptor is already held.
+    does not matter because the object is already held.
     """
     resolved = Path(path).resolve(strict=False)
-    if not _within(resolved, roots):
-        raise UnsafeTarget("the directory is outside the allowed roots")
+    permitted = permitted_children(resolved, roots)
+
+    def _still_inside():
+        if Path(path).resolve(strict=False) != resolved:
+            raise UnsafeTarget("the directory moved out of the allowed roots")
+        permitted_children(resolved, roots)
 
     if calls.dir_fd:
         flags = os.O_RDONLY | calls.O_NOFOLLOW | calls.O_DIRECTORY
@@ -443,25 +659,79 @@ def open_allowed_directory(path, roots: List[Path], *, calls: SystemCalls = SYST
                 raise UnsafeTarget("the directory was replaced while it was being opened")
             if not stat_module.S_ISDIR(opened.st_mode):
                 raise UnsafeTarget("the destination is not a directory")
-            if Path(path).resolve(strict=False) != resolved or not _within(resolved, roots):
-                raise UnsafeTarget("the directory moved out of the allowed roots")
+            _still_inside()
         except BaseException:
             calls.close(fd)
             raise
-        return DirHandle(resolved, fd, opened, calls)
+        return DirHandle(resolved, fd, opened, calls, permitted=permitted)
 
-    # No openat here. Identity taken at authorisation time, re-proved before use.
-    named = calls.lstat(str(resolved))
-    if is_link(named):
-        raise UnsafeTarget("the destination is a link, not a directory")
-    if not stat_module.S_ISDIR(named.st_mode):
-        raise UnsafeTarget("the destination is not a directory")
-    if Path(path).resolve(strict=False) != resolved or not _within(resolved, roots):
-        raise UnsafeTarget("the directory moved out of the allowed roots")
-    confirm = calls.lstat(str(resolved))
-    if not same_object(confirm, named):
-        raise UnsafeTarget("the directory was replaced while it was being authorised")
-    return DirHandle(resolved, None, named, calls)
+    if not calls.pins:
+        # Neither primitive: nothing here can bind a verdict to an object, and a
+        # verdict about a name is the defect this module exists to remove.
+        named = calls.lstat(str(resolved))
+        if is_link(named):
+            raise UnsafeTarget("the destination is a link, not a directory")
+        if not stat_module.S_ISDIR(named.st_mode):
+            raise UnsafeTarget("the destination is not a directory")
+        _still_inside()
+        confirm = calls.lstat(str(resolved))
+        if not same_object(confirm, named):
+            raise UnsafeTarget("the directory was replaced while it was being authorised")
+        return DirHandle(resolved, None, named, calls, permitted=permitted)
+
+    # Hold the directory first: from here on the kernel will not let this name,
+    # or any name above it, be moved onto a different object.
+    held = calls.pin_directory(resolved)
+    try:
+        opened = calls.fstat(held)
+        named = calls.lstat(str(resolved))
+        if is_link(named) or bool(getattr(opened, "st_file_attributes", 0) & _REPARSE_POINT):
+            raise UnsafeTarget("the destination is a link, not a directory")
+        if not same_object(opened, named):
+            raise UnsafeTarget("the directory was replaced while it was being opened")
+        if not stat_module.S_ISDIR(opened.st_mode):
+            raise UnsafeTarget("the destination is not a directory")
+        _still_inside()
+    except BaseException:
+        calls.close(held)
+        raise
+    return DirHandle(resolved, None, opened, calls, held=held, permitted=permitted)
+
+
+def open_allowed_directory(
+    path, roots: List[Path], *, calls: SystemCalls = SYSTEM, create: bool = False
+) -> DirHandle:
+    """Open the directory ``path`` names, bound to the object the roots allowed.
+
+    With ``create``, a destination that does not exist yet is built one component
+    at a time *through the handle on the component above it*, starting from the
+    deepest ancestor that already exists and is inside a root. Creating it by
+    name first -- which is what the write gate used to do while it was still
+    resolving a string -- puts real directories on disk before anything holds
+    them, and leaves them behind when the authorisation that follows says no.
+    """
+    resolved = Path(path).resolve(strict=False)
+    if not create:
+        return _open_judged(resolved, roots, calls)
+
+    missing: List[str] = []
+    probe = resolved
+    while not probe.exists():
+        if probe.parent == probe:
+            raise UnsafeTarget("the destination has no existing parent")
+        missing.append(probe.name)
+        probe = probe.parent
+
+    handle = _open_judged(probe, roots, calls)
+    for name in reversed(missing):
+        try:
+            child = handle.make_subdirectory(name)
+        except BaseException:
+            handle.close()
+            raise
+        handle.close()
+        handle = child
+    return handle
 
 
 class VerifiedFile:
