@@ -19,13 +19,20 @@ import json
 import os
 import re
 import shutil
-import subprocess
 from pathlib import Path
 import sys
 import tempfile
 import threading
 import time
 from typing import Any, Optional
+
+from telegram_mcp.visual.bounded_process import (
+    Completed,
+    ProcessBudgetExhausted,
+    ProcessCancelled,
+    ProcessError,
+    run_bounded,
+)
 
 FFPROBE_TIMEOUT_SECONDS = 15
 FFMPEG_FRAME_TIMEOUT_SECONDS = 30
@@ -225,7 +232,7 @@ def _run(
     timeout: int,
     deadline: Optional[float] = None,
     cancelled: Optional[threading.Event] = None,
-) -> subprocess.CompletedProcess:
+) -> Completed:
     """Run a decoder, bounded by its own timeout, the request budget, and the caller.
 
     ``deadline`` is a ``time.monotonic()`` value; passing it is what stops N frames
@@ -235,70 +242,38 @@ def _run(
     on a worker thread and the subprocess is its child, so a cancelled coroutine
     frees the caller while leaving both running - the process kept burning CPU
     until its own timeout fired, which is up to the whole request budget after
-    anyone stopped waiting for the answer. Hence the poll: ``subprocess.run``
-    blocks with nothing to interrupt it, so the wait is broken into slices and the
-    event is checked between them.
+    anyone stopped waiting for the answer.
+
+    The mechanics live in :mod:`telegram_mcp.visual.bounded_process`, which the
+    window capture uses too; this is the translation into the error types the tool
+    layer already handles. The one behaviour that changed in the move is where the
+    byte ceiling applies: ``communicate()`` handed back the whole reply and the
+    length was compared afterwards, so a decoder that wrote 500 MB inside its time
+    limit had already been given 500 MB by the time the check ran.
     """
-    if deadline is not None:
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise FrameExtractionError(
-                f"Frame extraction ran out of its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
-                "for this request. Ask for fewer frames."
-            )
-        timeout = min(timeout, remaining)
-
+    label = os.path.basename(command[0])
     try:
-        process = subprocess.Popen(
+        return run_bounded(
             command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
+            label=label,
+            timeout=timeout,
+            deadline=deadline,
+            cancelled=cancelled,
+            max_output_bytes=MAX_DECODER_OUTPUT_BYTES,
+            # Truncated at the boundary rather than at each use, so no later
+            # caller can forget and log the whole thing.
+            max_stderr_bytes=MAX_DECODER_STDERR_BYTES,
+            poll_seconds=DECODER_POLL_SECONDS,
         )
-    except FileNotFoundError as error:
+    except ProcessBudgetExhausted as error:
         raise FrameExtractionError(
-            f"{os.path.basename(command[0])} is not installed or not on PATH."
+            f"Frame extraction ran out of its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget "
+            "for this request. Ask for fewer frames."
         ) from error
-
-    started = time.monotonic()
-    try:
-        while True:
-            try:
-                # Retrying after a TimeoutExpired is lossless: CPython drains the
-                # pipes on its own reader threads and hands over everything once
-                # the child exits.
-                stdout, stderr = process.communicate(timeout=DECODER_POLL_SECONDS)
-                if stdout is not None and len(stdout) > MAX_DECODER_OUTPUT_BYTES:
-                    raise FrameExtractionError(
-                        f"{os.path.basename(command[0])} produced {len(stdout)} bytes, above "
-                        f"the {MAX_DECODER_OUTPUT_BYTES}-byte ceiling for one decoder call."
-                    )
-                return subprocess.CompletedProcess(
-                    command,
-                    process.returncode,
-                    stdout=stdout,
-                    # Truncated at the boundary rather than at each use, so no
-                    # later caller can forget and log the whole thing.
-                    stderr=(stderr or b"")[:MAX_DECODER_STDERR_BYTES],
-                )
-            except subprocess.TimeoutExpired:
-                pass
-            if cancelled is not None and cancelled.is_set():
-                raise DecodingCancelled(
-                    f"{os.path.basename(command[0])} was cancelled by the caller and terminated."
-                )
-            if time.monotonic() - started > timeout:
-                raise FrameExtractionError(
-                    f"{os.path.basename(command[0])} timed out after {timeout}s "
-                    "and was terminated."
-                )
-    except BaseException:
-        # Timeout, cancellation or anything else: the child must not outlive the
-        # call that started it. kill() then communicate() reaps it rather than
-        # leaving a zombie holding the pipes.
-        process.kill()
-        process.communicate()
-        raise
+    except ProcessCancelled as error:
+        raise DecodingCancelled(str(error)) from error
+    except ProcessError as error:
+        raise FrameExtractionError(str(error)) from error
 
 
 def _probe(

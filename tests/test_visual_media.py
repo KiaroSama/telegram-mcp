@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -20,7 +21,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image
 
-from telegram_mcp.visual import frames, images
+from telegram_mcp.visual import bounded_process, frames, images
 from telegram_mcp.visual.frames import (
     FrameExtractionError,
     extract_frames,
@@ -620,37 +621,30 @@ def test_naming_the_vp9_decoder_does_not_break_an_h264_source(tmp_path):
 # --- one request, one decoding budget ------------------------------------------
 
 
-class _NeverFinishes:
-    """A child that never exits, so only the caller's own bounds can end the wait."""
-
-    def __init__(self, *args, **kwargs):
-        self.returncode = None
-        self.killed = False
-        self.reaped = False
-        self.stdout = None
-        self.stderr = None
-
-    def communicate(self, timeout=None):
-        if timeout is None:
-            # The post-kill reap, which must not hang.
-            self.reaped = True
-            return b"", b""
-        raise subprocess.TimeoutExpired("fake", timeout)
-
-    def kill(self):
-        self.killed = True
-        self.returncode = -9
+# Real children rather than a fake Popen. What these assert is that nothing
+# SURVIVES a bound, and a double can only show that kill() was called - never
+# that the process is gone. The mechanics now live in
+# telegram_mcp.visual.bounded_process (the window capture shares them); these
+# check that frames._run still translates each bound into the error type the tool
+# layer already handles.
+_HANGS = "import time\nwhile True: time.sleep(0.05)\n"
 
 
-def _with_fake_child(monkeypatch):
+def _hanging_child():
+    return [sys.executable, "-c", _HANGS]
+
+
+def _watch_children(monkeypatch):
+    """Record every child bounded_process starts, so the test can check it died."""
     created = []
+    original = bounded_process.subprocess.Popen
 
     def _factory(*args, **kwargs):
-        child = _NeverFinishes()
-        created.append(child)
-        return child
+        process = original(*args, **kwargs)
+        created.append(process)
+        return process
 
-    monkeypatch.setattr(frames.subprocess, "Popen", _factory)
+    monkeypatch.setattr(bounded_process.subprocess, "Popen", _factory)
     return created
 
 
@@ -658,32 +652,32 @@ def test_a_decode_is_bounded_by_the_request_budget_not_just_its_own_timeout(monk
     """Ten frames at 30s each, after a 15s probe, is 315 seconds one caller can ask
     for. A per-call timeout bounds a subprocess; only a shared deadline bounds the
     request, so the smaller of the two has to win."""
-    created = _with_fake_child(monkeypatch)
+    created = _watch_children(monkeypatch)
 
     started = time.monotonic()
     with pytest.raises(frames.FrameExtractionError, match="timed out"):
-        frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() + 0.3)
+        frames._run(_hanging_child(), timeout=30, deadline=time.monotonic() + 0.3)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 5, f"waited {elapsed:.1f}s: the 30s per-call timeout won over the budget"
-    assert created[0].killed, "the child outlived the call that started it"
+    assert elapsed < 15, f"waited {elapsed:.1f}s: the 30s per-call timeout won over the budget"
+    assert created[0].poll() is not None, "the child outlived the call that started it"
 
 
 def test_a_call_with_no_deadline_still_honours_its_own_timeout(monkeypatch):
-    created = _with_fake_child(monkeypatch)
+    created = _watch_children(monkeypatch)
 
     started = time.monotonic()
     with pytest.raises(frames.FrameExtractionError, match="timed out"):
-        frames._run(["ffprobe"], timeout=0.3)
+        frames._run(_hanging_child(), timeout=0.3)
     elapsed = time.monotonic() - started
 
-    assert elapsed < 5, f"waited {elapsed:.1f}s for a 0.3s timeout"
-    assert created[0].killed
+    assert elapsed < 15, f"waited {elapsed:.1f}s for a 0.3s timeout"
+    assert created[0].poll() is not None
 
 
 def test_an_exhausted_budget_refuses_instead_of_starting_another_decoder(monkeypatch):
     """Past the deadline nothing should be launched at all."""
-    created = _with_fake_child(monkeypatch)
+    created = _watch_children(monkeypatch)
 
     with pytest.raises(frames.FrameExtractionError, match="budget"):
         frames._run(["ffmpeg"], timeout=30, deadline=time.monotonic() - 1)
@@ -696,39 +690,56 @@ def test_a_cancelled_decode_terminates_its_subprocess(monkeypatch):
     the thread has to look for itself. Without this the process kept burning CPU
     until its own timeout fired - up to the whole request budget after everyone had
     stopped waiting for the answer."""
-    created = _with_fake_child(monkeypatch)
+    created = _watch_children(monkeypatch)
     cancelled = threading.Event()
     cancelled.set()
 
     started = time.monotonic()
     with pytest.raises(frames.DecodingCancelled, match="cancelled"):
-        frames._run(["ffmpeg"], timeout=600, deadline=time.monotonic() + 600, cancelled=cancelled)
+        frames._run(
+            _hanging_child(), timeout=600, deadline=time.monotonic() + 600, cancelled=cancelled
+        )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 5, f"took {elapsed:.1f}s to notice a cancellation already set"
-    assert created[0].killed, "the subprocess survived the cancellation"
-    assert created[0].reaped, "the killed child was never reaped"
+    assert elapsed < 15, f"took {elapsed:.1f}s to notice a cancellation already set"
+    assert created[0].poll() is not None, "the subprocess survived the cancellation"
+    assert created[0].stdout.closed, "the killed child was never reaped"
+
+
+def test_a_decoder_that_floods_the_pipe_is_stopped_while_it_writes(monkeypatch):
+    """The byte ceiling has to bound the BUFFER, not describe it afterwards. With
+    communicate() the whole reply arrived first and the length was checked second,
+    so a decoder writing 256 MB inside its time limit had already been given it."""
+    created = _watch_children(monkeypatch)
+    monkeypatch.setattr(frames, "MAX_DECODER_OUTPUT_BYTES", 64 * 1024)
+    flood = (
+        "import sys\n"
+        "block = b'x' * 65536\n"
+        "for _ in range(4096):\n"
+        "    sys.stdout.buffer.write(block)\n"
+    )
+
+    started = time.monotonic()
+    with pytest.raises(frames.FrameExtractionError, match="ceiling"):
+        frames._run([sys.executable, "-c", flood], timeout=60)
+
+    assert time.monotonic() - started < 30
+    assert created[0].poll() is not None
+
+
+def test_an_uncancelled_decode_is_untouched():
+    """The event is optional and absent everywhere it is not wired up yet."""
+    result = frames._run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'PNG')"], timeout=30
+    )
+
+    assert result.returncode == 0 and result.stdout == b"PNG"
 
 
 def test_a_cancellation_is_still_a_frame_extraction_error():
     """Every tool-layer handler catches FrameExtractionError. A cancellation type
     outside that hierarchy would become a new uncaught escape path."""
     assert issubclass(frames.DecodingCancelled, frames.FrameExtractionError)
-
-
-def test_an_uncancelled_decode_is_untouched(monkeypatch):
-    """The event is optional and absent everywhere it is not wired up yet."""
-
-    class _Finishes(_NeverFinishes):
-        def communicate(self, timeout=None):
-            self.returncode = 0
-            return b"PNG", b""
-
-    monkeypatch.setattr(frames.subprocess, "Popen", lambda *a, **k: _Finishes())
-
-    result = frames._run(["ffmpeg"], timeout=30)
-
-    assert result.returncode == 0 and result.stdout == b"PNG"
 
 
 # --- decoders get a size ceiling too, not only a time one ----------------------
