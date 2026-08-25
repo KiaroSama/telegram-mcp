@@ -168,28 +168,38 @@ def test_a_real_session_database_ends_up_mode_600(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "nt", reason="the Windows owner-only mechanism is icacls")
-def test_the_windows_path_removes_inheritance_rather_than_only_granting(tmp_path, monkeypatch):
-    """`/grant` alone ADDS an entry and leaves the inherited BUILTIN\\Users one in
-    place, so it grants precisely what it was called to remove."""
+def test_session_hardening_leaves_no_foreign_entry_on_the_object(tmp_path, monkeypatch):
+    """Seeds an explicit `Everyone` entry first, because that is the case the
+    previous implementation silently failed: it dropped INHERITED entries and
+    replaced only the named principal's own, so a file that already carried a
+    broad explicit entry stayed readable by every account on the machine - and
+    reported success.
+
+    Asserted against the real DACL rather than a mocked subprocess: a mock can
+    only ever confirm that the code called what it already intended to call."""
+    import subprocess as _subprocess
+
+    from telegram_mcp.owner_only import verify_owner_only
+
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     directory = settings.state_dir()
     directory.mkdir(parents=True)
     path = _real_session(directory)
 
-    commands = []
+    seeded = _subprocess.run(
+        ["icacls", str(path), "/grant", "*S-1-1-0:(R)"], capture_output=True, text=True
+    )
+    assert seeded.returncode == 0, f"could not seed the Everyone entry: {seeded.stderr}"
+    assert not verify_owner_only(
+        path
+    ), "the seeded Everyone entry was not visible, so this proves nothing"
 
-    def _run(argv, **kwargs):
-        commands.append(argv)
-        return subprocess.CompletedProcess(argv, 0, b"", b"")
-
-    monkeypatch.setattr(subprocess, "run", _run)
     connection.harden_session_files(path)
 
-    assert commands, "nothing was restricted on Windows"
-    for argv in commands:
-        assert argv[0] == "icacls"
-        assert "/inheritance:r" in argv
-        assert any(part.startswith("/grant:r") for part in argv)
+    listing = _subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
+    assert "Everyone" not in listing, listing
+    assert "S-1-1-0" not in listing, listing
+    assert verify_owner_only(path), f"still not owner-only:{chr(10)}{listing}"
 
 
 def test_an_unrepairable_session_is_reported_rather_than_passed_over(tmp_path, caplog):

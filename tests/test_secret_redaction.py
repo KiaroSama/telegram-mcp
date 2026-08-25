@@ -188,22 +188,22 @@ windows_acls_only = pytest.mark.skipif(
 )
 
 
-def test_the_owner_only_acl_command_names_exactly_one_principal():
-    """Asserted as a command rather than as a resulting ACL, so the contract is
-    checked on every host including the Linux runner that has no icacls.
+def test_hardening_reports_what_the_object_allows_not_what_the_call_returned():
+    """The old test asserted the icacls ARGV and passed for months while the
+    command it described left foreign entries in place. `restrict_to_owner` now
+    reads the DACL back off the object, so True is a statement about the file.
 
-    `/inheritance:r` is the half that matters: `/grant` alone ADDS an entry and
-    leaves the inherited `Users` one in place, which grants what it was called
-    to remove."""
-    command = aliases._owner_only_acl_command("C:/state/aliases.json", "CORP\\ada")
+    Checked here without a real ACL so it holds on every host; the Windows test
+    that seeds an `Everyone` entry and proves its removal lives beside it."""
+    from telegram_mcp import owner_only
 
-    assert command == [
-        "icacls",
-        "C:/state/aliases.json",
-        "/inheritance:r",
-        "/grant:r",
-        "CORP\\ada:(F)",
-    ]
+    assert aliases.restrict_to_owner is not None
+    assert not hasattr(
+        aliases, "_owner_only_acl_command"
+    ), "the icacls argv builder is gone; nothing may reconstruct it"
+    assert (
+        owner_only.verify_owner_only("no-such-path-here") is False
+    ), "an unreadable object must never verify as private"
 
 
 @windows_acls_only

@@ -33,6 +33,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import telethon
 
 from telegram_mcp.safe_log import log_event, logger
+from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
 from telegram_mcp.settings import _parse_bool_env, state_dir
 from sanitize import sanitize_name
 
@@ -61,73 +62,24 @@ _SELF_REFS = {"me", "self"}
 _ACL_TIMEOUT_SECONDS = 10.0
 
 
-def _current_principal() -> Optional[str]:
-    """`DOMAIN\\user` for the account this process runs as, or None."""
-    user = os.environ.get("USERNAME")
-    if not user:
-        return None
-    domain = os.environ.get("USERDOMAIN")
-    return f"{domain}\\{user}" if domain else user
-
-
-def _owner_only_acl_command(path: str, principal: str) -> list:
-    """The icacls invocation that leaves exactly one access entry.
-
-    `/inheritance:r` is the half that matters. `/grant` on its own ADDS an entry
-    and leaves the inherited one - typically `BUILTIN\\Users` - in place, so it
-    grants precisely what it was called to remove.
-    """
-    return ["icacls", str(path), "/inheritance:r", "/grant:r", f"{principal}:(F)"]
-
-
 def restrict_to_owner(path: Union[str, Path]) -> bool:
-    """Make a file readable by its owner alone, on POSIX *and* on Windows.
+    """Make a file or directory reachable by its owner alone, and prove it.
 
-    Lives here because this module already owns writing a private file safely,
-    and it is imported by everything that needs the same guarantee.
+    Delegates to :mod:`telegram_mcp.owner_only`. The previous implementation ran
+    `icacls /inheritance:r /grant:r <user>:(F)` and returned whether the command
+    exited 0 - which was not the same question. `/inheritance:r` drops INHERITED
+    entries and `/grant:r` replaces the entry for the principal it names; an
+    explicit entry belonging to anyone else survives untouched.
 
-    `os.chmod(path, 0o600)` is not that guarantee on Windows: it toggles the
-    read-only attribute and cannot clear the read bit, so the alias store, the
-    `.env` and its backups were readable by every account on the machine this
-    project targets first - while the POSIX-only tests passed. `icacls` ships
-    with Windows, needs no elevation for a file the caller owns, and is the
-    only owner-only mechanism available without a new dependency.
+    Measured before the change: a file carrying `Everyone:(R)` still carried it
+    afterwards, and this function returned True. The alias store, `.env` backups,
+    file sessions, the event feed and the log all trusted that answer.
 
-    Returns whether it was applied, so a caller can report a machine where it
-    could not be. Never raises: a permissions detail must not take a tool down.
+    True now means the object's DACL was read back and names this account only.
+    Never raises: a permissions detail must not take a tool down - but a caller
+    holding something sensitive must treat False as a refusal, not a warning.
     """
-    if os.name != "nt":
-        try:
-            os.chmod(path, 0o600)
-            return True
-        except OSError as error:
-            log_event(
-                logging.WARNING,
-                "could not restrict a file to its owner",
-                error=error,
-                path=path,
-            )
-            return False
-
-    principal = _current_principal()
-    if principal is None or not os.path.exists(path):
-        return False
-    try:
-        completed = subprocess.run(
-            _owner_only_acl_command(path, principal),
-            capture_output=True,
-            timeout=_ACL_TIMEOUT_SECONDS,
-            check=False,
-        )
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        log_event(
-            logging.WARNING,
-            "could not restrict a file to its owner",
-            error=error,
-            path=path,
-        )
-        return False
-    return completed.returncode == 0
+    return restrict_to_owner_strict(path)
 
 
 def aliases_file_path() -> Path:
@@ -833,6 +785,7 @@ __all__ = [
     "migrate_legacy_rows",
     "normalise_account_label",
     "restrict_to_owner",
+    "verify_owner_only",
     "save_aliases",
     "sole_account_label",
     "update_aliases",
