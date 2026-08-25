@@ -102,7 +102,7 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-Added since, 165 → **168**, ported from the upstream project rather than merged (a
+Added since, 165 → **168**, ported from the original project rather than merged (a
 history rewrite here left the two with no merge base):
 
 | Capability | Tools | Module |
@@ -182,7 +182,8 @@ from the same measurement as the tables above.
 
 ### Phase 0 — fix at source (now unblocked)
 
-The project has detached: it no longer tracks an upstream, and inherited files are no
+The project has detached: it no longer merges from the project it came from, and
+inherited files are no
 longer treated as untouchable. That was the prerequisite for all four items here, and
 none of them is started. Each one currently exists as a workaround somewhere else in
 the tree, which is the cost of having deferred them.
@@ -308,8 +309,8 @@ Decided and done. This section is kept as the record of what the constraint cost
 because the four items it lists are the work that decision unlocked and none of them
 is finished yet.
 
-While the project tracked an upstream, every change had to live in a **new file** so
-that a merge stayed conflict-free. That discipline held — the final merge was clean,
+While this project still merged from the one it came from, every change had to live in
+a **new file** so that a merge stayed conflict-free. That discipline held — the final merge was clean,
 with no conflicts — but it was paid for in workarounds:
 
 - `get_media_label` checks `video` before `gif`, so an animation has to be corrected

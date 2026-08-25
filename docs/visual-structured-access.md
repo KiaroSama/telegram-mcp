@@ -2,7 +2,7 @@
 
 ## What this adds
 
-Upstream tools return a message as a flattened string. That is enough to read a chat and
+The inherited tools return a message as a flattened string. That is enough to read a chat and
 useless for anything else: formatting, custom emoji, sticker sets, media geometry and
 per-reaction counts are all gone by the time the agent sees the text.
 
@@ -45,7 +45,7 @@ TELEGRAM_DESKTOP_PROCESS=Telegram_Portable.exe
 ### Structured
 
 **`inspect_message(chat_id, message_id, include_thumbnail=False, include_screen=False, max_dimension=1568, account=None) -> list`**
-Full structured dump of one message: the upstream compact fields plus `entities`,
+Full structured dump of one message: the inherited compact fields plus `entities`,
 `custom_emoji`, `media_details`, `reactions`, `topic`, `permalink`. One API round trip and no
 download by default. Optionally appends images: `include_thumbnail=True` fetches Telegram's
 own thumbnail of the attached media, `include_screen=True` appends a live capture of the
@@ -178,7 +178,7 @@ sentinel, not "no timer", and the only way to outlast a minute. Anything above 6
 because the server does not reject it — measured one value at a time, 1-60 come back applied while
 61, 90, 300 and 3600 all come back with **no timer at all**, so the media would be permanent and
 the caller would never know. The applied timer is compared with the requested one either way, and a
-mismatch is reported as `timer_dropped` with a warning rather than a success. `file_path` resolves under the same allowed roots as upstream's `upload_file`, so
+mismatch is reported as `timer_dropped` with a warning rather than a success. `file_path` resolves under the same allowed roots as the inherited `upload_file`, so
 this widens no filesystem surface. A caption is not covered by the timer and stays in the chat.
 `send_disappearing_media("me", "photo.jpg", 30)`
 
@@ -221,7 +221,7 @@ meaningfully more than the previous one:
 2. **`get_media_thumbnail`** — one small image, enough to identify a photo or a sticker.
 3. **`get_media_frames`** (motion in the file) or **`get_telegram_screen`** /
    **`get_telegram_region`** (how the chat actually looks).
-4. **`download_media`** (existing upstream tool) — only when the original bytes on disk are
+4. **`download_media`** (an inherited tool) — only when the original bytes on disk are
    genuinely required.
 
 ## Capture methods
@@ -282,7 +282,7 @@ removes the invisible maths operators (U+2061–U+2064), the interlinear annotat
 Human-readable names — the sender, and the forwarded chat/user/author — are rebuilt from the raw
 Telethon objects rather than cleaned a second time, because the generic sanitizer runs first and a
 deleted ZWNJ cannot be recovered afterwards. IDs, dates, usernames and permalinks stay exactly as
-the upstream view computed them.
+the inherited view computed them.
 
 A reply quote is fidelity-safe, not character-for-character exact, and says so. Filtering and
 truncation are reported as separate facts — `"filtered"` and `"truncated"` — computed rather than
@@ -477,7 +477,7 @@ Two different things, and only one of them resolves:
   single round trip. An id Telegram declines to resolve is reported as `icon_error` rather than
   guessed at, and a failed lookup costs the icon detail, never the listing.
 
-  This is also why the icon looked unavailable at first: neither this fork nor upstream read
+  This is also why the icon looked unavailable at first: neither this project nor the one it came from read
   `style` at all, so both the icon and the background flags were invisible. The field was always
   being sent — confirmed against a live bot whose keyboard carries two styled buttons, each
   resolving to an animated `.tgs` custom emoji, alongside a third button with no `style` at all.
@@ -555,7 +555,8 @@ decoder calls every VP9 file opaque, correct ones included.
 
 ## Module layout
 
-The project no longer tracks an upstream, so this list is no longer a merge contract - it is
+The project no longer merges from the one it came from, so this list is no longer a
+merge contract - it is
 simply the record of which modules were written here rather than inherited, which is what makes
 the code archaeology below readable. Every one of them is a **new file**:
 
@@ -579,7 +580,7 @@ docs/visual-structured-access.md
 `text_fidelity.py` holds the string rules split out of `message_view.py`, `media_transfer.py`
 the bounded-download layer and `media_preview.py` the asset-preview layer — both split out of
 `tools/inspection.py`. All three are re-exported from their original modules, so no import moved.
-`scheduled.py` and `ephemeral.py` are the timed-message pair. Upstream can only *create* a
+`scheduled.py` and `ephemeral.py` are the timed-message pair. The inherited tools can only *create* a
 plain scheduled message, so `scheduled.py` adds reading the queue back, editing it, cancelling
 it, and `schedule_repeat_period` — the field behind Telegram's recurring messages, whose two
 valid periods (86400 and 604800) were established by probing the live server rather than inferred,
@@ -588,7 +589,7 @@ accepted and come back with the period set. A non-Premium account gets `PREMIUM_
 for the same call, which is reported as that sentence rather than the raw error, and 5 seconds is
 rejected by Telegram itself as `SCHEDULE_REPEAT_PERIOD_INVALID`. `ephemeral.py` covers `ttl_seconds`, which nothing read or set
 before: finding disappearing media before it is opened, sending it with a timer through the SAME
-allowed-roots gate upstream's `upload_file` uses, and writing an incoming one to disk before it
+allowed-roots gate the inherited `upload_file` uses, and writing an incoming one to disk before it
 expires. The save path is the answer to the case the timer creates: a message that dies on first
 view leaves nothing to fetch a second time, so `save_disappearing_media` downloads once and writes
 the bytes to a configured root rather than returning them through MCP, where they would be lost
@@ -610,8 +611,8 @@ The inherited files this touches are `telegram_mcp/tools/__init__.py` (28 import
 now: 12 for the modules described here, and 16 above them — up from 9, because splitting
 `messages.py`, `groups.py` and `chats.py` gave each of them siblings to register),
 plus `pyproject.toml` and `requirements.txt` for the Pillow dependency. `message_view.py` layers
-on top of the inherited `message_to_dict` rather than replacing it - originally so upstream
-improvements kept flowing through, now simply because the layering is the cleaner shape.
+on top of the inherited `message_to_dict` rather than replacing it - originally so improvements from the
+original project kept flowing through, now simply because the layering is the cleaner shape.
 
 **On those import lines.** `import *` in `tools/__init__.py` binds every tool name into the
 package namespace, which means a module whose own name matches one of its tools stops being
@@ -621,7 +622,7 @@ reaching for the module noticed. The module is named `translation.py` for that r
 `tests/test_tool_registry.py` fails on any future collision.
 
 **Independence.** Development was previously constrained to new files so that a merge from
-upstream stayed conflict-free, and the last such merge was clean - which is the evidence that
+the original project stayed conflict-free, and the last such merge was clean - which is the evidence that
 the discipline worked. That constraint is now lifted: inherited files may be edited at source
 rather than corrected in a layer above. What the constraint was costing is recorded in
 `docs/api-coverage.md`.
