@@ -497,16 +497,10 @@ async def test_a_save_into_a_directory_replaced_mid_transfer_keeps_nothing(monke
     # A swap before the gate runs is not this defect: the gate then judges the
     # replacement on its own merits, which is what it is for.
     reserve = handles.DirHandle.reserve_free_name
-    refused: list = []
 
     def _reserve_then_swap(self, stem, suffix):
         name = reserve(self, stem, suffix)
-        try:
-            _replace_directory(live, decoy)
-        except OSError as error:
-            # A host that can hold the directory open refuses the exchange
-            # outright, which is the same defect closed one layer lower.
-            refused.append(error)
+        _replace_directory(live, decoy)
         return name
 
     monkeypatch.setattr(handles.DirHandle, "reserve_free_name", _reserve_then_swap)
@@ -518,13 +512,7 @@ async def test_a_save_into_a_directory_replaced_mid_transfer_keeps_nothing(monke
 
     text = result if isinstance(result, str) else str(result)
     assert "secret-bytes" not in text
-    if refused:
-        # The exchange never happened, so the payload is where it was authorised
-        # to go and nowhere else.
-        assert len(_files(live)) == 1, _files(live)
-        assert (live / _files(live)[0]).read_bytes() == b"secret-bytes"
-        assert _files(decoy) == [], "the replacement received the payload"
-    elif "saved_path" in text:  # pragma: no cover - POSIX only
+    if "saved_path" in text:  # pragma: no cover - POSIX only
         # With openat the descriptor still names the authorised directory.
         assert _files(live) == [], "the payload landed in the replacement"
     else:

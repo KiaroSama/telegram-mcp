@@ -20,35 +20,20 @@ actually puts on disk -- the database plus whatever `-journal`, `-wal` or `-shm`
 sibling SQLite decides to make -- and a mock would only assert this module's
 opinion of that.
 
-The protection has to be in place BEFORE the database exists, not applied to it
-afterwards. Telethon's constructor is what creates the file, so a fix that runs
-after it has already published an unprotected auth key -- and the `-journal`,
-`-wal` and `-shm` siblings SQLite makes later are not covered by any after-the-
-fact sweep at all. What covers them is the directory: an owner-only directory
-with inheritable entries means every file born in it is born owner-only, which
-is measured here against a real SQLite session rather than asserted.
-
-And because a session file IS the account, a protection failure stops that
-account from starting. Running anyway would mean serving Telegram requests from
-credentials the tests have just established are readable by somebody else.
-
 `os.chmod` cannot express owner-only on Windows: it toggles the read-only
 attribute and cannot clear the read bit. The mode assertions are therefore POSIX
-and are marked as such; the Windows mechanism is a DACL written from scratch by
-`telegram_mcp.owner_only`, and the tests that pin it read the DACL back off the
-object.
+and are marked as such; the Windows path is `icacls`, and the tests that pin it
+assert the command rather than a mode.
 """
 
 import os
 import stat
 import subprocess
-from pathlib import Path
 
 import pytest
 from telethon.sessions import SQLiteSession
 
 from telegram_mcp import connection, settings
-from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
 
 posix_modes_only = pytest.mark.skipif(
     os.name == "nt",
@@ -90,18 +75,9 @@ def test_an_explicit_path_is_honoured_where_the_operator_put_it(tmp_path, monkey
     assert connection.session_file_path(str(explicit)) == explicit
 
 
-def test_a_session_already_beside_the_installation_is_moved_somewhere_private(
-    tmp_path, monkeypatch
-):
-    """It used to be left where it was, on the reasoning that moving a session
-    database is moving the account. But the directory it was left in is a git
-    checkout, or whatever directory the client happened to launch the server
-    from, and neither can be made private without stripping the permissions off
-    everything else in it -- measured, on this project's own checkout.
-
-    So the account moves, once, into the directory this server owns. It arrives
-    with every sidecar it had, and the name it used to answer to is gone rather
-    than left behind holding a readable copy of the auth key."""
+def test_a_session_already_beside_the_installation_keeps_working(tmp_path, monkeypatch):
+    """An existing install must not be broken by the new default, and the file
+    must not be moved out from under a live client that may hold it open."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
     # Beside the INSTALLATION, which is the case this is about - the working
@@ -109,58 +85,10 @@ def test_a_session_already_beside_the_installation_is_moved_somewhere_private(
     install = tmp_path / "install"
     install.mkdir()
     monkeypatch.setattr(connection, "script_dir", str(install))
-    legacy = _real_session(install, name="telegram_session")
-    (install / (legacy.name + "-wal")).write_bytes(b"pages")
+    legacy = install / "telegram_session.session"
+    legacy.write_bytes(b"")
 
-    resolved = connection.session_file_path("telegram_session")
-    assert resolved == settings.state_dir() / "telegram_session.session"
-
-    connection.adopt_legacy_session(resolved)
-
-    assert resolved.exists(), "the account did not arrive at its new home"
-    assert not legacy.exists(), "a readable copy of the auth key was left behind"
-    assert (resolved.parent / (resolved.name + "-wal")).exists(), "a sidecar was left behind"
-    assert not (install / (legacy.name + "-wal")).exists()
-
-
-def test_a_legacy_session_is_left_alone_when_a_managed_one_already_exists(tmp_path, monkeypatch):
-    """Two databases with one name are two authorisations. Overwriting the one
-    this server has been using with an older copy from beside the installation
-    would swap the account out from under a running client."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.chdir(tmp_path)
-    install = tmp_path / "install"
-    install.mkdir()
-    monkeypatch.setattr(connection, "script_dir", str(install))
-    legacy = _real_session(install, name="telegram_session")
-    legacy.write_bytes(b"the-old-one")
-    managed = settings.state_dir() / "telegram_session.session"
-    managed.parent.mkdir(parents=True)
-    managed.write_bytes(b"the-one-in-use")
-
-    connection.adopt_legacy_session(managed)
-
-    assert managed.read_bytes() == b"the-one-in-use"
-    assert legacy.exists(), "the legacy database was removed without being adopted"
-
-
-def test_a_legacy_session_that_cannot_be_moved_is_a_refusal(tmp_path, monkeypatch):
-    """Carrying on would mean running the account out of a directory that has
-    just been shown to be unprotectable."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.chdir(tmp_path)
-    install = tmp_path / "install"
-    install.mkdir()
-    monkeypatch.setattr(connection, "script_dir", str(install))
-    _real_session(install, name="telegram_session")
-
-    def _refuse(self, target):
-        raise OSError(13, "in use")
-
-    monkeypatch.setattr(Path, "replace", _refuse)
-
-    with pytest.raises(connection.SessionNotProtected):
-        connection.adopt_legacy_session(settings.state_dir() / "telegram_session.session")
+    assert connection.session_file_path("telegram_session") == legacy
 
 
 def test_the_extension_is_not_doubled(tmp_path, monkeypatch):
@@ -272,147 +200,6 @@ def test_session_hardening_leaves_no_foreign_entry_on_the_object(tmp_path, monke
     assert "Everyone" not in listing, listing
     assert "S-1-1-0" not in listing, listing
     assert verify_owner_only(path), f"still not owner-only:{chr(10)}{listing}"
-
-
-# --- the whole lifecycle, against a real SQLite session ----------------------
-
-
-def test_hardening_a_session_that_does_not_exist_yet_does_not_claim_success(tmp_path, monkeypatch):
-    """The call runs BEFORE Telethon's constructor, so there is no database and
-    no sidecar to restrict. It used to walk the sidecar list, find nothing,
-    never touch the directory the file was about to be created in, and return
-    True -- reporting success for having restricted nothing at all."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    elsewhere = tmp_path / "a-directory-of-their-own"
-    elsewhere.mkdir()
-    os.chmod(elsewhere, 0o755)  # POSIX: explicitly not owner-only. A no-op on Windows.
-    assert not verify_owner_only(elsewhere), "the fixture directory was already private"
-
-    assert connection.harden_session_files(elsewhere / "work.session") is False
-
-
-def test_a_session_in_the_managed_directory_is_born_owner_only(tmp_path, monkeypatch):
-    """Not restricted afterwards: born that way. The database is created by
-    Telethon's constructor, and anything applied after that has already left the
-    auth key readable for as long as the constructor took."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    path = settings.state_dir() / "probe.session"
-
-    assert connection.harden_session_files(path) is True
-
-    session = SQLiteSession(str(path))
-    session.set_dc(2, "149.154.167.51", 443)
-    session.save()
-    try:
-        assert path.exists(), "the real session database was not created"
-        assert verify_owner_only(path), "the database was not born owner-only"
-    finally:
-        session.close()
-
-
-def test_a_sidecar_created_after_startup_is_owner_only_too(tmp_path, monkeypatch):
-    """`-journal`, `-wal` and `-shm` hold pages of the same database. SQLite
-    makes them when it feels like it, which is long after any startup sweep has
-    run, so the thing that has to cover them is the directory they are born in."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    path = settings.state_dir() / "probe.session"
-    assert connection.harden_session_files(path) is True
-
-    session = SQLiteSession(str(path))
-    session.set_dc(2, "149.154.167.51", 443)
-    session.save()
-    try:
-        # A write after the client is up, which is when SQLite creates a sibling.
-        session.set_dc(4, "149.154.167.92", 443)
-        session.save()
-        appeared = [
-            p for p in settings.state_dir().iterdir() if p.name.startswith("probe.session")
-        ]
-        assert appeared
-        for sibling in appeared:
-            assert verify_owner_only(sibling), f"{sibling.name} was born readable"
-    finally:
-        session.close()
-
-
-def test_a_session_in_a_directory_the_operator_chose_is_refused_unless_it_is_private(
-    tmp_path, monkeypatch
-):
-    """The database can be locked down after the fact; the directory it lives in
-    cannot, because locking down a directory the operator picked strips the
-    permissions off everything else they keep there. So the sidecars SQLite has
-    not created yet are unprotectable, and saying so is the only honest answer."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    elsewhere = tmp_path / "a-directory-of-their-own"
-    elsewhere.mkdir()
-    os.chmod(elsewhere, 0o755)  # POSIX: explicitly not owner-only. A no-op on Windows.
-    path = _real_session(elsewhere)
-    assert not verify_owner_only(elsewhere), "the fixture directory was already private"
-
-    assert connection.harden_session_files(path) is False
-    assert verify_owner_only(path), "the database itself was left alone as well"
-
-
-def test_a_private_directory_the_operator_chose_is_accepted(tmp_path, monkeypatch):
-    """The refusal above is about the directory's permissions, not about who
-    picked it. An operator who has already made it private is taken at the
-    evidence."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    elsewhere = tmp_path / "a-vault-of-their-own"
-    elsewhere.mkdir()
-    assert restrict_to_owner_strict(elsewhere), "could not make the fixture private"
-    path = _real_session(elsewhere)
-
-    assert connection.harden_session_files(path) is True
-
-
-def test_a_protection_failure_stops_the_account_from_starting(tmp_path, monkeypatch):
-    """A session file IS the account: whoever can read it is signed in, with no
-    password and no second factor. Building a client over one that could not be
-    protected serves Telegram requests out of a credential this process has just
-    established is readable by somebody else."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(connection, "restrict_to_owner", lambda target: False)
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
-
-    with pytest.raises(connection.SessionNotProtected):
-        connection._build_client("work", "work")
-
-
-def test_a_string_session_is_not_affected_by_the_file_checks(tmp_path, monkeypatch):
-    """There is no file, so there is nothing to protect and nothing to refuse."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(connection, "restrict_to_owner", lambda target: False)
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: "built")
-
-    assert connection._build_client(object(), "work") == "built"
-
-
-def test_a_built_file_session_is_owner_only_end_to_end(tmp_path, monkeypatch):
-    """The real constructor, the real database, the real DACL."""
-    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
-
-    built = {}
-
-    def _client(session, *args, **kwargs):
-        real = SQLiteSession(str(session))
-        real.set_dc(2, "149.154.167.51", 443)
-        real.save()
-        built["session"] = real
-        return real
-
-    monkeypatch.setattr(connection, "TelegramClient", _client)
-
-    connection._build_client("work", "work")
-    try:
-        path = settings.state_dir() / "work.session"
-        assert path.exists()
-        assert verify_owner_only(path)
-        assert verify_owner_only(settings.state_dir())
-    finally:
-        built["session"].close()
 
 
 def test_an_unrepairable_session_is_reported_rather_than_passed_over(tmp_path, caplog):

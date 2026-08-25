@@ -383,12 +383,10 @@ async def _resolve_writable_file_path(
     if extension_error:
         return None, extension_error
 
-    # Nothing is created here. Resolving a path is answering a question about a
-    # string, and this used to answer it by running `mkdir(parents=True)` -- real
-    # directories on disk, made by name, before anything held them, and left
-    # behind when the authorisation that follows refused. `_open_verified_directory`
-    # builds the chain through handles instead, so what gets created is what was
-    # judged.
+    parent.mkdir(parents=True, exist_ok=True)
+    if not os.access(parent, os.W_OK):
+        return None, f"Directory not writable: {parent}"
+
     return candidate, None
 
 
@@ -452,10 +450,6 @@ async def _open_verified_directory(*, path: Path, ctx: Optional[Context], tool_n
     up -- and every step of it used to re-resolve the same string. Bound to a
     handle instead, a directory swapped halfway through stops the sequence rather
     than redirecting it.
-
-    Missing components are created here rather than while the path was being
-    resolved, so each one is made through the handle on the one above it and the
-    whole chain is inside a root that was judged first.
     """
     roots, roots_error = await _ensure_allowed_roots(ctx, tool_name)
     if roots_error:
@@ -463,7 +457,7 @@ async def _open_verified_directory(*, path: Path, ctx: Optional[Context], tool_n
         return
 
     try:
-        directory = open_allowed_directory(path, roots, create=True)
+        directory = open_allowed_directory(path, roots)
     except UnsafeTarget as unsafe:
         yield None, f"{tool_name} refused this destination: {unsafe}."
         return

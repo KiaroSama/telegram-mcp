@@ -7,14 +7,12 @@ try:
 except UnsafeInstallationError as exc:
     raise SystemExit(str(exc)) from None
 
-import math
-
 from telethon.errors import AuthKeyDuplicatedError
 
 from telegram_mcp import runtime as _runtime
 from telegram_mcp.connection import _BURNED_SESSION_MESSAGE, harden_env_file, parse_port
+from telegram_mcp.paging import bounded_number
 from telegram_mcp.safe_log import safe_exception
-from telegram_mcp.settings import StartupMessage
 from telegram_mcp.runtime import *
 from telegram_mcp.singleton import (
     DEFAULT_GRACE_SECONDS,
@@ -42,17 +40,13 @@ def _lock_grace_seconds() -> float:
     raw = os.getenv("TELEGRAM_LOCK_GRACE_SECONDS")
     if not raw:
         return DEFAULT_GRACE_SECONDS
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise ValidationError(
-            f"TELEGRAM_LOCK_GRACE_SECONDS must be a number of seconds, got {raw!r}."
-        ) from exc
-    if not math.isfinite(value) or value < 0:
-        raise ValidationError(
-            f"TELEGRAM_LOCK_GRACE_SECONDS must be finite and non-negative, got {raw!r}."
-        )
-    return value
+    # The same rule the lock itself applies, from the same table: a local
+    # finite/non-negative test accepted 1e18, which is an unbounded wait written
+    # in digits and would have stalled startup rather than failing it.
+    span = bounded_number(raw, "lock_grace_seconds")
+    if span.error:
+        raise ValidationError(f"TELEGRAM_LOCK_GRACE_SECONDS: {span.error}")
+    return span.value
 
 
 def _reject_duplicate_sessions(configured: dict) -> None:
@@ -69,7 +63,7 @@ def _reject_duplicate_sessions(configured: dict) -> None:
         identity = session_identity(client)
         first = by_identity.setdefault(identity, label)
         if first != label:
-            raise StartupMessage(
+            raise RuntimeError(
                 f"Accounts '{first}' and '{label}' are configured with the same "
                 "Telegram session. One session is one auth key, and connecting it "
                 "twice makes Telegram invalidate it for both. Generate a separate "
@@ -103,12 +97,12 @@ async def _connect_authorized_client(label, client) -> None:
         # behind a lock this failed attempt left standing.
         _session_locks.pop(label, None)
         lock.release()
-        raise StartupMessage(f"[{label}] {_BURNED_SESSION_MESSAGE}") from exc
+        raise RuntimeError(f"[{label}] {_BURNED_SESSION_MESSAGE}") from exc
 
     if await client.is_user_authorized():
         return
 
-    raise StartupMessage(
+    raise RuntimeError(
         f"Telegram client '{label}' is not authorized. Interactive phone login "
         "is disabled for the MCP server because it runs over stdio. Generate a "
         "session string with `uv run session_string_generator.py`, then set "
@@ -244,11 +238,13 @@ async def _serve(transport: str) -> None:
 # a length and a digest.
 #
 # The narrowness is the point: a server that will not start prints one line, and
-# an operator who cannot read it has nothing else to go on. `StartupMessage` is
-# the type this package raises for exactly those sentences. It used to be plain
-# `RuntimeError`, which also covered any RuntimeError a dependency raised during
-# startup - and those carry whatever the failing call was given.
-_READABLE_STARTUP_ERRORS = (ValidationError, SessionLockError, StartupMessage)
+# an operator who cannot read it has nothing else to go on. `RuntimeError` is on
+# the list because the three that reach here are raised by `_reject_duplicate_
+# sessions`, `_connect_authorized_client` and `connection._force_reconnect`, each
+# with a literal sentence. A RuntimeError raised elsewhere with caller data would
+# also print; that is the residual cost of keeping this readable, and it is
+# bounded to the startup path, which runs before any tool call.
+_READABLE_STARTUP_ERRORS = (ValidationError, SessionLockError, RuntimeError)
 
 
 def _startup_text(error: BaseException) -> str:

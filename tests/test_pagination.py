@@ -159,23 +159,6 @@ async def _invoke(tool_name, count_param, value, registered_tools):
     return await function(**kwargs)
 
 
-def _refusal(result):
-    """The refusal text, whichever shape the tool returns.
-
-    A tool that returns images is annotated `-> list` so FastMCP builds no output
-    schema for it, and it reports a refusal as a one-element list. That is the
-    documented shape, not an inconsistency - but this file only ever met
-    str-returning tools until an image tool acquired a limit, so the assertion
-    below unwraps it rather than declaring the contract broken.
-    """
-    if isinstance(result, list):
-        assert len(result) == 1, f"a refusal must not carry images: {result!r}"
-        assert isinstance(result[0], str), result
-        return result[0]
-    assert isinstance(result, str), result
-    return result
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize("value", [0, -1, -(10**9)])
 async def test_a_non_positive_count_is_refused_before_any_client_work(
@@ -186,9 +169,9 @@ async def test_a_non_positive_count_is_refused_before_any_client_work(
     alone, which is why this passes with no client wired at all."""
     result = await _invoke(tool_name, count_param, value, registered_tools)
 
-    message = _refusal(result)
-    assert count_param in message, message
-    assert "Error" in message, message
+    assert isinstance(result, str)
+    assert count_param in result, result
+    assert "Error" in result, result
 
 
 @pytest.mark.asyncio
@@ -200,9 +183,9 @@ async def test_a_count_that_is_not_a_whole_number_is_refused(
     ceiling tested with `>` silently does not fire."""
     result = await _invoke(tool_name, count_param, value, registered_tools)
 
-    message = _refusal(result)
-    assert count_param in message, message
-    assert "Error" in message, message
+    assert isinstance(result, str)
+    assert count_param in result, result
+    assert "Error" in result, result
 
 
 @pytest.mark.asyncio
@@ -216,8 +199,8 @@ async def test_a_huge_count_is_never_passed_through_as_given(
     ceiling = LIMITS[tool_name]
     result = await _invoke(tool_name, count_param, 10**9, registered_tools)
 
-    message = _refusal(result)
-    assert "1000000000" not in message, f"the raw count reached the answer: {message[:200]}"
+    assert isinstance(result, str)
+    assert "1000000000" not in result, f"the raw count reached the answer: {result[:200]}"
     assert ceiling >= 1
 
 

@@ -6,7 +6,6 @@ from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
 import main
-from telegram_mcp import file_roots
 
 
 class _DummySession:
@@ -208,17 +207,7 @@ async def test_writable_default_path_uses_downloads_subdir(tmp_path, monkeypatch
 
     assert error is None
     assert resolved == (root / "downloads" / "example.bin").resolve()
-    # Resolving a path answers a question about a string and creates nothing.
-    # The directory is built by the handle gate, one component at a time through
-    # the handle on the component above it.
-    assert not resolved.parent.exists()
-
-    async with file_roots._open_verified_directory(
-        path=resolved.parent, ctx=None, tool_name="download_media"
-    ) as (directory, dir_error):
-        assert dir_error is None
-        assert resolved.parent.is_dir()
-        assert Path(directory.path) == resolved.parent
+    assert resolved.parent.exists()
 
 
 @pytest.mark.asyncio

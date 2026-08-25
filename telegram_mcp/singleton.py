@@ -27,12 +27,13 @@ calling ``connect()`` -- so the live session is never disturbed.
 from __future__ import annotations
 
 import hashlib
-import math
 import os
 import tempfile
 import time
 from pathlib import Path
 from typing import IO, Optional
+
+from telegram_mcp.paging import TIMING_BOUNDS, bounded_number
 
 if os.name == "nt":
     import msvcrt
@@ -109,9 +110,19 @@ class SessionLock:
         """
         # Validated before anything is opened or slept on: with ``nan`` the
         # deadline comparison below is never true and the wait never ends.
-        for name, value in (("grace_seconds", grace_seconds), ("poll_interval", poll_interval)):
-            if not math.isfinite(value) or value < 0:
-                raise ValueError(f"{name} must be a finite, non-negative number, got {value!r}")
+        #
+        # Through the shared validator rather than a local finite/non-negative
+        # test, because that test had no upper end and no floor: a grace of 1e18
+        # is an unbounded wait spelled with digits, and ``poll_interval=0`` passed
+        # it while turning the loop below into a busy-spin on one core for the
+        # whole grace period.
+        for name, value in (
+            ("lock_grace_seconds", grace_seconds),
+            ("lock_poll_interval", poll_interval),
+        ):
+            span = bounded_number(value, name)
+            if span.error:
+                raise ValueError(span.error)
 
         fh = open(self.path, "a+")
         deadline = time.monotonic() + grace_seconds

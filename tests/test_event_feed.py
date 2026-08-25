@@ -49,7 +49,6 @@ def _clean_state(monkeypatch, tmp_path):
     monkeypatch.setattr(events, "_feed_settle_ms", 6000)
     monkeypatch.setattr(events, "_feed_autostart_done", False)
     monkeypatch.setattr(events, "_dropped", events._new_drop_ledger())
-    monkeypatch.setattr(events, "_owner_only_paths", set())
     for name in (
         "TELEGRAM_EVENT_FEED",
         "TELEGRAM_EVENT_FEED_MAX_BYTES",
@@ -127,7 +126,12 @@ async def test_enable_disable_and_status_tools():
     result = json.loads(await events.enable_incoming_feed(settle_ms=100))
     assert result["enabled"] is True
     assert result["settle_ms"] == 100
-    assert result["watch_command"].startswith("tail -n 0 -F ")
+    # The watcher has to be startable in the shell this host actually has;
+    # `tail -F` on a Windows box described a monitor nobody could run.
+    if os.name == "nt":
+        assert "powershell" in result["watch_command"].lower()
+    else:
+        assert result["watch_command"].startswith("tail -n 0 -F ")
     assert events.feed_file_path().exists()
 
     # Idempotent with same settle_ms.

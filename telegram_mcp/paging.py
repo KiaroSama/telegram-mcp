@@ -59,10 +59,6 @@ LIMITS: dict[str, int] = {
     "get_poll_voters": 200,
     "get_message_reactions": 200,
     "get_user_photos": 100,
-    "list_photos": 100,  # ids and dates only; the images are fetched separately
-    # A sheet is bounded by its own geometry, not by record cost: 24 tiles at 4
-    # columns is already the largest grid worth sending as one image block.
-    "get_photo_sheet": 24,
     "list_disappearing_media": 200,
     "get_gif_search": 50,
     # Pending incoming bursts held in memory, not fetched from Telegram.
@@ -227,3 +223,93 @@ def bounded_slice(records: list, bound: Bound) -> tuple[list, dict[str, Any]]:
         }
     )
     return served, described
+
+
+# Timing arguments: the same problem one unit over. A count is "how many"; these
+# are "how long", and an unchecked one buys an unbounded WAIT rather than an
+# unbounded fetch. ``timeout=inf`` produced a deadline no comparison ever reached
+# and ``asyncio.wait_for(..., timeout=inf)`` under it, so only cancellation from
+# outside ever ended the call; ``nan`` is worse, because the reply still claims a
+# bound.
+#
+# Two differences from ``bounded`` above, both deliberate:
+#
+# * a FLOOR as well as a ceiling, because the invalid end is not always zero.
+#   ``lock_grace_seconds=0`` means "do not wait", which is a real answer;
+#   ``lock_poll_interval=0`` is a busy-spin dressed up as a wait.
+# * out of range is REFUSED, not clamped. Silently turning a caller's 1e18 into
+#   300 answers a question nobody asked, and the caller cannot tell which.
+#
+# name -> (minimum, maximum), in the unit the argument is named for.
+TIMING_BOUNDS: dict[str, tuple[float, float]] = {
+    # Seconds an MCP call may block. Past five minutes the client has given up on
+    # the request long before the server has.
+    "timeout": (0.1, 300.0),
+    # Milliseconds of quiet that ends a burst. Below 50ms nothing debounces;
+    # past five minutes a burst is not a burst.
+    "settle_ms": (50.0, 300_000.0),
+    # Milliseconds one debounced wait may block, same ceiling as `timeout`.
+    "max_wait_ms": (100.0, 300_000.0),
+    # Seconds to wait for another process to release a session lock. Zero is
+    # valid and means "fail immediately if it is held".
+    "lock_grace_seconds": (0.0, 300.0),
+    # Seconds between lock attempts. Zero spins a core for the whole grace
+    # period; a minute is longer than any grace period worth polling.
+    "lock_poll_interval": (0.01, 60.0),
+}
+
+
+class Span(NamedTuple):
+    """A validated duration, or the refusal explaining why there is not one."""
+
+    value: float
+    error: Optional[str]
+
+
+def _as_number(value: Any) -> Optional[float]:
+    """``value`` as a finite float, or ``None`` if it is not one.
+
+    ``bool`` is refused for the reason ``_as_int`` refuses it: ``True`` is an
+    ``int``, and a flag arriving where a duration belongs is a mistake worth
+    naming rather than reading as one second.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        number = float(value)
+    elif isinstance(value, str):
+        try:
+            number = float(value.strip())
+        except ValueError:
+            return None
+    else:
+        return None
+    return number if math.isfinite(number) else None
+
+
+def bounded_number(value: Any, name: str) -> Span:
+    """Validate one duration against its entry in :data:`TIMING_BOUNDS`.
+
+    ``name`` is the lookup key as well as the label in the refusal, so a tool
+    cannot quietly validate against bounds belonging to a different argument.
+    """
+    try:
+        minimum, maximum = TIMING_BOUNDS[name]
+    except KeyError:
+        raise ValueError(f"no timing bounds are declared for {name!r}") from None
+
+    number = _as_number(value)
+    if number is None:
+        return Span(
+            minimum,
+            f"Error: {name} must be a finite number, not {value!r}. Infinity and NaN are "
+            "refused because neither ends a wait - every comparison against NaN is false, "
+            "so the call would claim a bound it does not have. Nothing was started.",
+        )
+    if number < minimum or number > maximum:
+        return Span(
+            minimum,
+            f"Error: {name} must be between {minimum:g} and {maximum:g}; {number:g} was "
+            "given. Nothing was started.",
+        )
+    return Span(number, None)

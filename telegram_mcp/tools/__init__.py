@@ -14,7 +14,6 @@ from telegram_mcp.tools.moderation import *
 from telegram_mcp.tools.invites import *
 from telegram_mcp.tools.media import *
 from telegram_mcp.tools.profile import *
-from telegram_mcp.tools.photos import *
 from telegram_mcp.tools.folders import *
 from telegram_mcp.tools.events import *
 

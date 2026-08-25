@@ -7,13 +7,11 @@ debouncing a burst (several messages typed in a row) into a single settled event
 """
 
 import asyncio
-import getpass
 import json
 import math
 import os
 import shlex
 import stat
-import subprocess
 import time
 from collections import deque
 from functools import partial
@@ -24,7 +22,8 @@ from typing import Any, Dict, Optional, Tuple, Union
 from telethon import events as _events
 from telethon import utils
 
-from telegram_mcp.paging import LIMITS, bounded, bounded_slice
+from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
+from telegram_mcp.paging import LIMITS, bounded, bounded_number, bounded_slice
 from telegram_mcp.runtime import *
 from telegram_mcp.safe_log import log_event  # mcp, clients, ToolAnnotations, log_and_format_error
 
@@ -125,11 +124,6 @@ def _new_drop_ledger() -> Dict[str, Any]:
 # reached, losing one may be unavoidable; losing it quietly is not, so every drop
 # is counted and the most recent few are named.
 _dropped: Dict[str, Any] = _new_drop_ledger()
-
-# Paths this process has already made owner-only. On Windows that costs a
-# subprocess, which is far too much to pay per burst; on POSIX the check is a
-# cheap fstat and runs every time, so an externally rotated file is still fixed.
-_owner_only_paths: set = set()
 
 
 def _record_drop(key: tuple, reason: str) -> None:
@@ -264,49 +258,69 @@ def _rotated_feed_path(path: Path) -> Path:
     return path.with_name(path.name + ".1")
 
 
+def _same_object(path, fd: int) -> bool:
+    """Whether ``path`` still names the object behind ``fd``.
+
+    ``st_dev``/``st_ino`` are the file's identity on both platforms - on Windows
+    CPython fills them from the volume serial number and the NTFS file index, and
+    an unlink-and-recreate produces a different index. Comparing them is how a
+    permission change on a NAME is tied to the object actually held open.
+    """
+    try:
+        by_name, by_handle = os.stat(path), os.fstat(fd)
+    except OSError:
+        return False
+    return (by_name.st_dev, by_name.st_ino) == (by_handle.st_dev, by_handle.st_ino)
+
+
 def _restrict_to_owner(path, fd: Optional[int] = None) -> None:
-    """Make ``path`` readable by its owner alone, however this platform says that.
+    """Make ``path`` readable by its owner alone, and prove it about the object.
 
     The feed holds contact names, usernames and chat ids, so this is a privacy
     control and it fails closed: a caller who cannot be given a private file is
     told, rather than handed a world-readable one.
 
-    Two implementations because the two systems do not express the same thing.
-    On POSIX the mode is the answer and `fchmod` on the open descriptor applies
-    it without a TOCTOU window. On Windows `os.chmod` toggles only the read-only
-    flag — it cannot clear the read bit for anyone — so a mode-only guard left
-    every local account able to read the feed. `icacls` is the real control
-    there: drop inherited ACEs, grant the current user and nobody else.
+    Two things changed here, both about identity rather than about permissions.
+
+    ``icacls`` is gone. `icacls /inheritance:r /grant:r <user>:(F)` drops the
+    INHERITED entries and replaces the entry for the principal it names, and
+    touches no other explicit entry - so a file already carrying `Everyone:(R)`
+    kept it while the command exited 0. :mod:`telegram_mcp.owner_only` writes the
+    whole DACL and then reads it back off the object, which is the difference
+    between evidence about a call and evidence about a file. It costs no
+    subprocess either, so it can run on every open instead of once per pathname.
+
+    The pathname cache is gone with it, and that was the actual leak: it recorded
+    that a NAME had been hardened. Replace the file at that name - an external
+    rotation, an editor writing new-then-rename, anything hostile - and the new
+    object was treated as already private and never touched. The check is now the
+    file's own state plus :func:`_same_object`, so the answer cannot be inherited
+    by a different file that happens to share a name.
     """
     if os.name == "posix":
         if fd is not None:
             if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
                 os.fchmod(fd, 0o600)
-        else:
-            os.chmod(path, 0o600)
+            return
+        os.chmod(path, 0o600)
         return
 
     key = str(path)
-    if key in _owner_only_paths:
-        return
-    try:
-        completed = subprocess.run(
-            ["icacls", key, "/inheritance:r", "/grant:r", f"{getpass.getuser()}:(F)"],
-            capture_output=True,
-            text=True,
-            # A bound, because this runs on the event loop's thread: an icacls
-            # that never returns would stop the feed rather than slow it.
-            timeout=30,
-            check=False,
-        )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise OSError(f"cannot restrict {key} to its owner: {error}") from error
-    if completed.returncode != 0:
+    if fd is not None and not _same_object(path, fd):
         raise OSError(
-            f"cannot restrict {key} to its owner: icacls exited {completed.returncode} "
-            f"({(completed.stderr or completed.stdout or '').strip()})"
+            f"cannot restrict {key} to its owner: the name no longer refers to the file "
+            "that was opened, so hardening it would report success about a different object."
         )
-    _owner_only_paths.add(key)
+    if not verify_owner_only(path) and not restrict_to_owner_strict(path):
+        raise OSError(f"cannot restrict {key} to its owner: its DACL still names other accounts.")
+    # Re-checked after the write, not before: on Windows the replacement can land
+    # between the two calls, and a DACL applied to the wrong object is worth an
+    # error rather than a reassurance.
+    if fd is not None and not _same_object(path, fd):
+        raise OSError(
+            f"cannot restrict {key} to its owner: the file was replaced while it was "
+            "being hardened."
+        )
 
 
 def _rotate_feed_if_needed(path: Path) -> None:
@@ -321,7 +335,6 @@ def _rotate_feed_if_needed(path: Path) -> None:
     try:
         if time.time() - rotated.stat().st_mtime > max_age:
             rotated.unlink()
-            _owner_only_paths.discard(str(rotated))
     except OSError:
         pass  # no rotated generation, or it went away underneath us
 
@@ -338,9 +351,8 @@ def _rotate_feed_if_needed(path: Path) -> None:
     except OSError as error:
         log_event(logging.ERROR, "event-feed-rotate-failed", error=error)
         return
-    # Both names now refer to different files than they did.
-    _owner_only_paths.discard(str(path))
-    _owner_only_paths.discard(str(rotated))
+    # Both names now refer to different files than they did; the retained
+    # generation carries the same private records, so it is hardened as itself.
     _restrict_to_owner(rotated)
 
 
@@ -565,6 +577,12 @@ async def wait_for_new_message(
         bound = bounded(limit, LIMITS["wait_for_new_message"])
         if bound.error:
             return bound.error
+        # Before anything is resolved or awaited: an unusable timeout is not a
+        # slow call, it is a call with no end, so it must not reach the loop.
+        span = bounded_number(timeout, "timeout")
+        if span.error:
+            return span.error
+        timeout = span.value
         target = await _wait_target(chat_id, account)
         ev = _get_activity_event()
         deadline = time.monotonic() + timeout
@@ -660,9 +678,15 @@ async def wait_for_settled_message(
             later unfiltered calls.
     """
     try:
+        settle_span = bounded_number(settle_ms, "settle_ms")
+        if settle_span.error:
+            return settle_span.error
+        wait_span = bounded_number(max_wait_ms, "max_wait_ms")
+        if wait_span.error:
+            return wait_span.error
         target = await _wait_target(chat_id, account)
-        settle = settle_ms / 1000.0
-        deadline = time.monotonic() + max_wait_ms / 1000.0
+        settle = settle_span.value / 1000.0
+        deadline = time.monotonic() + wait_span.value / 1000.0
         ev = _get_activity_event()
         while True:
             _expire_pending()
@@ -726,6 +750,12 @@ async def enable_incoming_feed(settle_ms: int = 6000) -> str:
             written (default 6000 = 6s).
     """
     try:
+        # Validated before the file is touched: a settle period that never ends
+        # would be baked into a background task, where nothing rechecks it.
+        span = bounded_number(settle_ms, "settle_ms")
+        if span.error:
+            return span.error
+        settle_ms = int(span.value)
         # Validate the feed file before starting the consumer, so a bad path
         # (missing dir, read-only mount) fails cleanly with no orphan task.
         _touch_feed_file()
@@ -771,6 +801,60 @@ async def incoming_feed_status() -> str:
         return log_and_format_error("incoming_feed_status", e)
 
 
+# How often the Windows watcher looks for new bytes. `Get-Content -Wait` is the
+# obvious answer and the wrong one: it follows the DESCRIPTOR, so after the
+# `os.replace` in _rotate_feed_if_needed it goes on reading the rotated
+# generation for ever and never sees another event. Following the NAME means
+# re-opening it, which means polling; 500ms is far below a human-visible delay
+# and costs one stat per interval.
+_WATCH_POLL_MS = 500
+
+
+def _watch_script(path, contains: Optional[str] = None) -> str:
+    """A rotation-aware PowerShell tail for ``path``, optionally filtered.
+
+    Rotation is detected by the file getting SHORTER than the offset already
+    read: `os.replace` puts a brand-new empty file at the name, so the next poll
+    sees a length below the mark and starts again from zero. Opened with
+    FileShare.ReadWrite so watching never blocks the feed from writing or from
+    replacing the file underneath.
+    """
+    quoted = str(path).replace("'", "''")
+    emit = "$line" if contains is None else f"if($line -like '*{contains}*'){{$line}}"
+    return (
+        f"$p='{quoted}';$o=[long]0;"
+        "while($true){"
+        "if(Test-Path -LiteralPath $p){"
+        "$len=(Get-Item -LiteralPath $p).Length;"
+        "if($len -lt $o){$o=[long]0};"
+        "if($len -gt $o){"
+        "$f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,"
+        "[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete);"
+        "try{[void]$f.Seek($o,[IO.SeekOrigin]::Begin);"
+        "$r=New-Object IO.StreamReader($f,[Text.Encoding]::UTF8);"
+        "while($null -ne ($line=$r.ReadLine())){" + emit + "};"
+        "$o=$f.Position}finally{$f.Dispose()}}}"
+        f"Start-Sleep -Milliseconds {_WATCH_POLL_MS}" + "}"
+    )
+
+
+def _watch_command(path, contains: Optional[str] = None) -> str:
+    """The watcher to arm, in the shell this host actually has.
+
+    `tail -F` and `grep --line-buffered` are not commands on a Windows host, so
+    reporting them there described a monitor nobody could start.
+    """
+    if os.name == "nt":
+        return (
+            "powershell -NoProfile -NonInteractive -Command " f'"{_watch_script(path, contains)}"'
+        )
+    # -F survives rotation/truncation and waits for a not-yet-created file.
+    follow = f"tail -n 0 -F {shlex.quote(str(path))}"
+    if contains is None:
+        return follow
+    return f"{follow} | grep --line-buffered {shlex.quote(contains)}"
+
+
 def incoming_feed_state() -> Dict[str, Any]:
     path = feed_file_path()
     max_bytes, max_age = feed_retention()
@@ -785,17 +869,16 @@ def incoming_feed_state() -> Dict[str, Any]:
         "retention_note": (
             "The feed rotates at max_bytes and keeps one previous generation, deleted "
             "once it is older than max_age_seconds. Disk use is bounded by roughly "
-            "twice max_bytes. `tail -F` follows the name, so it survives a rotation."
+            "twice max_bytes. watch_command follows the NAME rather than the open "
+            "file, so it keeps reading across a rotation."
         ),
         "max_pending_chats": max_pending,
         "pending_ttl_seconds": pending_ttl,
         "pending_chats": len(_pending_msgs),
         **overflow_state(),
-        # -F survives rotation/truncation and waits for a not-yet-created file.
-        "watch_command": f"tail -n 0 -F {shlex.quote(str(path))}",
-        "watch_command_for_one_chat": (
-            f"tail -n 0 -F {shlex.quote(str(path))} | grep --line-buffered '\"chat_id\": <ID>'"
-        ),
+        "watch_command": _watch_command(path),
+        "watch_command_for_one_chat": _watch_command(path, '"chat_id": <ID>'),
+        "watch_shell": "powershell" if os.name == "nt" else "sh",
         "autostart_pending": (
             not _feed_autostart_done
             and not feed_enabled()
