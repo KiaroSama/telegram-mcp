@@ -462,23 +462,29 @@ class DirHandle:
             self._calls.close(target)
         return True
 
-    def unlink(self, name: str, expect=_UNSET) -> None:
+    def _remove(self, name: str, expect, directory: bool) -> None:
+        """Remove a child, bound to the object this call created where it knows one.
+
+        ``expect`` defaults to whatever :meth:`create_exclusive` recorded under
+        this name. Passing it explicitly is for a caller that knows the identity
+        by another route -- :meth:`remove_self`, which took it off its own
+        handle -- and ``None`` for one that deliberately knows nothing, such as
+        emptying a staging directory somebody else's library wrote into.
+        """
         expect = self._made.get(name) if expect is _UNSET else expect
-        if self._remove_object(name, expect):
-            self._made.pop(name, None)
-            return
-        target, where = self._at(name)
-        self._calls.unlink(target, **where)
+        if not self._remove_object(name, expect):
+            if expect is not None and not same_object(self.child_stat(name), expect):
+                raise UnsafeTarget(f"{name!r} is no longer the object this call created")
+            target, where = self._at(name)
+            remove = self._calls.rmdir if directory else self._calls.unlink
+            remove(target, **where)
         self._made.pop(name, None)
 
+    def unlink(self, name: str, expect=_UNSET) -> None:
+        self._remove(name, expect, directory=False)
+
     def rmdir(self, name: str, expect=_UNSET) -> None:
-        expect = self._made.get(name) if expect is _UNSET else expect
-        if self._remove_object(name, expect):
-            self._made.pop(name, None)
-            return
-        target, where = self._at(name)
-        self._calls.rmdir(target, **where)
-        self._made.pop(name, None)
+        self._remove(name, expect, directory=True)
 
     def remove_self(self) -> None:
         """Remove the directory this handle holds, as the object it holds.

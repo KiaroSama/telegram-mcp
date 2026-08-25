@@ -29,7 +29,7 @@ from types import SimpleNamespace
 import pytest
 
 from telegram_mcp import file_roots, handles
-from telegram_mcp.handles import UnsafeTarget
+from telegram_mcp.handles import SystemCalls, UnsafeTarget
 from telegram_mcp.tools import ephemeral as ephemeral_mod
 from telegram_mcp.tools import media as media_mod
 
@@ -159,6 +159,57 @@ def test_a_private_staging_directory_is_removed_through_its_own_handle(tmp_path)
         assert not held.exists(), "the transfer directory outlived the call"
 
 
+class _NoPrimitives(SystemCalls):
+    """A host with neither ``openat`` nor a directory pin.
+
+    Windows and POSIX each take a different branch, so on any one machine half
+    the code is unreachable. This drives the remaining third: the branch that can
+    hold nothing and has to prove identity by hand before it removes or replaces
+    anything.
+    """
+
+    dir_fd = False
+    pins = False
+
+
+def test_cleanup_checks_identity_where_the_host_can_hold_nothing(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    stranger = tmp_path / "stranger.bin"
+    stranger.write_bytes(b"not-ours")
+
+    with handles.open_allowed_directory(root, [root], calls=_NoPrimitives()) as parent:
+        reserved = parent.reserve_free_name("out", ".bin")
+        os.replace(str(stranger), str(root / reserved))
+
+        parent.discard(reserved)
+
+        assert (root / reserved).read_bytes() == b"not-ours"
+
+
+def test_install_checks_identity_where_the_host_can_hold_nothing(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    stranger = tmp_path / "stranger.bin"
+    stranger.write_bytes(b"not-ours")
+
+    with handles.open_allowed_directory(root, [root], calls=_NoPrimitives()) as parent:
+        _name, staging = parent.make_private_subdirectory(".stage-")
+        try:
+            os.close(staging.create_exclusive("part.bin"))
+            reserved = parent.reserve_free_name("out", ".bin")
+            os.replace(str(stranger), str(root / reserved))
+
+            with pytest.raises(UnsafeTarget):
+                parent.install(staging, "part.bin", reserved)
+
+            assert (root / reserved).read_bytes() == b"not-ours"
+        finally:
+            staging.remove_tree()
+            staging.remove_self()
+            staging.close()
+
+
 # --- install is bound to the object it reserved ------------------------------
 
 
@@ -255,6 +306,25 @@ async def test_the_writable_gate_creates_no_directory_before_a_handle_exists(
         assert dir_error is None
         assert (root / "downloads").is_dir(), "the gate did not create the directory it holds"
         assert Path(directory.path) == (root / "downloads").resolve()
+
+
+@pytest.mark.asyncio
+async def test_a_destination_whose_parent_is_a_file_is_refused(tmp_path, monkeypatch):
+    """Creation moved behind the handle, so the failure has to come back as an
+    error rather than as an exception out of the gate."""
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "notadir").write_bytes(b"x")
+
+    async def _roots(ctx, tool_name):
+        return [root], None
+
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
+
+    async with file_roots._open_verified_directory(
+        path=root / "notadir" / "deeper", ctx=None, tool_name="download_media"
+    ) as (directory, error):
+        assert directory is None and error
 
 
 @pytest.mark.asyncio
@@ -383,6 +453,37 @@ async def test_a_download_holds_its_destination_for_the_whole_transfer(monkeypat
     assert not (root / "decoy").exists() or not any(
         p.is_file() for p in (root / "decoy").iterdir()
     ), "the payload landed in the replacement"
+
+
+@pytest.mark.asyncio
+async def test_a_download_releases_the_destination_when_it_is_done(monkeypatch, tmp_path):
+    """Holding the directory is the fix; holding it after the call has returned
+    is a handle leak that leaves the operator unable to move their own folder
+    for the life of the server."""
+    root = tmp_path / "root"
+    live = root / "out"
+    live.mkdir(parents=True)
+
+    monkeypatch.setattr(media_mod, "get_client", lambda account=None: _DownloadClient())
+
+    async def _resolve_entity(chat_id, _client):
+        return SimpleNamespace(id=chat_id)
+
+    async def _resolve_path(*, raw_path, default_filename, ctx, tool_name):
+        return (live / "loot"), None
+
+    async def _roots(ctx, tool_name):
+        return [root], None
+
+    monkeypatch.setattr(media_mod, "resolve_entity", _resolve_entity)
+    monkeypatch.setattr(media_mod, "_resolve_writable_file_path", _resolve_path)
+    monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
+
+    result = await media_mod.download_media(1, 5, account="a")
+    assert result.startswith("Media downloaded to"), result
+
+    live.rename(root / "moved")
+    assert (root / "moved").is_dir()
 
 
 @pytest.mark.asyncio
