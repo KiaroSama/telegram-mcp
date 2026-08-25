@@ -803,7 +803,7 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 - **Bot-only tool rejected:** regular user accounts cannot manage bot command settings.
 - **Need details:** check your MCP client logs, terminal output, and the server log at
   `$XDG_STATE_HOME/telegram-mcp/mcp_errors.log` (`~/.local/state/telegram-mcp/mcp_errors.log`
-  by default; `%USERPROFILE%\.local\state	elegram-mcp\mcp_errors.log` on Windows). It is
+  by default; `%USERPROFILE%\.local\state\telegram-mcp\mcp_errors.log` on Windows). It is
   created readable by you alone and holds bounded metadata only: the failing tool, an error
   code, numeric ids and an exception type with a stable digest. Message text, names, titles,
   paths and queries are deliberately not in it, so quote the error code when reporting a bug.
@@ -825,6 +825,13 @@ below are what a change has to pass.
 5. Run checks locally:
    - `uv run pre-commit run --all-files`
    - `uv run pre-commit run --hook-stage pre-push --all-files`
+
+   The pre-push stage includes `scripts/secret_scan.py`, which refuses a push carrying a
+   credential shape, a protected path or a personal home directory. It runs before the
+   push rather than after because this repository is public: GitHub's own guidance is
+   that data reaching a fork stays reachable there, and neither the owner nor GitHub
+   Support can remove it from someone else's fork. A deliberate example value belongs in
+   that script's `KNOWN_PLACEHOLDERS`, so a real secret in an example file still fails.
 6. Every test command on this page already goes through the guarded runner, and so does
    CI and the pre-push hook — an unbounded run has no wall ceiling and no process-tree
    cleanup, so a hang cannot be proven cleaned up. This project drives ffmpeg, ffprobe and
