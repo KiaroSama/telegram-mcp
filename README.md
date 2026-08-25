@@ -68,6 +68,13 @@ Aliases live in `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/aliases.json` (o
 
 **Aliases belong to the account that saved them.** A chat ID only identifies a person within one login, so the same alias on a different account would name someone else entirely, or nobody. Two accounts can therefore each save their own `мама`, and neither can send to the other's. Aliases saved before this scoping existed are adopted automatically when there is exactly one login configured; with several, the account that saved them cannot be known, so they are offered as something to confirm rather than resolved into a recipient.
 - **Media:** send files, download media, upload files, send voice notes, stickers, GIFs, and inspect message media.
+- **Peer photos:** `list_photos` indexes a peer's pictures, `open_photo` returns one, and
+  `get_photo_sheet` returns them as a single labelled grid instead of one image block each.
+  Two sources, because Telegram has no single photo list: `avatars` is the profile-picture
+  history (Telegram's own call for a user; rebuilt from service messages for a group or
+  channel), and `messages` is photos sent in the conversation, keyed by message id. An id
+  from one source names nothing in the other. Every transfer is capped, and each sheet cell
+  carries the id `open_photo` takes back.
 - **Profile and privacy:** get your own account info, update profile fields, set or delete profile photos, inspect privacy settings, get user info/photos/status, and manage bot commands.
 - **Folders and drafts:** list, create, update, reorder, and delete Telegram folders; save, list, and clear drafts.
 - **Events:** wait for incoming messages with debounce (`wait_for_new_message`, `wait_for_settled_message`), optionally for one chat only via `chat_id` — without it any unrelated conversation wakes the wait — or enable the opt-in incoming event feed for callback-style delivery (see below).
