@@ -26,6 +26,15 @@ repos:
 
   - repo: local
     hooks:
+      - id: secret-scan
+        name: refuse to publish a credential or a private path
+        entry: python scripts/secret_scan.py
+        language: system
+        pass_filenames: false
+        # pre-push, not pre-commit: a local commit is recoverable, a push to a
+        # public repository is not - GitHub's own guidance is that data reaching
+        # a fork cannot be removed from it by the owner or by Support.
+        stages: [pre-push]
       - id: docker-compose-config
         name: docker compose config
         entry: docker compose --env-file .env.example config

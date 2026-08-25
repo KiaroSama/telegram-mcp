@@ -3,14 +3,14 @@
 </div>
 
 ![MCP Badge](https://badge.mcpx.dev)
-[![Licence: Proprietary](https://img.shields.io/badge/licence-proprietary-red?style=flat-square)](LICENSE)
+[![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
 [![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
 
 A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
 
-**This is proprietary software.** See [LICENSE](LICENSE) — it is not open source, and it is not
-accepting outside contributions.
+**Free software under the GNU GPL v3 or later.** See [LICENSE](LICENSE). You may use, study,
+modify and redistribute it; anything you distribute that builds on it carries the same licence.
 
 ## 🤖 MCP in Action
 
@@ -813,7 +813,8 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
 
 ## Working on it
 
-Proprietary, so this is the maintainer's own loop rather than a contribution guide.
+This is the maintainer's own loop. Issues and pull requests are welcome; the same checks
+below are what a change has to pass.
 
 1. Clone the repository.
 2. Install dependencies and git hooks:
@@ -931,13 +932,19 @@ Four of these carry a caveat that is part of the feature rather than a footnote:
 
 ## Licence
 
-Proprietary. See [LICENSE](LICENSE). Not open source; no licence to use, copy, modify or
-distribute is granted without written permission.
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+
+Portions originated in an Apache-2.0 project (below), and that licence permits their
+inclusion in a GPLv3 work — the Apache Software Foundation states it plainly: *"Apache 2
+software can therefore be included in GPLv3 projects."* The compatibility runs one way
+only, so the program as a whole is GPLv3 while the prior Apache-2.0 grant continues to
+cover what it originally covered.
 
 ## Built on
 
 - [Telethon](https://github.com/LonamiWebs/Telethon)
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
-Portions of this codebase originated in an Apache-2.0 project by chigwell and l1v0n1 and have
-been substantially modified since; that attribution is recorded in [LICENSE](LICENSE) §4.
+Portions of this codebase originated in [telegram-mcp](https://github.com/chigwell/telegram-mcp)
+by chigwell and l1v0n1, under the Apache License 2.0, and have been substantially modified and
+extended since. That attribution is recorded in [LICENSE](LICENSE).
