@@ -11,7 +11,7 @@ authors = [
     {name = "KiaroSama"}
 ]
 license = "GPL-3.0-or-later"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "NOTICE"]
 # "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
 # upload carrying it. That is deliberate and survives the move to GPLv3: the
 # telegram-mcp name on PyPI belongs to a DIFFERENT project, and install_guard.py

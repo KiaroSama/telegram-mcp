@@ -939,7 +939,7 @@ Four of these carry a caveat that is part of the feature rather than a footnote:
 
 ## Licence
 
-GNU General Public License v3.0 or later. See [LICENSE](LICENSE).
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for the licence text and [NOTICE](NOTICE) for the copyright and prior-work attribution.
 
 Portions originated in an Apache-2.0 project (below), and that licence permits their
 inclusion in a GPLv3 work — the Apache Software Foundation states it plainly: *"Apache 2

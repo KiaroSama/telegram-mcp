@@ -1,0 +1,27 @@
+telegram-mcp
+Copyright (C) 2026 KiaroSama
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later version.
+See LICENSE for the full text.
+
+This program is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+
+ATTRIBUTION OF PRIOR WORK
+
+Portions of this program originated in the 'telegram-mcp' project published by
+chigwell and l1v0n1 under the Apache License, Version 2.0, whose terms are at
+<http://www.apache.org/licenses/LICENSE-2.0>. This notice is retained in accordance
+with Section 4 of that licence. Those portions have been substantially modified and
+extended.
+
+The Apache License 2.0 permits that material to be included in a work licensed under
+GPLv3. The Apache Software Foundation states it directly: 'Apache 2 software can
+therefore be included in GPLv3 projects, because the GPLv3 license accepts our
+software into GPLv3 works.' The compatibility runs one way only, so this program as
+a whole is GPLv3 while the prior Apache-2.0 grant continues to cover the portions it
+originally covered.
