@@ -241,7 +241,12 @@ def test_license_metadata_uses_the_form_setuptools_will_still_accept():
     assert isinstance(
         project["license"], str
     ), "`license` is a TOML table again; setuptools removes support 2027-02-18."
-    assert project["license"].startswith("LicenseRef-"), project["license"]
+    declared = project["license"]
+    assert declared and not declared.isspace(), "the licence expression is empty"
+    # A real SPDX identifier, or the `LicenseRef-` prefix reserved for one that is
+    # not on the SPDX list. Both are valid PEP 639; this used to require the second
+    # because the project was proprietary, which then failed the moment it was not.
+    assert declared.startswith("LicenseRef-") or declared[0].isalnum(), declared
     assert project["license-files"], "the LICENCE text is no longer shipped in the dist"
 
     license_classifiers = [c for c in project["classifiers"] if c.startswith("License ::")]
