@@ -30,6 +30,7 @@ decision logic routes through the descriptor, and does not prove the kernel call
 itself. See ``test_the_posix_branch_passes_a_directory_descriptor``.
 """
 
+import errno
 import os
 import stat as stat_module
 from pathlib import Path
@@ -55,6 +56,11 @@ class _RacingCalls(SystemCalls):
     """
 
     pins = False
+    # And no openat either, or this drives a different branch on each platform:
+    # `SystemCalls.dir_fd` is empty on Windows and true on Linux, so the same
+    # object routed through the fallback here and through the descriptor branch
+    # there -- where the confirming lstat this class counts to does not exist.
+    dir_fd = False
 
     def __init__(self, method: str, nth: int, swap):
         self._method = method
@@ -323,7 +329,10 @@ def test_cleanup_does_not_follow_a_name_that_now_points_somewhere_else(tmp_path)
         stolen = root / "stolen"
         stolen.mkdir()
         (stolen / "precious").write_bytes(b"not mine")
+        # One branch per primitive, and the same guarantee out of all three:
+        # `precious` is not this call's to delete.
         if staging.held is not None:
+            # A Win32 handle: the kernel refuses to move the name at all.
             with pytest.raises(OSError):
                 Path(staging.path).rename(root / (name + ".moved"))
             assert (stolen / "precious").read_bytes() == b"not mine"
@@ -331,8 +340,18 @@ def test_cleanup_does_not_follow_a_name_that_now_points_somewhere_else(tmp_path)
         Path(staging.path).rename(root / (name + ".moved"))
         stolen.rename(root / name)
 
-        with pytest.raises(UnsafeTarget):
+        if staging.fd is not None:
+            # A descriptor: the theft succeeds and is never consulted. Every
+            # removal resolves relative to the object this call opened, so
+            # there is nothing to refuse -- which is why asserting a refusal
+            # here asserted the Windows mechanism rather than the guarantee.
             staging.remove_tree()
+            assert not (
+                root / (name + ".moved") / "part"
+            ).exists(), "the staged file was not removed from the object that was opened"
+        else:  # pragma: no cover - hosts with neither primitive
+            with pytest.raises(UnsafeTarget):
+                staging.remove_tree()
         assert (root / name / "precious").read_bytes() == b"not mine"
     finally:
         parent.close()
@@ -358,11 +377,18 @@ def test_the_install_refuses_when_the_destination_directory_was_replaced(tmp_pat
             with pytest.raises(OSError):
                 live.rename(retired)
             return
-        live.rename(retired)  # pragma: no cover - hosts with neither primitive
+        live.rename(retired)
         decoy.rename(live)
 
-        with pytest.raises(UnsafeTarget):
+        if parent.fd is not None:
+            # The descriptor answers about the directory that was authorised,
+            # so the install lands in it under whatever name it wears now, and
+            # never in the object that took the old one.
             parent.install(staging, "part", "final.bin")
+            assert (retired / "final.bin").read_bytes() == b"payload"
+        else:  # pragma: no cover - hosts with neither primitive
+            with pytest.raises(UnsafeTarget):
+                parent.install(staging, "part", "final.bin")
         assert not (live / "final.bin").exists()
     finally:
         parent.close()
@@ -463,3 +489,54 @@ def test_the_posix_branch_passes_a_directory_descriptor(tmp_path):
     assert calls.calls == [
         ("lstat", "a.jpg", directory.fd)
     ], "a child was resolved by path instead of relative to the held descriptor"
+
+
+class _LinkRefusingCalls(SystemCalls):
+    """A kernel that refuses O_NOFOLLOW on a link, which Windows never does.
+
+    ``O_NOFOLLOW`` is 0 on Windows, so the refusal below cannot be produced on
+    the host this module was written on. Injecting it is what makes the
+    translation provable on both platforms rather than only where it fires.
+    """
+
+    def __init__(self, number: int):
+        self._errno = number
+
+    def open(self, path, flags, mode=0o777, *, dir_fd=None):
+        raise OSError(self._errno, os.strerror(self._errno), str(path))
+
+
+@pytest.mark.parametrize("number", [errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP)])
+def test_a_kernel_link_refusal_is_reported_as_a_refusal_not_an_errno(tmp_path, number):
+    """The caller catches ``UnsafeTarget``; an OSError took a different path.
+
+    On Linux a symlinked source came back as ELOOP from the kernel before any
+    check here ran, and the file gate reported it as 'not readable' rather than
+    as a link. The refusal was correct and the reason was wrong.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "a.jpg").write_bytes(b"payload")
+
+    directory = handles.open_allowed_directory(root, [root])
+    directory._calls = _LinkRefusingCalls(number)
+    try:
+        with pytest.raises(UnsafeTarget, match="is a link"):
+            directory.open_child("a.jpg")
+    finally:
+        directory.close()
+
+
+def test_an_unrelated_open_failure_is_still_an_oserror(tmp_path):
+    """Guard the guard: translating every errno would hide real failures."""
+    root = tmp_path / "root"
+    root.mkdir()
+
+    directory = handles.open_allowed_directory(root, [root])
+    directory._calls = _LinkRefusingCalls(errno.EACCES)
+    try:
+        with pytest.raises(OSError) as raised:
+            directory.open_child("a.jpg")
+        assert not isinstance(raised.value, UnsafeTarget)
+    finally:
+        directory.close()

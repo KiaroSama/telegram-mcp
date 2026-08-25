@@ -49,11 +49,20 @@ a truly relative rename needs ``NtSetInformationFile``, which works but drags in
 
 from __future__ import annotations
 
-import ctypes
-import msvcrt
 import os
-from ctypes import wintypes
 from typing import Optional
+
+# Guarded so the module IMPORTS on any host even though every entry point in it
+# is Windows-only. `handles.py` already selects the platform by `os.name`, so
+# nothing here is reachable elsewhere - but a module in the package that cannot
+# be imported at all breaks anything that walks the package, which is how this
+# surfaced: the tool-registry test imports every module and died on `msvcrt`.
+if os.name == "nt":  # pragma: no cover - platform-selected at import
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+else:  # pragma: no cover - platform-selected at import
+    ctypes = msvcrt = wintypes = None
 
 # Enough access to list the directory -- which is what makes the kernel treat a
 # rename of it as a sharing conflict -- and nothing more. No DELETE: asking for
@@ -75,7 +84,7 @@ _FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _FILE_RENAME_INFO = 3
 _FILE_DISPOSITION_INFO = 4
 
-_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value if ctypes else None
 
 _KERNEL32: Optional[object] = None
 

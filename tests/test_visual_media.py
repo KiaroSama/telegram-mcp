@@ -773,6 +773,13 @@ def test_the_ffmpeg_command_scales_before_it_encodes_a_png():
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no frame")
 
     original_run, original_probe = frames._run, frames._probe
+    original_available = frames.ffmpeg_available
+    # Stubbed with everything else. This test is about the command that gets
+    # BUILT, and it fakes the probe and the run - but it still asked the host
+    # whether ffmpeg was installed, so on a runner without it the function
+    # refused before reaching the fake and the assertion died on a KeyError
+    # instead of failing on its own subject.
+    frames.ffmpeg_available = lambda: True
     frames._run = _fake_run
     frames._probe = lambda path, deadline=None, cancelled=None: (1.0, 25.0, "h264")
     try:
@@ -780,6 +787,7 @@ def test_the_ffmpeg_command_scales_before_it_encodes_a_png():
             frames._frames_with_ffmpeg("clip.mp4", count=1)
     finally:
         frames._run, frames._probe = original_run, original_probe
+        frames.ffmpeg_available = original_available
 
     command = seen["command"]
     assert "-vf" in command, f"no filter chain: {command}"

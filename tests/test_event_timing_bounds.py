@@ -213,17 +213,33 @@ def test_a_feed_file_replaced_at_the_same_path_is_protected_again(monkeypatch, t
 
     events._touch_feed_file()
     hardened = []
-    real = events.restrict_to_owner_strict
-    monkeypatch.setattr(
-        events,
-        "restrict_to_owner_strict",
-        lambda target: hardened.append(str(target)) or real(target),
-    )
+    if os.name == "nt":
+        real = events.restrict_to_owner_strict
+        monkeypatch.setattr(
+            events,
+            "restrict_to_owner_strict",
+            lambda target: hardened.append(str(target)) or real(target),
+        )
+    else:
+        # POSIX hardens the DESCRIPTOR it just opened, so the Windows entry
+        # point is never reached and watching it proved nothing here.
+        real_fchmod = os.fchmod
+        monkeypatch.setattr(
+            os,
+            "fchmod",
+            lambda fd, mode: hardened.append(mode) or real_fchmod(fd, mode),
+        )
 
     # A file at the same name, but a different object: exactly what an external
     # rotation, an editor's write-new-then-rename, or a hostile replacement does.
     path.unlink()
     path.write_text("planted\n", encoding="utf-8")
+    if os.name != "nt":
+        # Whatever the runner's umask, the replacement starts genuinely readable,
+        # so "was it hardened again" has a determinate answer.
+        os.chmod(path, 0o644)
+    assert not events.verify_owner_only(path), "the replacement was already private"
+
     events._touch_feed_file()
 
     assert hardened, "the replacement object was never re-protected"

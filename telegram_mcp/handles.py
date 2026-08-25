@@ -190,6 +190,31 @@ def is_link(entry: Any) -> bool:
     return bool(getattr(entry, "st_file_attributes", 0) & _REPARSE_POINT)
 
 
+# O_NOFOLLOW makes the KERNEL refuse a name that reaches a link, and it refuses
+# before any check in this module runs. The errno differs by system: ELOOP on
+# Linux and macOS, EMLINK on the BSDs. Windows has no O_NOFOLLOW at all, so the
+# flag is 0 and the refusal never arrives that way - which is why this went unseen
+# until the suite first ran on Linux, where a symlinked source came back as a bare
+# OSError and the caller reported it as 'not readable' instead of as a link.
+_LINK_REFUSED = frozenset({errno.ELOOP, getattr(errno, "EMLINK", errno.ELOOP)})
+
+
+def _open_no_link(calls: "SystemCalls", target, flags, *rest, **where):
+    """Open with O_NOFOLLOW, speaking the kernel's link refusal in this module's terms.
+
+    Whatever the name reached, it is not the regular file or directory that was
+    authorised, so callers get :class:`UnsafeTarget` rather than an errno to decode.
+    """
+    try:
+        return calls.open(target, flags, *rest, **where)
+    except OSError as error:
+        if error.errno in _LINK_REFUSED:
+            raise UnsafeTarget(
+                f"{Path(target).name!r} is a link, not the object that was authorised"
+            ) from error
+        raise
+
+
 def permitted_children(candidate: Path, roots: List[Path]) -> Optional[FrozenSet[str]]:
     """Which children of ``candidate`` the roots authorise. Raises if none do.
 
@@ -338,7 +363,7 @@ class DirHandle:
         flags = (
             os.O_RDONLY | self._calls.O_BINARY | self._calls.O_NOFOLLOW | self._calls.O_NOINHERIT
         )
-        return self._calls.open(target, flags, **where)
+        return _open_no_link(self._calls, target, flags, **where)
 
     def create_exclusive(self, name: str, mode: int = 0o600) -> int:
         """Create a child that did not exist. Returns a writable descriptor.
@@ -356,7 +381,7 @@ class DirHandle:
             | self._calls.O_NOFOLLOW
             | self._calls.O_NOINHERIT
         )
-        fd = self._calls.open(target, flags, mode, **where)
+        fd = _open_no_link(self._calls, target, flags, mode, **where)
         try:
             # What this call created, so a later removal or install can tell it
             # apart from whatever may be wearing the name by then.
@@ -433,7 +458,7 @@ class DirHandle:
                 raise
             return DirHandle(self.path / name, None, opened, self._calls, held=held, parent=self)
         flags = os.O_RDONLY | self._calls.O_NOFOLLOW | self._calls.O_DIRECTORY
-        fd = self._calls.open(name, flags, dir_fd=self.fd)
+        fd = _open_no_link(self._calls, name, flags, dir_fd=self.fd)
         opened = self._calls.fstat(fd)
         if not same_object(opened, named):
             self._calls.close(fd)
@@ -585,7 +610,7 @@ class DirHandle:
         """
         target, where = self._at(name)
         flags = os.O_RDWR | self._calls.O_BINARY | self._calls.O_NOFOLLOW | self._calls.O_NOINHERIT
-        fd = self._calls.open(target, flags, **where)
+        fd = _open_no_link(self._calls, target, flags, **where)
         try:
             self._calls.fsync(fd)
         finally:
@@ -657,7 +682,7 @@ def _open_judged(path, roots: List[Path], calls: SystemCalls) -> DirHandle:
 
     if calls.dir_fd:
         flags = os.O_RDONLY | calls.O_NOFOLLOW | calls.O_DIRECTORY
-        fd = calls.open(str(resolved), flags)
+        fd = _open_no_link(calls, str(resolved), flags)
         try:
             opened = calls.fstat(fd)
             named = calls.lstat(str(resolved))

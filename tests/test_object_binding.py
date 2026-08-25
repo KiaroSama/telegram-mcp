@@ -494,6 +494,9 @@ async def test_a_save_holds_its_destination_for_the_whole_transfer(monkeypatch, 
     live.mkdir(parents=True)
     decoy = root / "decoy"
     decoy.mkdir()
+    # Taken before the swap: after it, no pathname names this object reliably.
+    authorised = live.stat()
+    payload = b"secret-bytes"
 
     refused = []
     client = SimpleNamespace()
@@ -547,11 +550,20 @@ async def test_a_save_holds_its_destination_for_the_whole_transfer(monkeypatch, 
     if os.name == "nt":
         assert refused, "the destination was swapped after it had been authorised"
         assert (live / "loot.jpg").read_bytes() == b"secret-bytes"
-    assert not any(
-        path.read_bytes() == b"secret-bytes"
-        for path in root.rglob("*")
-        if path.is_file() and path.parent != live
-    ), "the payload was written outside the authorised directory"
+
+    # By identity, not by pathname. Where the swap is refused the authorised
+    # directory keeps its name and the two questions have the same answer;
+    # where it succeeds the authorised directory is still that object and is
+    # simply wearing the decoy's name, so judging by path calls a correct
+    # outcome a breach and would have hidden the real one behind the noise.
+    landed = [path for path in root.rglob("*") if path.is_file() and path.read_bytes() == payload]
+    assert landed, "the payload was never written at all"
+    for path in landed:
+        holder = path.parent.stat()
+        assert (holder.st_dev, holder.st_ino) == (authorised.st_dev, authorised.st_ino), (
+            f"the payload landed in {path.parent.name!r}, which is not the object the "
+            "roots gate authorised"
+        )
 
 
 @pytest.mark.asyncio

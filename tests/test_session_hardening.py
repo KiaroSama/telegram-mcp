@@ -291,6 +291,24 @@ def test_hardening_a_session_that_does_not_exist_yet_does_not_claim_success(tmp_
     assert connection.harden_session_files(elsewhere / "work.session") is False
 
 
+def _assert_born_private(target, directory, what: str) -> None:
+    """Unreachable by anyone else, by whichever mechanism the platform provides.
+
+    Windows hardens the directory with inheritable entries, so a file born inside
+    it carries an owner-only DACL of its own and can be asked directly. POSIX has
+    no such inheritance: SQLite makes its sidecars at whatever the umask allows,
+    and what keeps them private is that the 0700 directory cannot be entered. So
+    the file's mode is simply not the control there, and asserting it asserted ACL
+    inheritance rather than who can read the auth key.
+    """
+    if os.name == "nt":
+        assert verify_owner_only(target), f"{what} was not born owner-only"
+        return
+    assert verify_owner_only(
+        directory
+    ), f"{what} is private only while the directory holding it is, and it is not"
+
+
 def test_a_session_in_the_managed_directory_is_born_owner_only(tmp_path, monkeypatch):
     """Not restricted afterwards: born that way. The database is created by
     Telethon's constructor, and anything applied after that has already left the
@@ -305,7 +323,7 @@ def test_a_session_in_the_managed_directory_is_born_owner_only(tmp_path, monkeyp
     session.save()
     try:
         assert path.exists(), "the real session database was not created"
-        assert verify_owner_only(path), "the database was not born owner-only"
+        _assert_born_private(path, settings.state_dir(), "the database")
     finally:
         session.close()
 
@@ -330,7 +348,7 @@ def test_a_sidecar_created_after_startup_is_owner_only_too(tmp_path, monkeypatch
         ]
         assert appeared
         for sibling in appeared:
-            assert verify_owner_only(sibling), f"{sibling.name} was born readable"
+            _assert_born_private(sibling, settings.state_dir(), sibling.name)
     finally:
         session.close()
 

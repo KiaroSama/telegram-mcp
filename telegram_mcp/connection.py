@@ -267,11 +267,13 @@ def harden_session_files(
     the point. The database does not exist yet on the first call, and neither do
     the `-journal`, `-wal` and `-shm` files SQLite creates whenever it decides
     to; restricting what happens to be on disk therefore protects almost nothing.
-    What protects them is the directory: made owner-only with inheritable
-    entries, every file born inside it is born owner-only. Measured against a
-    real ``SQLiteSession`` -- the database and a sidecar created after startup
-    both come out owner-only in a hardened directory and neither does outside
-    one.
+    What protects them is the directory, by a different mechanism on each
+    platform. Windows gives it inheritable entries, so a file born inside is
+    born carrying an owner-only DACL of its own. POSIX has no such inheritance:
+    the directory is 0700 and protects by CONTAINMENT, so a sidecar SQLite makes
+    at 0644 is still unreachable by anyone else -- the mode on the file is not
+    the control there, and treating it as one would report a breach where there
+    is none. Measured against a real ``SQLiteSession`` in both shapes.
 
     **The state directory is repaired; a directory the operator chose is only
     checked.** This server created its own and may do as it likes with it.
