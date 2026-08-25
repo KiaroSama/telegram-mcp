@@ -39,7 +39,12 @@ from telegram_mcp.aliases import normalise_account_label, restrict_to_owner
 from telegram_mcp.owner_only import verify_owner_only
 from telegram_mcp.client_identity import client_identity_kwargs
 from telegram_mcp.safe_log import log_event, logger, safe_exception
-from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, ValidationError
+from telegram_mcp.settings import (
+    TELEGRAM_API_HASH,
+    TELEGRAM_API_ID,
+    StartupMessage,
+    ValidationError,
+)
 from telegram_mcp.settings import _parse_bool_env, state_dir
 from telegram_mcp.singleton import try_lock_exclusive
 
@@ -456,7 +461,7 @@ def _acquire_session(pool: List[str]) -> str:
     # Handing out an already-claimed session here would make Telegram burn it
     # with AuthKeyDuplicatedError — losing the slot for the client that owns it
     # too. Refusing to start is recoverable; a burned session is not.
-    raise RuntimeError(
+    raise StartupMessage(
         f"All {len(pool)} pooled Telegram session(s) are already claimed by other "
         "live clients, so this one has no session to use. Add another session to "
         "TELEGRAM_SESSION_STRINGS (generate it with "
@@ -701,9 +706,9 @@ async def _force_reconnect(cl: TelegramClient):
             # Telegram permanently invalidates an auth key used from two IPs at
             # once, so retrying here can never succeed — surface it instead of
             # letting the caller sit in a reconnect loop.
-            raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
+            raise StartupMessage(_BURNED_SESSION_MESSAGE) from exc
         except asyncio.TimeoutError as exc:
-            raise RuntimeError(
+            raise StartupMessage(
                 f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s."
             ) from exc
         if not await cl.is_user_authorized():
@@ -718,7 +723,7 @@ async def _force_reconnect(cl: TelegramClient):
             # timeout is scheduled on the very loop input() has stopped, so it never
             # fires. The server would hang silently and permanently. runner.py refuses
             # the same thing at startup for the same reason.
-            raise RuntimeError(
+            raise StartupMessage(
                 "Telegram session is no longer authorized. Interactive phone login is "
                 "disabled for the MCP server because it runs over stdio. Regenerate the "
                 "session with `uv run session_string_generator.py` and update "
@@ -765,7 +770,7 @@ async def ensure_connected(cl: TelegramClient = None):
         # branch below would record it as verified and send the caller on to a tool
         # call that fails generically, discarding the one message that says how to
         # recover. Must precede the RPCError branch.
-        raise RuntimeError(_BURNED_SESSION_MESSAGE) from exc
+        raise StartupMessage(_BURNED_SESSION_MESSAGE) from exc
     except RPCError:
         # The server ANSWERED — it just refused. That is proof the socket is alive,
         # which is the only question this function asks. FloodWaitError is the case

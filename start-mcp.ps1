@@ -83,15 +83,25 @@ try {
 
         $timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
         $logPath = Join-Path $logsDirectory "start-mcp_$timestamp.log"
-        $suffix = 1
-        while (Test-Path -LiteralPath $logPath) {
+        # Bounded, and random once the obvious names are gone. The loop had no
+        # ceiling: anything that keeps making the path exist - a directory left
+        # under that name, a filter driver, a permission quirk - spun it forever,
+        # and a launcher that never starts is worse than one that logs elsewhere.
+        for ($suffix = 1; $suffix -le 20 -and (Test-Path -LiteralPath $logPath); $suffix++) {
             $logPath = Join-Path $logsDirectory "start-mcp_${timestamp}_$suffix.log"
-            $suffix++
+        }
+        if (Test-Path -LiteralPath $logPath) {
+            $unique = [guid]::NewGuid().ToString('N').Substring(0, 8)
+            $logPath = Join-Path $logsDirectory "start-mcp_${timestamp}_$unique.log"
         }
 
         [IO.File]::WriteAllText($logPath, '', [Text.UTF8Encoding]::new($true))
         [void] (Set-OwnerOnlyAcl -Path $logPath)
+        # `.log` AND `.log.1`: the Python tee rolls a full log to `<name>.log.1`,
+        # and a filter ending in `.log` never matched those, so every rotated part
+        # survived every prune and the retention count bounded half the files.
         Remove-StaleFiles -Directory $logsDirectory -Filter 'start-mcp_*.log' -Keep $script:LogRetention
+        Remove-StaleFiles -Directory $logsDirectory -Filter 'start-mcp_*.log.1' -Keep $script:LogRetention
     }
     catch {
         $logPath = $null
@@ -168,7 +178,11 @@ def roll():
     except OSError:
         pass
     secure(log_path + ".1")
-    log = open(log_path, "a", encoding="utf-8", buffering=1)
+    # newline='' disables Windows newline translation. Without it a written line
+    # ending becomes two bytes on disk while the cap counts one, so a ceiling
+    # computed in bytes is wrong by the number of lines written - and the file
+    # ends up over a limit the code believes it enforced.
+    log = open(log_path, "a", encoding="utf-8", buffering=1, newline="")
     secure(log_path)
 
 class Tee:
@@ -179,9 +193,23 @@ class Tee:
         with lock:
             written = self.stream.write(text)
             self.stream.flush()
-            log.write(ansi.sub("", text))
-            if max_bytes and log.tell() > max_bytes:
-                roll()
+            cleaned = ansi.sub('', text)
+            if max_bytes:
+                # Roll BEFORE writing when this chunk would cross the ceiling. The
+                # old order wrote and measured afterwards, so the cap only ever
+                # applied to the write AFTER the one that crossed it.
+                if log.tell() + len(cleaned.encode('utf-8')) > max_bytes:
+                    roll()
+                # And a single write larger than the whole ceiling cannot be
+                # bounded by rolling - the file would still hold it. Truncated,
+                # and said so, because a silently shortened diagnostic is worse
+                # than a short one.
+                encoded = cleaned.encode('utf-8')
+                if len(encoded) > max_bytes:
+                    marker = '... [truncated at the log size ceiling]' + chr(10)
+                    keep = max(0, max_bytes - len(marker.encode('utf-8')))
+                    cleaned = encoded[:keep].decode('utf-8', 'ignore') + marker
+            log.write(cleaned)
         return written
 
     def flush(self):
@@ -207,8 +235,17 @@ except SystemExit as exc:
     exit_code = exc.code if isinstance(exc.code, int) else 1
     if exc.code is not None and not isinstance(exc.code, int):
         print(exc.code, file=sys.stderr)
-except BaseException:
-    traceback.print_exc()
+except BaseException as exc:
+    # Two destinations, deliberately different. A traceback carries the
+    # arguments and repr of every frame, which here means chat titles,
+    # usernames, phone numbers and paths - and the log file is the thing an
+    # operator attaches to a bug report. So the full traceback goes straight to
+    # the terminal, bypassing the tee, and only its shape is persisted.
+    traceback.print_exception(exc, file=stderr)
+    stderr.flush()
+    frames = traceback.extract_tb(exc.__traceback__)
+    where = f'{frames[-1].filename}:{frames[-1].lineno}' if frames else 'unknown'
+    print(f'{type(exc).__name__} at {where}', file=sys.stderr)
     exit_code = 1
 finally:
     sys.stdout.flush()
