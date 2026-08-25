@@ -15,6 +15,7 @@ import pytest
 from PIL import Image as PILImage
 
 from telegram_mcp import media_preview
+from telegram_mcp.visual import bounded_process
 
 
 def _png_bytes(size=(8, 8), colour="red"):
@@ -210,7 +211,9 @@ async def test_a_wedged_worker_cannot_hold_the_canceller_forever(monkeypatch):
     failure being cancelled; letting it also pin the canceller would turn one stuck
     request into two.
     """
-    monkeypatch.setattr(media_preview, "CANCEL_DRAIN_SECONDS", 0.3)
+    # The drain lives with the cancellation mechanics now, shared with the
+    # window capture, so that is where the budget is.
+    monkeypatch.setattr(bounded_process, "CANCEL_DRAIN_SECONDS", 0.3)
     started = threading.Event()
     release = threading.Event()
 

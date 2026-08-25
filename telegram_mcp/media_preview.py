@@ -35,6 +35,7 @@ from telegram_mcp.media_transfer import (
     with_reference_retry,
 )
 from telegram_mcp.message_view import display_name
+from telegram_mcp.visual.bounded_process import run_cancellable
 from telegram_mcp.visual.frames import (
     FFMPEG_REQUEST_BUDGET_SECONDS,
     DecodingCancelled,
@@ -81,9 +82,9 @@ def _media_suffix(details: dict) -> str:
 def _encode_one(
     raw: bytes,
     max_dimension: int,
-    cancelled: Optional[threading.Event] = None,
     deadline: Optional[float] = None,
     allowance: Optional[int] = None,
+    cancelled: Optional[threading.Event] = None,
 ) -> tuple:
     """One still image as ``([metadata], [Image])``. Blocking: call in a thread.
 
@@ -110,9 +111,9 @@ def _encode_frames(
     suffix: str,
     count: int,
     max_dimension: int,
-    cancelled: Optional[threading.Event] = None,
     deadline: Optional[float] = None,
     allowance: Optional[int] = None,
+    cancelled: Optional[threading.Event] = None,
 ) -> tuple:
     """Frames of an animation as ``([metadata], [Image])``. Blocking: call in a thread.
 
@@ -263,13 +264,6 @@ class PreviewLedger:
         self.spent += min(produced, allowance)
 
 
-# How long a cancelled decode is given to unwind before the caller stops waiting
-# for it. The worker checks the flag every DECODER_POLL_SECONDS and kills its
-# subprocess on the way out, so this is generously above what unwinding costs -
-# it exists so a wedged decoder cannot hold the canceller either.
-CANCEL_DRAIN_SECONDS = 5.0
-
-
 async def encode_frames_cancellable(
     raw: bytes,
     suffix: str,
@@ -320,49 +314,30 @@ async def encode_still_cancellable(
 
 
 async def _off_loop(work, arguments: tuple, ledger: Optional["PreviewLedger"]) -> tuple:
-    """Run one blocking decode on a worker thread, under the call's budget.
+    """Run one blocking decode off the event loop, under the call's budget.
 
-    ``asyncio.to_thread`` alone is not enough. Cancelling the awaiting coroutine
-    raises in the caller and frees it, but the worker thread keeps running: Python
-    cannot stop a thread from outside, and a ``concurrent.futures`` job that has
-    already started cannot be cancelled either.
+    The cancellation mechanics are shared with the window capture and live in
+    :func:`telegram_mcp.visual.bounded_process.run_cancellable`; what belongs here
+    is the budget. The share is taken BEFORE the work starts, because charging
+    afterwards is what let a parallel batch produce everything first and account
+    for it second - reproduced against that version, two 8-byte outputs against a
+    10-byte ceiling ended at 16.
 
-    The event is how the thread gets told. What it can now promise, and could not
-    before, is that being told is enough: every decode below is a child process
-    bounded by ``run_bounded``, which sees the flag within one poll and kills the
-    child. So the drain is a real wait for the worker to be finished rather than a
-    best-effort five seconds after which it was abandoned - "cancelled" used to
-    mean "asked to stop", and anything that then counted processes or cleaned a
-    directory raced a worker still using them.
-
-    The share is taken BEFORE the work starts. Charging afterwards is what let a
-    parallel batch produce everything first and account for it second.
+    Settled on every exit, including the ones that produced nothing: a
+    reservation that is never released is a slow leak of the call's budget.
     """
     reservation = None
     if ledger is not None:
         ledger.check_deadline()
         reservation = ledger.reserve()
 
-    cancelled = threading.Event()
-    loop = asyncio.get_running_loop()
-    # run_in_executor rather than to_thread: the future has to outlive the await,
-    # so that cancelling the await does not throw away the handle on the worker.
-    worker = loop.run_in_executor(
-        None,
-        work,
-        *arguments,
-        cancelled,
-        ledger.deadline if ledger is not None else None,
-        reservation.allowance if reservation is not None else None,
-    )
     try:
-        metas, images = await asyncio.shield(worker)
-    except asyncio.CancelledError:
-        cancelled.set()
-        await _drain(worker)
-        if reservation is not None:
-            reservation.settle(0)
-        raise
+        metas, images = await run_cancellable(
+            work,
+            *arguments,
+            ledger.deadline if ledger is not None else None,
+            reservation.allowance if reservation is not None else None,
+        )
     except BaseException:
         if reservation is not None:
             reservation.settle(0)
@@ -370,43 +345,6 @@ async def _off_loop(work, arguments: tuple, ledger: Optional["PreviewLedger"]) -
     if reservation is not None:
         reservation.settle(sum(len(image.data) for image in images))
     return metas, images
-
-
-async def _drain(worker) -> None:
-    """Wait for a cancelled worker to finish unwinding, and say so if it does not.
-
-    Every await in a cancelled task raises ``CancelledError`` immediately, so the
-    wait cannot be an await on the worker itself. A callback plus a plain
-    ``threading.Event`` is not subject to that: the loop keeps running, and this
-    returns as soon as the worker really is done.
-
-    The bound is generous rather than tight because it is no longer load-bearing:
-    the decode is a child process that ``run_bounded`` kills within a poll of the
-    flag being set, so the worker's remaining work is unwinding, not decoding. A
-    worker that outlasts even this is a bug worth a log line, not something to
-    pass over in silence - but the wait is still finite, because a drain that
-    could block for ever would hand a wedged decoder the power to hold up the
-    canceller too, which is the failure being cancelled in the first place.
-    """
-    finished = threading.Event()
-    worker.add_done_callback(lambda _future: finished.set())
-    deadline = time.monotonic() + CANCEL_DRAIN_SECONDS
-    while not finished.is_set() and time.monotonic() < deadline:
-        # Yields to the loop without awaiting anything cancellable.
-        await asyncio.sleep(0)
-        finished.wait(0.02)
-    if not finished.is_set():
-        log_event(
-            logging.WARNING,
-            "preview-worker-outlived-cancellation",
-            seconds=CANCEL_DRAIN_SECONDS,
-        )
-        return
-    # Read the result nobody is going to look at. The worker ends in
-    # DecodingCancelled - that is the cancellation working - and an unretrieved
-    # future exception makes asyncio log it at ERROR on every cancelled preview,
-    # which turns correct behaviour into an alarm in the operator's log.
-    worker.exception()
 
 
 async def _premium_effect_frames(

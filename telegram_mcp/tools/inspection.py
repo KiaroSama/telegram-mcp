@@ -219,19 +219,23 @@ async def inspect_message(
 
         if include_screen:
             # Imported here so this module stays importable on non-Windows hosts.
-            from telegram_mcp.visual import capture
+            from telegram_mcp.tools.visual import _capture_frames
 
-            def _screen():
-                image, window, meta = capture.capture_window()
-                png, encoded = encode_image(image, max_dimension=max_dimension)
-                # safe_window_dict sanitizes the nested title too. Sanitizing only
-                # the top-level copy left the raw, attacker-controlled chat name
-                # sitting in screen.window.title.
-                window_data = safe_window_dict(window.to_dict())
+            try:
+                # Through the same bounded helper as the capture tools, not a bare
+                # `to_thread(capture_window)`. PrintWindow runs on the target
+                # window's message loop and is not promised to return, so on a
+                # thread it has no deadline and cannot be cancelled - and a second
+                # call site is exactly how one module keeps the bound and the
+                # other quietly does not.
+                window_data, frames = await _capture_frames(
+                    None, "window", None, "png", max_dimension
+                )
+                png, meta = frames[0]
                 title = window_data["title"]
-                return png, {
+                data["screen"] = {
                     **meta,
-                    **encoded,
+                    **meta.pop("image", {}),
                     "window": window_data,
                     # The capture is of a window, not of this message: say so in
                     # the data, because nothing downstream can work it out.
@@ -240,10 +244,6 @@ async def inspect_message(
                     "title_matches_chat": _title_matches_chat(title, entity),
                     "warning": _SCREEN_WARNING.format(chat_id=chat_id),
                 }
-
-            try:
-                # GDI capture is synchronous; keep it off the MCP event loop.
-                png, data["screen"] = await asyncio.to_thread(_screen)
                 images.append(Image(data=png, format="png"))
             except Exception as error:
                 # The screenshot is an optional extra. Whatever went wrong — no

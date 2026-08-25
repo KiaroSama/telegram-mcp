@@ -26,14 +26,54 @@ message on other platforms so callers can degrade gracefully.
 from __future__ import annotations
 
 import ctypes
+import json
 import ntpath
 import os
 import sys
 from dataclasses import dataclass, field
 from typing import Any, Optional
 
+from telegram_mcp.visual.bounded_process import (
+    ProcessCancelled,
+    ProcessError,
+    run_bounded,
+)
+
 CAPTURE_METHODS = ("window", "screen")
 DEFAULT_PROCESS_NAME = os.getenv("TELEGRAM_DESKTOP_PROCESS", "Telegram.exe")
+
+# --- what a capture may allocate, before it allocates it -----------------------
+#
+# The bitmap and the readback buffer are built from the window rectangle exactly
+# as the OS reports it, and the only size check used to happen afterwards, in the
+# downscale. So the numbers below are the first thing that looks at the rectangle
+# at all: a window claiming 100000x100000 is 40 GB of RGBA requested before
+# anything questions it.
+#
+# 16384 is comfortably past any real display arrangement and is also about where
+# GDI bitmap creation gives out, so a larger side is a broken or hostile
+# rectangle rather than a big monitor.
+MAX_CAPTURE_SIDE = 16_384
+
+# The product matters separately: two legal sides still multiply. A triple-4K
+# desktop is ~25 megapixels, so 32 million (128 MB of BGRA) leaves real room and
+# still refuses the absurd.
+MAX_CAPTURE_PIXELS = 32_000_000
+
+# What one CALL may hand back, across every frame in it. get_telegram_frames
+# multiplies a single capture by up to eight, and native_resolution removes the
+# downscale, so the per-frame limits multiplied out to something no reply should
+# carry. 48 MB of encoded image is already far past what a model can use.
+MAX_CAPTURE_RESPONSE_BYTES = 48 * 1024 * 1024
+
+# One frame's own allowance. PrintWindow is documented as synchronous with no
+# promise of returning promptly - it runs on the target window's message loop -
+# so this is a soft check between frames; the hard bound is the parent killing
+# the whole helper.
+CAPTURE_FRAME_SECONDS = 20.0
+
+# Interpreter start plus Pillow's import, paid once for the whole helper.
+CAPTURE_STARTUP_SECONDS = 20.0
 
 # PrintWindow flags (winuser.h)
 _PW_CLIENTONLY = 0x00000001
@@ -48,6 +88,16 @@ _WIN32: Optional[tuple[Any, Any, Any]] = None
 
 class CaptureError(RuntimeError):
     """Raised when a window cannot be located or captured."""
+
+
+class CaptureCancelled(CaptureError):
+    """The caller stopped waiting, so the capture helper was killed.
+
+    Its own type so the tool layer can tell 'the caller went away' from 'this
+    window could not be captured' - only the second is a fault worth reporting.
+    It subclasses CaptureError so nothing that already handles a capture failure
+    stops handling this one.
+    """
 
 
 _WINTYPES: Any = None
@@ -422,6 +472,49 @@ def _client_geometry(hwnd: int) -> tuple[int, int, tuple[int, int, int, int]]:
     return width, height, (origin.x, origin.y, origin.x + width, origin.y + height)
 
 
+def _within_capture_limits(width: int, height: int) -> Optional[str]:
+    """The refusal for a rectangle too big to allocate, or ``None`` to proceed.
+
+    Returns a message rather than raising so the same rule can be asked as a
+    question - the worker checks it, and so does anything deciding whether a
+    capture is worth attempting.
+    """
+    if width > MAX_CAPTURE_SIDE or height > MAX_CAPTURE_SIDE:
+        return (
+            f"The window reports a {width}x{height} rectangle, and no side may exceed "
+            f"{MAX_CAPTURE_SIDE} pixels; it is too large to capture. Nothing was allocated."
+        )
+    if width * height > MAX_CAPTURE_PIXELS:
+        return (
+            f"The window reports {width}x{height} ({width * height} pixels), above the "
+            f"{MAX_CAPTURE_PIXELS}-pixel capture limit; it is too large to capture. "
+            f"That bitmap alone would be {width * height * 4} bytes. Nothing was allocated. "
+            "Use get_telegram_region for part of it."
+        )
+    return None
+
+
+def check_response_bytes(produced: int, limit: Optional[int] = None) -> None:
+    """Refuse a reply that has grown past what one call may hand back.
+
+    Per-frame limits do not bound a call: eight frames each inside the native
+    ceiling is eight times it, and the flag that removes the downscale is exactly
+    the one a caller reaches for before asking for eight.
+
+    ``limit`` defaults to ``None`` rather than to the constant, so the constant is
+    read when the check runs. A module-level default is bound once at definition
+    and would quietly stop being the single source of the number it names.
+    """
+    if limit is None:
+        limit = MAX_CAPTURE_RESPONSE_BYTES
+    if produced > limit:
+        raise CaptureError(
+            f"This capture produced {produced} bytes, above the {limit}-byte response "
+            "ceiling for one call. Ask for fewer frames, a smaller max_dimension, drop "
+            "native_resolution, or use get_telegram_region for the part that matters."
+        )
+
+
 def _capture_print_window(window: WindowInfo, client_only: bool):
     """Capture the window's own pixels via PrintWindow + GetDIBits."""
     wintypes = _wintypes()
@@ -439,6 +532,12 @@ def _capture_print_window(window: WindowInfo, client_only: bool):
         width, height = window.width, window.height
     if width <= 0 or height <= 0:
         raise CaptureError(f"Window {window.hwnd} has a zero-sized rectangle; nothing to capture.")
+    # Before the device context, before the bitmap, before the buffer. Every one
+    # of those is sized from these two numbers, and the only check used to be the
+    # downscale that runs after all three already exist.
+    refusal = _within_capture_limits(width, height)
+    if refusal:
+        raise CaptureError(refusal)
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [
@@ -638,6 +737,128 @@ def capture_window(
         meta["region"] = {"left": box[0], "top": box[1], "right": box[2], "bottom": box[3]}
 
     return image, window, meta
+
+
+# Mirrors capture_worker's exit codes. Duplicated rather than imported so the
+# parent never loads the worker module to read its own child's result.
+CAPTURE_EXIT_REFUSED = 3
+CAPTURE_EXIT_IMAGE_REFUSED = 4
+
+
+def _capture_worker_command(request: dict) -> list[str]:
+    """argv for one capture_worker run.
+
+    ``-m`` rather than a path so the child resolves ``telegram_mcp`` the same way
+    the parent did, whether this is an installed package or a source checkout.
+    Its own function because a test has to be able to substitute a child that
+    hangs: a real PrintWindow cannot be relied on to misbehave on demand, and
+    misbehaving is the case worth proving.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "telegram_mcp.visual.capture_worker",
+        json.dumps(request, separators=(",", ":")),
+    ]
+
+
+def capture_frames(
+    hwnd: Optional[int] = None,
+    method: str = "window",
+    process_name: Optional[str] = None,
+    client_only: bool = False,
+    region: Optional[tuple[int, int, int, int]] = None,
+    image_format: str = "png",
+    max_dimension: Optional[int] = None,
+    native: bool = False,
+    count: int = 1,
+    interval_ms: float = 0.0,
+    timeout: Optional[float] = None,
+    cancelled: Optional[Any] = None,
+) -> tuple[dict[str, Any], list[tuple[bytes, dict[str, Any]]]]:
+    """Capture ``count`` frames in a child process, bounded and reaped.
+
+    Blocking: call it off the event loop. Returns ``(window, [(bytes, meta)])``.
+
+    The whole request is one child, so ``timeout`` is a bound on the CALL rather
+    than on each frame - which is the only kind of bound that holds when a single
+    PrintWindow is the thing that never returns.
+    """
+    _require_windows()
+    if method not in CAPTURE_METHODS:
+        raise CaptureError(
+            f"Unknown capture method {method!r}. Expected one of: {', '.join(CAPTURE_METHODS)}."
+        )
+    count = max(1, int(count))
+    interval_ms = max(0.0, float(interval_ms))
+    if timeout is None:
+        # Startup once, then each frame's own allowance and the waits between
+        # them. Anything past this is a capture that is not coming back.
+        timeout = (
+            CAPTURE_STARTUP_SECONDS
+            + count * CAPTURE_FRAME_SECONDS
+            + (count - 1) * interval_ms / 1000.0
+        )
+
+    request = {
+        "hwnd": hwnd,
+        "method": method,
+        "process_name": process_name or DEFAULT_PROCESS_NAME,
+        "client_only": bool(client_only),
+        "region": list(region) if region else None,
+        "image_format": image_format,
+        "max_dimension": max_dimension,
+        "native": bool(native),
+        "count": count,
+        "interval_ms": interval_ms,
+        "max_bytes": MAX_CAPTURE_RESPONSE_BYTES,
+    }
+    try:
+        result = run_bounded(
+            _capture_worker_command(request),
+            label="The Telegram window capture",
+            timeout=timeout,
+            cancelled=cancelled,
+            # The reply is the response ceiling plus one header line; anything
+            # past that is a helper that ignored its own limit.
+            max_output_bytes=MAX_CAPTURE_RESPONSE_BYTES + 64 * 1024,
+            max_stderr_bytes=64 * 1024,
+        )
+    except ProcessCancelled as error:
+        raise CaptureCancelled(str(error)) from error
+    except ProcessError as error:
+        raise CaptureError(str(error)) from error
+
+    stderr = (result.stderr or b"").decode("utf-8", errors="replace").strip()
+    if result.returncode in (CAPTURE_EXIT_REFUSED, CAPTURE_EXIT_IMAGE_REFUSED):
+        # The worker's own message already says what to do about it.
+        raise CaptureError(stderr or "The capture was refused.")
+    if result.returncode != 0:
+        raise CaptureError(stderr or f"The capture helper failed (exit {result.returncode}).")
+
+    header_line, _, payload = (result.stdout or b"").partition(b"\n")
+    try:
+        header = json.loads(header_line or b"{}")
+        window = header["window"]
+        metas = list(header["frames"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise CaptureError("The capture helper returned a reply this build cannot read.")
+
+    frames, offset = [], 0
+    for meta in metas:
+        size = int(meta.get("bytes") or 0)
+        chunk = payload[offset : offset + size]
+        if len(chunk) != size:
+            raise CaptureError(
+                f"The capture helper returned {len(payload)} bytes for {len(metas)} frame(s); "
+                "the capture was cut short."
+            )
+        offset += size
+        frames.append((chunk, meta))
+    if not frames:
+        raise CaptureError("The capture helper produced no frames.")
+    check_response_bytes(sum(len(data) for data, _meta in frames))
+    return window, frames
 
 
 def describe_windows(process_name: str = DEFAULT_PROCESS_NAME) -> list[dict[str, Any]]:

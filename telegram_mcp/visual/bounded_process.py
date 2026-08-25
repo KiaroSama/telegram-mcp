@@ -34,6 +34,8 @@ reader threads are joined before this returns. Nothing survives the call.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import os
 import subprocess
 import threading
@@ -249,6 +251,76 @@ def run_bounded(
             pass
         _finish(process, readers)
         raise
+
+
+# How long a cancelled worker gets to unwind before the caller stops waiting for
+# it. Not load-bearing: every helper the workers run is a child that run_bounded
+# kills within one poll of the flag being set, so what is left is unwinding. It
+# is finite anyway, because a drain that could block for ever would hand a wedged
+# decoder the power to hold up the canceller too - which is the failure being
+# cancelled in the first place.
+CANCEL_DRAIN_SECONDS = 5.0
+
+
+async def run_cancellable(work, *arguments):
+    """Run one blocking call off the event loop so cancelling it reaches the work.
+
+    ``asyncio.to_thread`` alone is not enough. Cancelling the awaiting coroutine
+    raises in the caller and frees it, but the worker thread keeps running: Python
+    cannot stop a thread from outside, and a ``concurrent.futures`` job that has
+    already started cannot be cancelled either. So the flag is how the thread gets
+    told, and ``run_bounded`` in the thread is what makes being told sufficient.
+
+    ``work`` is called as ``work(*arguments, cancelled)``.
+
+    Every caller goes through here rather than reaching for ``asyncio.to_thread``
+    itself, so the rule exists once instead of at each call site free to forget it.
+    """
+    cancelled = threading.Event()
+    loop = asyncio.get_running_loop()
+    # run_in_executor rather than to_thread: the future has to outlive the await,
+    # so that cancelling the await does not throw away the handle on the worker.
+    worker = loop.run_in_executor(None, work, *arguments, cancelled)
+    try:
+        return await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        cancelled.set()
+        await drain(worker)
+        raise
+
+
+async def drain(worker) -> None:
+    """Wait for a cancelled worker to finish unwinding, and say so if it does not.
+
+    Every await in a cancelled task raises ``CancelledError`` immediately, so the
+    wait cannot be an await on the worker itself. A callback plus a plain
+    ``threading.Event`` is not subject to that: the loop keeps running, and this
+    returns as soon as the worker really is done.
+    """
+    finished = threading.Event()
+    worker.add_done_callback(lambda _future: finished.set())
+    deadline = time.monotonic() + CANCEL_DRAIN_SECONDS
+    while not finished.is_set() and time.monotonic() < deadline:
+        # Yields to the loop without awaiting anything cancellable.
+        await asyncio.sleep(0)
+        finished.wait(0.02)
+    if not finished.is_set():
+        # Imported here, not at module scope: the decoder workers import this
+        # package's modules, and the whole point of a worker is that it costs the
+        # decoder and nothing else.
+        from telegram_mcp.safe_log import log_event
+
+        log_event(
+            logging.WARNING,
+            "worker-outlived-cancellation-drain",
+            seconds=CANCEL_DRAIN_SECONDS,
+        )
+        return
+    # Read the result nobody is going to look at. The worker ends in the
+    # cancellation error - that is the cancellation working - and an unretrieved
+    # future exception makes asyncio log it at ERROR every time, which turns
+    # correct behaviour into an alarm in the operator's log.
+    worker.exception()
 
 
 def _finish(process, readers) -> None:

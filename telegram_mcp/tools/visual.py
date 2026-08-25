@@ -12,11 +12,12 @@ from mcp.server.fastmcp import Image
 
 from telegram_mcp.message_view import display_name
 
+from telegram_mcp.visual.bounded_process import run_cancellable
 from telegram_mcp.visual.capture import (
     CAPTURE_METHODS,
     DEFAULT_PROCESS_NAME,
     CaptureError,
-    capture_window,
+    capture_frames,
     describe_windows,
 )
 from telegram_mcp.visual.images import (
@@ -58,6 +59,76 @@ def _check_options(method: str, image_format: str) -> Optional[str]:
     return None
 
 
+async def _capture_frames(
+    hwnd: Optional[int],
+    method: str,
+    process_name: Optional[str],
+    image_format: str,
+    max_dimension: int,
+    client_only: bool = False,
+    region: Optional[tuple] = None,
+    native_resolution: bool = False,
+    count: int = 1,
+    interval_ms: float = 0.0,
+) -> tuple:
+    """Capture ``count`` frames, returning ``(window, [(bytes, metadata)])``.
+
+    The capture runs in a child process, not a worker thread. ``PrintWindow``
+    hands the work to the target window's message loop and Microsoft promises
+    nothing about it coming back; on a thread that is unrecoverable, because
+    Python cannot stop a thread from outside. So a wedged Telegram used to hold a
+    worker for the life of the server, and cancelling the caller freed the caller
+    only. As a child it is a PID, and the bounded runner kills and reaps it.
+
+    All the frames of one request share the child, so the interval between them
+    is timed where the captures happen rather than across an await, and the whole
+    call gets one deadline instead of each frame getting its own.
+    """
+    window, frames = await run_cancellable(
+        _blocking_capture,
+        hwnd,
+        method,
+        process_name or DEFAULT_PROCESS_NAME,
+        image_format,
+        max_dimension,
+        client_only,
+        region,
+        native_resolution,
+        count,
+        interval_ms,
+    )
+    return safe_window_dict(window), frames
+
+
+def _blocking_capture(
+    hwnd,
+    method,
+    process_name,
+    image_format,
+    max_dimension,
+    client_only,
+    region,
+    native_resolution,
+    count,
+    interval_ms,
+    cancelled,
+):
+    """The blocking half of :func:`_capture_frames`, run on a worker thread."""
+    return capture_frames(
+        hwnd=hwnd,
+        method=method,
+        process_name=process_name,
+        client_only=client_only,
+        region=region,
+        image_format=image_format,
+        max_dimension=max_dimension,
+        native=native_resolution,
+        count=count,
+        interval_ms=interval_ms,
+        cancelled=cancelled,
+    )
+
+
 async def _capture_encoded(
     hwnd: Optional[int],
     method: str,
@@ -68,31 +139,20 @@ async def _capture_encoded(
     region: Optional[tuple] = None,
     native_resolution: bool = False,
 ) -> tuple:
-    """Capture and encode one image, returning ``(png_bytes, metadata)``.
-
-    Runs in a worker thread: the GDI calls behind ``capture_window`` are
-    synchronous and would otherwise stall the whole MCP event loop.
-    """
-
-    def _run():
-        image, window, meta = capture_window(
-            hwnd=hwnd,
-            method=method,
-            process_name=process_name or DEFAULT_PROCESS_NAME,
-            client_only=client_only,
-            region=region,
-        )
-        data, image_meta = encode_image(
-            image,
-            image_format=image_format,
-            max_dimension=max_dimension,
-            native=native_resolution,
-        )
-        meta["window"] = safe_window_dict(window.to_dict())
-        meta["image"] = image_meta
-        return data, meta
-
-    return await asyncio.to_thread(_run)
+    """Capture and encode one image, returning ``(png_bytes, metadata)``."""
+    window, frames = await _capture_frames(
+        hwnd,
+        method,
+        process_name,
+        image_format,
+        max_dimension,
+        client_only=client_only,
+        region=region,
+        native_resolution=native_resolution,
+    )
+    data, meta = frames[0]
+    meta["window"] = window
+    return data, meta
 
 
 @mcp.tool(
@@ -337,22 +397,23 @@ async def get_telegram_frames(
         count = max(1, min(MAX_FRAMES, int(count)))
         interval_ms = max(MIN_FRAME_INTERVAL_MS, min(MAX_FRAME_INTERVAL_MS, int(interval_ms)))
 
-        started = time.monotonic()
-        images, frames, window = [], [], None
-        for index in range(count):
-            if index:
-                await asyncio.sleep(interval_ms / 1000)
-            data, meta = await _capture_encoded(
-                hwnd,
-                method,
-                process_name,
-                image_format,
-                max_dimension,
-                native_resolution=native_resolution,
-            )
-            window = meta.pop("window")
-            meta["index"] = index
-            meta["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        # One child for the whole request rather than one per frame: the interval
+        # is timed where the captures happen, the interpreter and Pillow are
+        # imported once, and the response ceiling is applied to the frames as they
+        # accumulate instead of to each one on its own.
+        window, captured = await _capture_frames(
+            hwnd,
+            method,
+            process_name,
+            image_format,
+            max_dimension,
+            native_resolution=native_resolution,
+            count=count,
+            interval_ms=interval_ms,
+        )
+        images, frames = [], []
+        for data, meta in captured:
+            meta.pop("window", None)
             frames.append(meta)
             images.append(Image(data=data, format=meta["image"]["format"]))
 

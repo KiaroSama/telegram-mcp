@@ -16,6 +16,14 @@ from typing import Any, Optional
 MAX_IMAGE_DIMENSION = 1568
 MIN_IMAGE_DIMENSION = 64
 
+# The ceiling ``native=True`` is measured against. "Do not downscale to
+# max_dimension" is a reasonable thing to ask for; "no limit at all" is not, and
+# that is what the flag used to mean - an 8K window came back untouched at
+# roughly 20k+ tokens of base64, and get_telegram_frames multiplies that by up to
+# eight. 4096 keeps the documented use (full detail on a region, or on a normal
+# window) exact while putting an end on the pathological one.
+MAX_NATIVE_DIMENSION = 4096
+
 # Pillow only *warns* between 1x and 2x its MAX_IMAGE_PIXELS and raises above 2x
 # (~179M pixels on 12.x), so a few-KB PNG declaring ~178M pixels decodes and
 # allocates roughly 700 MB in a worker thread. The download cap upstream bounds
@@ -96,14 +104,18 @@ def fit_image(image, max_dimension: Optional[int] = MAX_IMAGE_DIMENSION):
     # Only an explicit None (internal callers) disables the cap.
     if max_dimension is None:
         return image, False
-    max_dimension = bounded_dimension(max_dimension)
+    return _fit_to(image, bounded_dimension(max_dimension))
+
+
+def _fit_to(image, longest_side: int):
+    """``(image, was_resized)`` with the long side at most ``longest_side``."""
     longest = max(image.width, image.height)
-    if longest <= max_dimension:
+    if longest <= longest_side:
         return image, False
 
     from PIL import Image
 
-    ratio = max_dimension / longest
+    ratio = longest_side / longest
     size = (max(1, round(image.width * ratio)), max(1, round(image.height * ratio)))
     return image.resize(size, Image.LANCZOS), True
 
@@ -137,8 +149,12 @@ def encode_image(
     pil_format, mime_type = IMAGE_FORMATS[key]
 
     original_size = (image.width, image.height)
-    resized = False
-    if not native:
+    if native:
+        # Still a ceiling, just a much higher one. The flag means "keep the real
+        # pixels" and it used to mean "no limit", which is how one tool argument
+        # turned an 8K window into an unbounded reply.
+        image, resized = _fit_to(image, MAX_NATIVE_DIMENSION)
+    else:
         image, resized = fit_image(image, max_dimension)
 
     if pil_format == "JPEG" and image.mode not in ("RGB", "L"):

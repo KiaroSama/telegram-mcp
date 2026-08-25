@@ -7,6 +7,7 @@ on the boundary.
 
 from telegram_mcp.visual.capture import (
     CaptureError,
+    capture_frames,
     capture_window,
     describe_windows,
     find_target_window,
@@ -24,6 +25,7 @@ __all__ = [
     "CaptureError",
     "FrameExtractionError",
     "MAX_IMAGE_DIMENSION",
+    "capture_frames",
     "capture_window",
     "describe_windows",
     "encode_image",

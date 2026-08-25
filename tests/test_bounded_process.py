@@ -45,10 +45,6 @@ FLOODS = (
 )
 
 
-def _live_children() -> int:
-    return sum(1 for thread in threading.enumerate() if thread.name.startswith("_pump"))
-
-
 def _run(command, **kwargs):
     defaults = {
         "label": "the helper",
