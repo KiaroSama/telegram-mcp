@@ -97,6 +97,105 @@ $($functions.Value -join "`n`n")
     }
     Write-Host 'ok  removing one label leaves the others alone'
 
+    # --- renaming an account -------------------------------------------------
+    #
+    # The prefix decides what the value MEANS. Rename used to write
+    # TELEGRAM_SESSION_STRING_* whatever it read, so renaming a file-based account
+    # handed the server a session PATH where it expects a session STRING: the
+    # rename reported success and the account silently stopped loading.
+
+    [IO.File]::WriteAllLines($envPath, @(
+        '# keep me'
+        'TELEGRAM_API_ID=12345'
+        'TELEGRAM_SESSION_NAME_FILEBASED=C:\sessions\work.session'
+        'TELEGRAM_SESSION_STRING_STRINGY=1AAAAAstring'
+    ), [Text.UTF8Encoding]::new($false))
+
+    Rename-EnvKey -From 'TELEGRAM_SESSION_NAME_FILEBASED' -To 'TELEGRAM_SESSION_NAME_RENAMED'
+    $after = Get-Content -LiteralPath $envPath
+    if ($after -notcontains 'TELEGRAM_SESSION_NAME_RENAMED=C:\sessions\work.session') {
+        throw "A file-based rename lost its type or its value:`n$($after -join "`n")"
+    }
+    if ($after -join "`n" -match 'TELEGRAM_SESSION_STRING_RENAMED') {
+        throw 'A file-based account was rewritten as a session string.'
+    }
+    if ($after -notcontains 'TELEGRAM_SESSION_STRING_STRINGY=1AAAAAstring') {
+        throw 'Renaming one account disturbed another.'
+    }
+    if ($after -notcontains '# keep me') { throw 'The rename dropped a comment.' }
+    Write-Host 'ok  a rename keeps the variable type that decides what the value means'
+
+    # A rename is one transform and one write. It used to be a remove followed by a
+    # separate add, so a failure between them left the account deleted and not
+    # re-added - the operator asked to rename one, not to lose one.
+    $before = Get-Content -LiteralPath $envPath -Raw
+    $realWrite = ${function:Write-FileAtomic}
+    function Write-FileAtomic { param($Path, $Text) throw [IO.IOException]::new('disk full') }
+    $failed = $false
+    try { Rename-EnvKey -From 'TELEGRAM_SESSION_STRING_STRINGY' -To 'TELEGRAM_SESSION_STRING_MOVED' }
+    catch { $failed = $true }
+    # Restore, not remove: there is one function table, so removing the shadow
+    # would take the real one with it and every later check would fail on a
+    # missing cmdlet rather than on its own subject.
+    ${function:Write-FileAtomic} = $realWrite
+    if (-not $failed) { throw 'A failing write was reported as a successful rename.' }
+    if ((Get-Content -LiteralPath $envPath -Raw) -ne $before) {
+        throw 'A failed rename changed the file; the account should still be exactly as it was.'
+    }
+    Write-Host 'ok  a rename that cannot be written leaves the account untouched'
+
+    # Renaming something that is not there is an error, not a silent no-op that
+    # reports success.
+    $missing = $false
+    try { Rename-EnvKey -From 'TELEGRAM_SESSION_STRING_NOPE' -To 'TELEGRAM_SESSION_STRING_X' }
+    catch { $missing = $true }
+    if (-not $missing) { throw 'Renaming an absent key reported success.' }
+    Write-Host 'ok  renaming an account that does not exist is refused'
+
+    # Backup retry is for a taken NAME. A permission or disk failure raises
+    # IOException too, and retrying those a hundred times turns one clear error
+    # into a hang and then a wrong message about collisions. Asserted on the
+    # source because the failure needs File.Copy itself to fail, which cannot be
+    # arranged here without a real permission change on the test machine.
+    $backupSource = [regex]::Match(
+        (Get-Content -LiteralPath (Join-Path $sandbox 'Manage-Accounts.ps1') -Raw),
+        '(?ms)^function Backup-EnvFile \{.*?^\}').Value
+    if ($backupSource -notmatch 'Test-Path[^
+]*\$backup') {
+        throw 'Backup-EnvFile retries without checking the name was actually taken.'
+    }
+    Write-Host 'ok  backup retry is reserved for a genuine name collision'
+
+    # The checks above drive Rename-EnvKey, which moves a value to whatever key it
+    # is told. Choosing that key is Rename-Account's job, and it is the half that
+    # was wrong - so drive the real function with the prompts stubbed.
+    [IO.File]::WriteAllLines($envPath, @(
+        'TELEGRAM_API_ID=12345'
+        'TELEGRAM_SESSION_NAME_ONDISK=C:\sessions\ondisk.session'
+    ), [Text.UTF8Encoding]::new($false))
+
+    $realRead = ${function:Read-Label}
+    $realBackup = ${function:Backup-EnvFile}
+    $script:answers = @('ondisk', 'moved')
+    $script:answerIndex = 0
+    function Read-Label { param($Prompt) $a = $script:answers[$script:answerIndex]; $script:answerIndex++; $a }
+    function Backup-EnvFile { $null }
+    try { Rename-Account }
+    finally {
+        ${function:Read-Label} = $realRead
+        ${function:Backup-EnvFile} = $realBackup
+    }
+
+    $renamed = Get-Content -LiteralPath $envPath
+    if ($renamed -notcontains 'TELEGRAM_SESSION_NAME_MOVED=C:\sessions\ondisk.session') {
+        throw "Rename-Account did not keep the file-based type:`n$($renamed -join "`n")"
+    }
+    if (($renamed -join "`n") -match 'TELEGRAM_SESSION_STRING_MOVED') {
+        throw 'Rename-Account rewrote a file session as a session string.'
+    }
+    Write-Host 'ok  Rename-Account itself picks the prefix from what it is renaming'
+
+
     # --- the backup is a real restore point ----------------------------------
     Copy-Item -LiteralPath $backup -Destination $envPath -Force
     $restored = Get-Accounts
@@ -297,6 +396,8 @@ try {
         throw 'A backup was written for a cancelled operation.'
     }
     Write-Host 'ok  0 unwinds one level and exit leaves, changing nothing on the way'
+
+
 }
 finally {
     Remove-Item -LiteralPath $e2e -Recurse -Force -ErrorAction SilentlyContinue
