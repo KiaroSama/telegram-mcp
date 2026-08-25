@@ -230,15 +230,29 @@ foreach ($shipped in $scripts) {
     if ($text -match "Join-Path \`$PSScriptRoot 'logs'") {
         throw "$(Split-Path -Leaf $shipped) still logs beside its own source."
     }
-    foreach ($required in 'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Remove-StaleFiles') {
-        if ($text -notmatch "function $required") {
-            throw "$(Split-Path -Leaf $shipped) has no $required."
+    $required = @(
+        'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Test-OwnerOnlyAcl', 'Remove-StaleFiles')
+    foreach ($name in $required) {
+        if ($text -notmatch "function $name") {
+            throw "$(Split-Path -Leaf $shipped) has no $name."
         }
     }
-    # /grant on its own ADDS an entry and leaves the inherited BUILTIN\Users one,
-    # so without /inheritance:r the call grants exactly what it meant to remove.
-    if ($text -notmatch "'/inheritance:r'") {
-        throw "$(Split-Path -Leaf $shipped) grants without removing inheritance."
+    # This used to demand the `/inheritance:r` flag, which asserted the shape of
+    # the old bug rather than the guarantee: that flag drops the INHERITED
+    # entries and leaves every explicit one, and icacls still exits 0. What is
+    # required now is a protected list written whole, and an answer read back
+    # off the file rather than taken from a return code.
+    if ($text -notmatch 'SetAccessRuleProtection') {
+        throw "$(Split-Path -Leaf $shipped) does not write a protected DACL."
+    }
+    if ($text -notmatch 'return \(Test-OwnerOnlyAcl -Path \$Path\)') {
+        throw "$(Split-Path -Leaf $shipped) reports success without reading the file back."
+    }
+    # An INVOCATION, not the word: both files still describe the old approach in
+    # prose, and a guard that cannot tell an explanation from a call is a guard
+    # nobody can write documentation around.
+    if ($text -match '(&\s+icacls|["'']icacls["''])') {
+        throw "$(Split-Path -Leaf $shipped) is back to editing the ACL with icacls."
     }
 }
 # Every .env this manager creates is restricted before anything is written into

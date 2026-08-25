@@ -52,26 +52,90 @@ function Get-StateDirectory {
 
 function Set-OwnerOnlyAcl {
     <#
-      Leave exactly one access entry on a private file.
+      Leave exactly one access entry on a private file or directory, and prove it.
 
-      `/inheritance:r` is the half that matters: `/grant` on its own ADDS an
-      entry and leaves the inherited one - typically BUILTIN\Users - in place,
-      granting precisely what it was called to remove. Mirrors
-      `telegram_mcp.aliases.restrict_to_owner`.
+      `icacls /inheritance:r /grant:r` was not enough, and the gap is narrow
+      enough to have looked like a fix: `/inheritance:r` drops the INHERITED
+      entries and `/grant:r` REPLACES the entry for the principal it names -
+      every other EXPLICIT entry survives, and the tool still exits 0. A file
+      carrying an explicit `BUILTIN\Users` grant therefore kept it while this
+      function reported success. Measured on a GitHub Windows runner, whose
+      workspace files are born with three explicit entries: all three remained.
+
+      So the whole list is written rather than edited, and then READ BACK: the
+      return value says what the object now allows, not that a call succeeded.
+      A directory's entry is inheritable, which is what makes the files created
+      inside one owner-only from birth. Mirrors
+      `telegram_mcp.owner_only.restrict_to_owner_strict`.
 
       Returns whether it applied, never throws: a permissions detail must not
-      abort an account operation half-way.
+      abort the operation it was protecting half-way.
     #>
     param([Parameter(Mandatory)] [string] $Path)
-    $principal = if ($env:USERDOMAIN) { "$env:USERDOMAIN\$env:USERNAME" } else { $env:USERNAME }
-    if (-not $principal) { return $false }
+    if ($env:OS -ne 'Windows_NT') { return $false }
     try {
-        & icacls $Path '/inheritance:r' '/grant:r' "${principal}:(F)" *> $null
-        return $LASTEXITCODE -eq 0
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        if (-not $me) { return $false }
+        $directory = [IO.Directory]::Exists($Path)
+
+        # A FRESH descriptor rather than the object's own: writing one read back
+        # from disk also writes the AUDIT section, which needs SeSecurityPrivilege
+        # and fails for an ordinary account. A new one marks only the DACL.
+        $acl = if ($directory) {
+            [Security.AccessControl.DirectorySecurity]::new()
+        }
+        else {
+            [Security.AccessControl.FileSecurity]::new()
+        }
+        # $true, $false: protect the list and do NOT copy the inherited entries
+        # into it. Without the second argument they are preserved as explicit
+        # ones, which is the same leak wearing different bookkeeping.
+        $acl.SetAccessRuleProtection($true, $false)
+        $inheritance = if ($directory) {
+            [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+        }
+        else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        $acl.AddAccessRule([Security.AccessControl.FileSystemAccessRule]::new(
+                $me, 'FullControl', $inheritance,
+                [Security.AccessControl.PropagationFlags]::None, 'Allow'))
+
+        $target = if ($directory) { [IO.DirectoryInfo]::new($Path) }
+        else { [IO.FileInfo]::new($Path) }
+        if ('System.IO.FileSystemAclExtensions' -as [type]) {
+            [IO.FileSystemAclExtensions]::SetAccessControl($target, $acl)
+        }
+        else {
+            $target.SetAccessControl($acl)  # Windows PowerShell 5.1
+        }
+
+        return (Test-OwnerOnlyAcl -Path $Path)
     }
     catch { return $false }
 }
 
+function Test-OwnerOnlyAcl {
+    <#
+      Whether the object's DACL names this account and nothing else.
+
+      Read off the object rather than inferred from the call that set it: a
+      tool exiting 0 says the tool ran, this says what the object allows.
+    #>
+    param([Parameter(Mandatory)] [string] $Path)
+    if ($env:OS -ne 'Windows_NT') { return $false }
+    try {
+        $me = [Security.Principal.WindowsIdentity]::GetCurrent().User
+        $entries = @((Get-Acl -LiteralPath $Path).Access)
+        if ($entries.Count -ne 1) { return $false }
+        $held = $entries[0].IdentityReference
+        if ($held -isnot [Security.Principal.SecurityIdentifier]) {
+            $held = $held.Translate([Security.Principal.SecurityIdentifier])
+        }
+        return $held -eq $me
+    }
+    catch { return $false }
+}
 function Write-FileAtomic {
     <#
       Write a file so a crash cannot leave it half-written.

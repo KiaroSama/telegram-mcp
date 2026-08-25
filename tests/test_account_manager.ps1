@@ -242,11 +242,31 @@ $($functions.Value -join "`n`n")
     if ($env:OS -eq 'Windows_NT') {
         # os.chmod-style modes do not exist here: without an explicit ACL the
         # file holding every login inherits whatever the directory grants.
+        #
+        # The foreign entry is PLANTED rather than hoped for. The old
+        # implementation removed the inherited entries and left every explicit
+        # one, so it passed on a developer machine whose workspace carried none
+        # and failed on a GitHub runner whose workspace carried three. Planting
+        # one makes the check bite on both, and icacls stays the oracle because
+        # it is not the API the implementation writes through.
+        # Planted with icacls, not Set-Acl: writing a whole descriptor back
+        # asks for SeSecurityPrivilege, which an ordinary account does not
+        # hold. A bare `/grant` adds one explicit entry and nothing else,
+        # which is the shape a runner workspace already has.
+        & icacls $envPath '/grant' 'BUILTIN\Users:(R)' *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'Could not plant a foreign access entry.' }
+        if (-not (Set-OwnerOnlyAcl -Path $envPath)) {
+            throw 'Set-OwnerOnlyAcl reported it could not make the .env owner-only.'
+        }
+
         $acl = & icacls $envPath
         $entries = @($acl | Select-String -Pattern ':\(' -AllMatches |
                 ForEach-Object { $_.Matches.Count } | Measure-Object -Sum).Sum
         if ($entries -ne 1) { throw "The .env carries $entries access entries, expected 1." }
-        Write-Host 'ok  .env is left with exactly one access entry'
+        if (-not (Test-OwnerOnlyAcl -Path $envPath)) {
+            throw 'The .env has one entry, but it does not name this account.'
+        }
+        Write-Host 'ok  a foreign access entry on .env is removed, not merely joined'
     }
 
     Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force |
