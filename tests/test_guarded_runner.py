@@ -34,6 +34,15 @@ CHILD_SLEEP_SECONDS = 120
 # Enough headroom for interpreter startup and collection on a loaded machine,
 # while keeping the test itself a few seconds.
 WALL_BUDGET = 6.0
+
+# The orphan tests need a DIFFERENT budget, and the reason is worth stating: what
+# ends those runs is the orphan grace period (five seconds after pytest exits),
+# not the wall clock. A six-second wall is therefore not a ceiling on them - it is
+# a race against interpreter startup, and a machine busy enough to lose that race
+# kills the tree before the test body ever runs. The run then still exits 124 and
+# looks right, while the case under test never happened. Generous here, and still
+# far below CHILD_SLEEP_SECONDS, so startup can never be the binding constraint.
+ORPHAN_WALL_BUDGET = 60.0
 IDLE_BUDGET = 4.0
 HARNESS_TIMEOUT = 90
 
@@ -252,9 +261,13 @@ def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
         "    time.sleep(1)\n",
     )
 
-    result = _run_guarded(tmp_path, "--wall-seconds", str(WALL_BUDGET))
+    result = _run_guarded(tmp_path, "--wall-seconds", str(ORPHAN_WALL_BUDGET))
 
     assert result.returncode == 124, f"{result.stdout}\n{result.stderr}"
+    assert pid_file.exists(), (
+        "the test body never ran - the tree was killed during startup, so this run "
+        f"proved nothing about orphans:{chr(10)}{result.stdout}{chr(10)}{result.stderr}"
+    )
     pid = int(pid_file.read_text(encoding="utf-8"))
     assert not _process_alive(pid), f"grandchild {pid} outlived the run"
     assert not marker.exists(), "the grandchild ran to completion"
@@ -293,9 +306,13 @@ def test_a_grandchild_that_outlives_pytest_is_killed_on_windows(tmp_path):
         "    time.sleep(1)\n",
     )
 
-    result = _run_guarded(tmp_path, "--wall-seconds", str(WALL_BUDGET))
+    result = _run_guarded(tmp_path, "--wall-seconds", str(ORPHAN_WALL_BUDGET))
 
     assert result.returncode == 124, f"{result.stdout}\n{result.stderr}"
+    assert pid_file.exists(), (
+        "the test body never ran - the tree was killed during startup, so this run "
+        f"proved nothing about orphans:{chr(10)}{result.stdout}{chr(10)}{result.stderr}"
+    )
     pid = int(pid_file.read_text(encoding="utf-8"))
     assert not _process_alive(pid), f"grandchild {pid} outlived the run"
     assert not marker.exists(), "the grandchild ran to completion"
@@ -328,3 +345,56 @@ def test_an_unavailable_tree_handle_does_not_stall_the_run():
     """
     assert run_tests_guarded._tree_alive(None) is False
     assert run_tests_guarded._run_is_over(parent_alive=False, tree_alive=False) is True
+
+
+def test_output_without_a_newline_still_counts_as_progress(tmp_path):
+    """A byte is progress. A newline is not the unit of work.
+
+    The pump read `for line in stdout`, which yields only when a newline arrives, so
+    a run printing a progress bar with carriage returns - or any long line still
+    being written - looked completely idle. The idle clock then fired on a child
+    that was demonstrably working, and the run was reported as a timeout.
+
+    This case writes for longer than the idle budget without ever emitting a
+    newline: under the old pump it timed out, and the only correct answer is that it
+    finishes normally.
+    """
+    _write_case(
+        tmp_path,
+        "import sys, time\n" "\n" "def test_writes_without_newlines():\n"
+        # Comfortably past IDLE_BUDGET, in small writes with no line break at all.
+        "    for _ in range(12):\n"
+        "        sys.stdout.write('.')\n"
+        "        sys.stdout.flush()\n"
+        "        time.sleep(0.5)\n",
+    )
+
+    # Built here rather than through _run_guarded: pytest's own `-s` has to sit
+    # AFTER the `--`, and that helper reserves everything before it for the runner.
+    # Without -s pytest captures the writes and none of them reach the pipe, which
+    # would make this test pass for the wrong reason.
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(RUNNER),
+            "--wall-seconds",
+            str(ORPHAN_WALL_BUDGET),
+            "--idle-seconds",
+            str(IDLE_BUDGET),
+            "--",
+            "-q",
+            "-s",
+            "-p",
+            "no:cacheprovider",
+            "test_case.py",
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=HARNESS_TIMEOUT,
+    )
+
+    assert result.returncode == 0, (
+        "a child writing steadily was called idle:\n" f"{result.stdout}\n{result.stderr}"
+    )
+    assert "idle timeout" not in result.stderr, result.stderr
