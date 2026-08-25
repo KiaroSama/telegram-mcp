@@ -33,6 +33,7 @@ from telegram_mcp.visual.bounded_process import (
     ProcessError,
     run_bounded,
 )
+from telegram_mcp.visual.images import MAX_DECODED_PIXELS
 
 FFPROBE_TIMEOUT_SECONDS = 15
 FFMPEG_FRAME_TIMEOUT_SECONDS = 30
@@ -156,6 +157,22 @@ def _safe_stderr(stderr: Optional[bytes], path: str = "", limit: int = 300) -> s
     return text if len(text) <= limit else text[:limit] + "…"
 
 
+_PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def _png_size(data: bytes) -> tuple[Optional[int], Optional[int]]:
+    """``(width, height)`` from a PNG's IHDR, without decoding a single pixel.
+
+    The frame metadata has always carried the dimensions; they used to come from
+    a second full decode-and-re-encode pass in the preview layer, which is the
+    unbounded in-process Pillow work this whole change is removing. IHDR is the
+    first chunk by specification, so 24 bytes answer the same question for free.
+    """
+    if len(data) < 24 or not data.startswith(_PNG_SIGNATURE) or data[12:16] != b"IHDR":
+        return None, None
+    return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+
+
 def _emitted_side(max_side: Optional[int]) -> int:
     """The largest side a decoder should emit for this request.
 
@@ -185,18 +202,39 @@ class _Budget:
     memory: ten frames that each decode quickly at 50 megapixels are within every
     timeout and still hold ~1.5 GB of PNG in a list before anything downstream
     gets a chance to shrink them.
+
+    ``allowance`` is that ceiling, and it is a parameter rather than a constant
+    because a call covering ten documents has to divide one pool between them.
+    Left out it is the per-request maximum, which is what a single-document call
+    is entitled to.
     """
 
-    __slots__ = ("deadline", "cancelled", "emitted")
+    __slots__ = ("allowance", "deadline", "cancelled", "emitted")
 
-    def __init__(self, deadline: float, cancelled: Optional[threading.Event] = None) -> None:
+    def __init__(
+        self,
+        deadline: float,
+        cancelled: Optional[threading.Event] = None,
+        allowance: Optional[int] = None,
+    ) -> None:
         self.deadline = deadline
         self.cancelled = cancelled
         self.emitted = 0
+        self.allowance = min(
+            MAX_TOTAL_FRAME_BYTES, MAX_TOTAL_FRAME_BYTES if allowance is None else int(allowance)
+        )
 
     @classmethod
-    def for_request(cls, cancelled: Optional[threading.Event] = None) -> "_Budget":
-        return cls(time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS, cancelled)
+    def for_request(
+        cls,
+        cancelled: Optional[threading.Event] = None,
+        allowance: Optional[int] = None,
+    ) -> "_Budget":
+        return cls(time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS, cancelled, allowance)
+
+    @property
+    def remaining_bytes(self) -> int:
+        return max(0, self.allowance - self.emitted)
 
     def check(self, done: int, total: int) -> None:
         """Stop between frames when the caller left or the request ran out of time.
@@ -217,12 +255,12 @@ class _Budget:
             )
 
     def charge(self, data: bytes) -> None:
-        """Account for one emitted frame, refusing once the request total is reached."""
+        """Account for one emitted frame, refusing once the allowance is reached."""
         self.emitted += len(data)
-        if self.emitted > MAX_TOTAL_FRAME_BYTES:
+        if self.emitted > self.allowance:
             raise FrameExtractionError(
                 f"Decoded frames total {self.emitted} bytes, above the "
-                f"{MAX_TOTAL_FRAME_BYTES}-byte budget for one request. Ask for fewer frames, "
+                f"{self.allowance}-byte budget for one request. Ask for fewer frames, "
                 "or a smaller max_dimension."
             )
 
@@ -341,88 +379,154 @@ def probe_duration(path: str) -> Optional[float]:
     return _probe(path)[0]
 
 
+# Covers interpreter startup, Pillow's import and every requested frame in one
+# child, so it is a whole-decode ceiling rather than a per-frame one. The request
+# budget still caps it from above via _run's deadline.
+PILLOW_DECODE_TIMEOUT_SECONDS = 45
+
+# Mirrors pillow_worker's exit codes. Duplicated rather than imported so the
+# parent never has to load the worker module to read its own child's result.
+PILLOW_EXIT_MISMATCH = 3
+PILLOW_EXIT_REFUSED = 4
+
+
+def _pillow_worker_command(job: str, arguments: list) -> list[str]:
+    """argv for one pillow_worker run.
+
+    ``-m`` rather than a path so the child resolves ``telegram_mcp`` the same way
+    the parent did, whether this is an installed package or a source checkout.
+    Its own function because a test has to be able to substitute a child that
+    never returns; that is the behaviour under test, and it cannot be provoked
+    with a real decoder.
+    """
+    return [sys.executable, "-m", "telegram_mcp.visual.pillow_worker", job, *arguments]
+
+
+def _pillow_limits_or_raise(source) -> int:
+    """The two refusals that must happen on the declared size, before decoding.
+
+    Kept in the parent as well as the worker so the rule has one statement a test
+    can reach without spawning anything. ``Image.open`` reads the header only, so
+    these numbers are available before the allocation they are guarding against.
+    """
+    width, height = source.size
+    if width * height > MAX_DECODED_PIXELS:
+        raise FrameExtractionError(
+            f"Animation frames are {width}x{height} ({width * height} pixels), above "
+            f"the {MAX_DECODED_PIXELS}-pixel decode limit; refusing to decode it. "
+            "Use get_media_thumbnail for a static preview."
+        )
+    total = getattr(source, "n_frames", 1)
+    if total > MAX_ANIMATION_FRAMES:
+        raise FrameExtractionError(
+            f"Animation declares {total} frames, above the {MAX_ANIMATION_FRAMES} limit; "
+            "refusing to decode it. Use get_media_thumbnail for a static preview."
+        )
+    return total
+
+
+def _pillow_reply(result, path: str, expect: str) -> list[tuple[bytes, dict[str, Any]]]:
+    """Split the worker's header-plus-payload reply into ``(bytes, metadata)``."""
+    if result.returncode == PILLOW_EXIT_MISMATCH:
+        # Only "Pillow cannot read this format" is worth a second decoder. A
+        # policy refusal is a decision about the content and a final answer.
+        raise DecoderMismatch(
+            _safe_stderr(result.stderr, path) or f"Pillow could not read this {expect}."
+        )
+    if result.returncode != 0:
+        raise FrameExtractionError(
+            _safe_stderr(result.stderr, path)
+            or f"Pillow failed while decoding this {expect} (exit {result.returncode})."
+        )
+
+    header_line, _, payload = (result.stdout or b"").partition(b"\n")
+    try:
+        header = json.loads(header_line or b"{}")
+        metas = list(header["metas"])
+        total = int(header["total"])
+    except (ValueError, TypeError, KeyError, json.JSONDecodeError):
+        raise FrameExtractionError("The image decoder returned a reply this build cannot read.")
+
+    decoded: list[tuple[bytes, dict[str, Any]]] = []
+    offset = 0
+    for meta in metas:
+        size = int(meta.get("bytes") or 0)
+        chunk = payload[offset : offset + size]
+        if len(chunk) != size:
+            raise FrameExtractionError(
+                f"The image decoder returned {len(payload)} bytes for {len(metas)} image(s); "
+                "the decode was cut short."
+            )
+        offset += size
+        meta.setdefault("frame_count", total)
+        decoded.append((chunk, meta))
+    if not decoded:
+        raise FrameExtractionError(f"Pillow decoded nothing from this {expect}.")
+    return decoded
+
+
 def _frames_with_pillow(
     path: str,
     count: int,
     budget: Optional["_Budget"] = None,
     max_side: Optional[int] = None,
 ) -> list[tuple[bytes, dict[str, Any]]]:
-    """Evenly spaced frames from an animated GIF/WebP/APNG using Pillow."""
+    """Evenly spaced frames of an animation, decoded in a process that can be killed.
+
+    Pillow used to run here, on the caller's worker thread. Checking the budget
+    between frames was the finest granularity available and it was not enough:
+    ``ImageSequence.Iterator`` DECODES every frame it walks past, and one native
+    decode that does not return never reaches the next boundary - so a single
+    frame held the request past every deadline with the cancellation flag unread,
+    and Python has no way to stop a thread from outside.
+
+    The animation arrives from the wire, and the suffix comes from the sender's
+    mime_type, so the sender chooses this decoder. Same conclusion as .tgs: run it
+    where a hang is a PID.
+    """
     budget = budget or _Budget.for_request()
     side = _emitted_side(max_side)
-    from PIL import Image, ImageSequence
+    result = _run(
+        _pillow_worker_command(
+            "frames",
+            [path, str(count), str(side), str(budget.remaining_bytes), str(MAX_ANIMATION_FRAMES)],
+        ),
+        timeout=PILLOW_DECODE_TIMEOUT_SECONDS,
+        deadline=budget.deadline,
+        cancelled=budget.cancelled,
+    )
+    decoded = _pillow_reply(result, path, "animation")
+    for data, _meta in decoded:
+        budget.charge(data)
+    return decoded
 
-    from telegram_mcp.visual.images import MAX_DECODED_PIXELS, ImageError, encode_image
 
-    try:
-        source = Image.open(path)
-    except Exception as error:
-        # UnidentifiedImageError and friends are neither FrameExtractionError nor
-        # ImageError, so without this they escape every handler in the tool layer
-        # and surface as an opaque internal error.
-        raise DecoderMismatch(f"Pillow could not decode this media: {type(error).__name__}.")
+def still_with_pillow(
+    path: str,
+    budget: Optional["_Budget"] = None,
+    max_side: Optional[int] = None,
+    image_format: str = "png",
+) -> tuple[bytes, dict[str, Any]]:
+    """One still image, decoded and re-encoded in a process that can be killed.
 
-    with source:
-        # Frame COUNT was bounded below; frame SIZE was not, and this path opens
-        # the file directly rather than through open_image_bytes, so its
-        # MAX_DECODED_PIXELS ceiling never applied here. A 20000x20000 animated
-        # WebP therefore decoded at 400 megapixels per frame.
-        width, height = source.size
-        if width * height > MAX_DECODED_PIXELS:
-            raise FrameExtractionError(
-                f"Animation frames are {width}x{height} ({width * height} pixels), above "
-                f"the {MAX_DECODED_PIXELS}-pixel decode limit; refusing to decode it. "
-                "Use get_media_thumbnail for a static preview."
-            )
-        total = getattr(source, "n_frames", 1)
-        if total > MAX_ANIMATION_FRAMES:
-            raise FrameExtractionError(
-                f"Animation declares {total} frames, above the {MAX_ANIMATION_FRAMES} limit; "
-                "refusing to decode it. Use get_media_thumbnail for a static preview."
-            )
-        if total <= 1:
-            raise FrameExtractionError("File is not animated; a single frame is all there is.")
-        wanted = min(count, total)
-        indexes = (
-            sorted({round(i * (total - 1) / max(1, wanted - 1)) for i in range(wanted)})
-            if wanted > 1
-            else [0]
-        )
-
-        frames: list[tuple[bytes, dict[str, Any]]] = []
-        try:
-            for index, frame in enumerate(ImageSequence.Iterator(source)):
-                # Checked before the skip, not after. ImageSequence.Iterator
-                # DECODES every frame it walks past, so selecting 10 of 3000 still
-                # costs 3000 decodes - and the check used to run only on the 10
-                # that were kept. A cancelled caller waited out the other 2990.
-                budget.check(len(frames), wanted)
-                if index not in indexes:
-                    continue
-                data, meta = encode_image(
-                    frame.convert("RGB"), image_format="png", max_dimension=side
-                )
-                budget.charge(data)
-                meta.update({"frame_index": index, "frame_count": total, "source": "pillow"})
-                frames.append((data, meta))
-                if len(frames) >= wanted:
-                    break
-        except (FrameExtractionError, ImageError):
-            raise
-        except Exception as error:
-            # A truncated animation opens cleanly and fails while decoding a LATER
-            # frame, so wrapping only Image.open was not enough: a raw OSError
-            # ("image file is truncated") and, at another truncation point, a bare
-            # SyntaxError from Pillow's PNG plugin both escaped every handler in
-            # the tool layer. Both are reachable from the wire — the suffix comes
-            # from the sender's mime_type, so the sender picks the decoder.
-            raise FrameExtractionError(
-                f"Pillow failed after {len(frames)} frame(s) while decoding this animation: "
-                f"{type(error).__name__}. The file is most likely truncated or corrupt."
-            )
-    if not frames:
-        raise FrameExtractionError("Pillow decoded no frames from the animation.")
-    return frames
+    The same argument as the animated path, and it applied here first: a still
+    ran under ``asyncio.to_thread`` with no deadline and no way to terminate it,
+    so a decoder that did not return held a thread for the life of the process.
+    """
+    budget = budget or _Budget.for_request()
+    side = _emitted_side(max_side)
+    result = _run(
+        _pillow_worker_command(
+            "still", [path, str(side), image_format, str(budget.remaining_bytes)]
+        ),
+        timeout=PILLOW_DECODE_TIMEOUT_SECONDS,
+        deadline=budget.deadline,
+        cancelled=budget.cancelled,
+    )
+    data, meta = _pillow_reply(result, path, "image")[0]
+    budget.charge(data)
+    meta.pop("frame_count", None)
+    return data, meta
 
 
 def lottie_available() -> bool:
@@ -666,6 +770,7 @@ def _frames_with_ffmpeg(
                 first_error = result.stderr
             continue
         budget.charge(result.stdout)
+        width, height = _png_size(result.stdout)
         frames.append(
             (
                 result.stdout,
@@ -675,6 +780,9 @@ def _frames_with_ffmpeg(
                     "format": "png",
                     "mime_type": "image/png",
                     "source": "ffmpeg",
+                    "width": width,
+                    "height": height,
+                    "bytes": len(result.stdout),
                 },
             )
         )
@@ -687,6 +795,37 @@ def _frames_with_ffmpeg(
     return frames
 
 
+# How long to keep trying to delete a spooled file. On Windows a just-killed
+# child can still hold the handle for a moment, and os.unlink fails with
+# ERROR_SHARING_VIOLATION rather than waiting - so a single attempt swallowed by
+# `except OSError` left the file behind on exactly the paths (timeout,
+# cancellation) where cleanup matters most.
+_UNSPOOL_SECONDS = 5.0
+_UNSPOOL_POLL_SECONDS = 0.05
+
+
+def _spool(data: bytes, suffix: str) -> str:
+    """Write ``data`` where a decoder subprocess can open it by name."""
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+        handle.write(data)
+        return handle.name
+
+
+def _unspool(path: str) -> None:
+    """Delete a spooled file, retrying briefly while a dying child still holds it."""
+    deadline = time.monotonic() + _UNSPOOL_SECONDS
+    while True:
+        try:
+            os.unlink(path)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(_UNSPOOL_POLL_SECONDS)
+
+
 def extract_frames(
     data: bytes,
     suffix: str,
@@ -694,6 +833,7 @@ def extract_frames(
     cancelled: Optional[threading.Event] = None,
     deadline: Optional[float] = None,
     max_side: Optional[int] = None,
+    allowance: Optional[int] = None,
 ) -> list[tuple[bytes, dict[str, Any]]]:
     """Extract up to ``count`` representative frames from in-memory media bytes.
 
@@ -710,6 +850,9 @@ def extract_frames(
         max_side: The longest side the caller will actually keep. Decoding larger
             and shrinking afterwards is work and memory spent on pixels that are
             discarded, so this lowers the cost rather than only the output.
+        allowance: Bytes of decoded output this call may produce. A call covering
+            several documents divides one pool between them, so the ceiling has to
+            arrive from above rather than be assumed to be the per-request maximum.
 
     Returns:
         A list of ``(png_bytes, metadata)`` tuples.
@@ -731,12 +874,12 @@ def extract_frames(
     # and two decoders each starting their own clock gave that one request twice
     # the budget it is allowed.
     budget = (
-        _Budget(deadline, cancelled) if deadline is not None else _Budget.for_request(cancelled)
+        _Budget(deadline, cancelled, allowance)
+        if deadline is not None
+        else _Budget.for_request(cancelled, allowance)
     )
 
-    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-        handle.write(data)
-        path = handle.name
+    path = _spool(data, suffix)
     try:
         if suffix == ".tgs":
             return _frames_with_lottie(path, count, budget, max_side)
@@ -752,7 +895,33 @@ def extract_frames(
                     raise
         return _frames_with_ffmpeg(path, count, budget, max_side)
     finally:
-        try:
-            os.unlink(path)
-        except OSError:
-            pass
+        _unspool(path)
+
+
+def extract_still(
+    data: bytes,
+    cancelled: Optional[threading.Event] = None,
+    deadline: Optional[float] = None,
+    max_side: Optional[int] = None,
+    allowance: Optional[int] = None,
+    image_format: str = "png",
+) -> tuple[bytes, dict[str, Any]]:
+    """One still image from in-memory bytes, decoded where a hang can be killed.
+
+    The still path is the one that had no bound at all: ``open_image_bytes`` and
+    ``encode_image`` ran under ``asyncio.to_thread``, so a decoder that did not
+    return held a worker thread for the life of the process with no deadline, no
+    cancellation and nothing able to stop it.
+    """
+    budget = (
+        _Budget(deadline, cancelled, allowance)
+        if deadline is not None
+        else _Budget.for_request(cancelled, allowance)
+    )
+    # The suffix is only a hint to Pillow, which sniffs the content anyway; a
+    # fixed one keeps sender-controlled text out of a real filename.
+    path = _spool(data, ".img")
+    try:
+        return still_with_pillow(path, budget, max_side, image_format)
+    finally:
+        _unspool(path)

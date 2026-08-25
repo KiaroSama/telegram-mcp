@@ -751,22 +751,16 @@ def test_an_oversized_animation_is_refused_before_any_frame_is_decoded(tmp_path,
     MAX_DECODED_PIXELS ceiling never applied here and a 20000x20000 animated WebP
     decoded at 400 megapixels per frame."""
 
-    class _HugeAnimation:
-        size = (20000, 20000)
-        n_frames = 10
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
-    # frames.py imports PIL inside the function, so the patch has to land on the
-    # real module rather than on a module-level name that does not exist.
-    monkeypatch.setattr("PIL.Image.open", lambda path: _HugeAnimation())
+    # A real file, because the decode now runs in a child process where a patched
+    # PIL.Image.open in this interpreter would not exist. 177 bytes on disk that
+    # DECLARE 100 megapixels is exactly the shape of the attack: the logical
+    # screen descriptor is four bytes and nothing validates it against the frames.
+    data = bytearray(_animated_gif(3))
+    data[6:10] = (10000).to_bytes(2, "little") + (10000).to_bytes(2, "little")
+    assert len(data) < 4096, "the point is that the file is tiny"
 
     with pytest.raises(frames.FrameExtractionError, match="pixel decode limit"):
-        frames._frames_with_pillow("ignored.webp", count=2)
+        extract_frames(bytes(data), ".gif", count=2)
 
 
 def test_the_ffmpeg_command_scales_before_it_encodes_a_png():

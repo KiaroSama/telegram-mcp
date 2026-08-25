@@ -34,7 +34,11 @@ from typing import Any, Optional, Union
 
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
-from telegram_mcp.media_preview import encode_frames_cancellable, _encode_one, _media_suffix
+from telegram_mcp.media_preview import (
+    encode_frames_cancellable,
+    encode_still_cancellable,
+    _media_suffix,
+)
 from telegram_mcp.handles import NAME_ATTEMPTS
 from telegram_mcp.media_transfer import MAX_FRAME_SOURCE_BYTES, _download_capped
 from telegram_mcp.message_view import describe_media, display_name, display_text
@@ -523,7 +527,7 @@ async def save_disappearing_media(
         if preview and kind not in ("voice", "audio"):
             try:
                 if kind == "photo":
-                    metas, images = await asyncio.to_thread(_encode_one, data, max_dimension)
+                    metas, images = await encode_still_cancellable(data, max_dimension)
                 else:
                     metas, images = await encode_frames_cancellable(
                         data, _media_suffix(details), count, max_dimension

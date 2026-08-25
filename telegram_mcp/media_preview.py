@@ -40,11 +40,20 @@ from telegram_mcp.visual.frames import (
     DecodingCancelled,
     FrameExtractionError,
     extract_frames,
+    extract_still,
     lottie_available,
 )
-from telegram_mcp.visual.images import ImageError, encode_image, open_image_bytes
+from telegram_mcp.visual.images import (  # noqa: F401
+    ImageError,
+    bounded_dimension,
+    encode_image,
+    open_image_bytes,
+)
 
 from mcp.server.fastmcp import Image
+
+# One item's own share of the clock, when it is not running under a call ledger.
+PER_ITEM_SECONDS = FFMPEG_REQUEST_BUDGET_SECONDS
 
 # Fallbacks for media whose Telethon-reported extension is empty; ``mimetypes``
 # does not know Telegram's own sticker types.
@@ -69,9 +78,30 @@ def _media_suffix(details: dict) -> str:
     return _MIME_SUFFIXES.get((details.get("mime_type") or "").lower(), ".bin")
 
 
-def _encode_one(raw: bytes, max_dimension: int) -> tuple:
-    """One still image as ``([metadata], [Image])``. Blocking: call in a thread."""
-    png, meta = encode_image(open_image_bytes(raw), max_dimension=max_dimension)
+def _encode_one(
+    raw: bytes,
+    max_dimension: int,
+    cancelled: Optional[threading.Event] = None,
+    deadline: Optional[float] = None,
+    allowance: Optional[int] = None,
+) -> tuple:
+    """One still image as ``([metadata], [Image])``. Blocking: call in a thread.
+
+    The decode itself is a child process now (``extract_still``). It used to be
+    ``open_image_bytes`` + ``encode_image`` right here on the worker thread, with
+    no deadline and no way to terminate it - so a Pillow call that did not return
+    held the thread for the life of the server.
+    """
+    png, meta = extract_still(
+        raw,
+        cancelled=cancelled,
+        deadline=deadline if deadline is not None else time.monotonic() + PER_ITEM_SECONDS,
+        # Clamped here rather than after the decode. The decoder emits at this
+        # size, so an unclamped value would come back larger than anything this
+        # server is allowed to return and there is no second pass to shrink it.
+        max_side=bounded_dimension(max_dimension),
+        allowance=allowance,
+    )
     return [meta], [Image(data=png, format="png")]
 
 
@@ -81,18 +111,31 @@ def _encode_frames(
     count: int,
     max_dimension: int,
     cancelled: Optional[threading.Event] = None,
+    deadline: Optional[float] = None,
+    allowance: Optional[int] = None,
 ) -> tuple:
     """Frames of an animation as ``([metadata], [Image])``. Blocking: call in a thread.
 
-    One clock covers decoding AND this re-encode. Passing the deadline in rather
-    than letting ``extract_frames`` start its own is what keeps that true: a decode
-    that spends the whole budget must not then hand back ten frames to resize on a
-    fresh one, and a caller who stopped waiting should not be resized for either.
+    One clock covers decoding AND this re-encode, and ``deadline`` now arrives
+    from the call rather than being started here: a decode that spends the whole
+    budget must not then hand back ten frames to resize on a fresh one, a caller
+    who stopped waiting should not be resized for either, and ten documents must
+    not each get their own copy of the request budget.
+
+    The frames come back already encoded at ``max_dimension`` from the decoder's
+    own child process, so nothing is re-decoded here.
     """
-    deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
+    if deadline is None:
+        deadline = time.monotonic() + FFMPEG_REQUEST_BUDGET_SECONDS
     metas, images = [], []
     for png, meta in extract_frames(
-        raw, suffix, count, cancelled, deadline=deadline, max_side=max_dimension
+        raw,
+        suffix,
+        count,
+        cancelled,
+        deadline=deadline,
+        max_side=bounded_dimension(max_dimension),
+        allowance=allowance,
     ):
         if cancelled is not None and cancelled.is_set():
             raise DecodingCancelled(
@@ -100,12 +143,11 @@ def _encode_frames(
             )
         if time.monotonic() > deadline:
             raise FrameExtractionError(
-                f"Preview passed its {FFMPEG_REQUEST_BUDGET_SECONDS}s budget while encoding "
-                f"frame {len(images) + 1}. Ask for fewer frames, or a smaller max_dimension."
+                f"Preview passed its budget while collecting frame {len(images) + 1}. "
+                "Ask for fewer frames, or a smaller max_dimension."
             )
-        encoded, encoded_meta = encode_image(open_image_bytes(png), max_dimension=max_dimension)
-        metas.append({**meta, **encoded_meta})
-        images.append(Image(data=encoded, format="png"))
+        metas.append(meta)
+        images.append(Image(data=png, format="png"))
     return metas, images
 
 
@@ -117,30 +159,108 @@ def _encode_frames(
 # ceiling was not a ceiling on the call.
 MAX_CALL_PREVIEW_BYTES = 128 * 1024 * 1024
 
+# And the same for time. Every decode is bounded, and every document used to get
+# its own FFMPEG_REQUEST_BUDGET_SECONDS, so a ten-document call could spend ten
+# of them - each stage inside its bound and the call inside none. This is the
+# clock the whole call shares; three minutes covers ten documents comfortably
+# while still ending a call that has stopped being worth waiting for.
+MAX_CALL_PREVIEW_SECONDS = 180.0
+
+
+class Reservation:
+    """One document's share of the call, taken before its decode starts.
+
+    ``allowance`` is handed down into the decoder as its own byte ceiling, which
+    is what makes the reservation binding rather than advisory: the work cannot
+    produce more than was set aside for it, so the sum over a batch is the pool.
+    """
+
+    __slots__ = ("allowance", "_ledger", "_settled")
+
+    def __init__(self, ledger: "PreviewLedger", allowance: int) -> None:
+        self.allowance = allowance
+        self._ledger = ledger
+        self._settled = False
+
+    def settle(self, produced: int) -> None:
+        """Book what was really produced and return the rest of the share."""
+        if self._settled:
+            return
+        self._settled = True
+        self._ledger._release(self.allowance, produced)
+        if produced > self.allowance:
+            raise FrameExtractionError(
+                f"This document produced {produced} bytes of preview, above the "
+                f"{self.allowance}-byte share of this call's budget. Ask for fewer items, "
+                "fewer frames, or a smaller max_dimension."
+            )
+
 
 class PreviewLedger:
     """A decoded-output allowance shared by everything in one call.
 
-    Deliberately not a lock or a queue: the batch already limits how many
-    downloads run at once, and this only has to stop the TOTAL handed back from
-    growing with the batch size. Charged after each document, so the document
-    that crosses the line is refused and the ones already done are kept.
+    Charged AFTER each document, which is what made it not a budget. The tool runs
+    its documents through ``asyncio.gather``, so with a batch every document
+    produced its bytes before any of them was accounted for, and the ceiling only
+    described what had already been allocated. Reproduced against that version:
+    two 8-byte outputs against a 10-byte ceiling ended at 16.
+
+    So a share is taken up front and the decoder is given it as its own ceiling.
+    ``shares`` is how many documents the call covers: with one document the pool
+    is the pool, and with ten each gets a tenth, which is the honest answer when
+    all ten start before any finishes. What a document does not spend goes back,
+    so anything that starts later can still use it.
+
+    Still not a lock or a queue - the batch already limits how many downloads run
+    at once, and this only has to bound the TOTAL handed back. The arithmetic runs
+    on the event loop thread, where there is no interleaving to protect against.
     """
 
-    __slots__ = ("total", "spent")
+    __slots__ = ("deadline", "reserved", "shares", "spent", "total")
 
-    def __init__(self, total: int = MAX_CALL_PREVIEW_BYTES) -> None:
+    def __init__(
+        self,
+        shares: int = 1,
+        total: int = MAX_CALL_PREVIEW_BYTES,
+        deadline: Optional[float] = None,
+    ) -> None:
         self.total = total
+        self.shares = max(1, int(shares))
         self.spent = 0
+        self.reserved = 0
+        # One clock for the whole call, not one per document. Ten documents each
+        # inside their own FFMPEG_REQUEST_BUDGET_SECONDS is ten times the budget,
+        # and nothing upstream sees it.
+        self.deadline = (
+            deadline if deadline is not None else time.monotonic() + MAX_CALL_PREVIEW_SECONDS
+        )
 
-    def charge(self, produced: int) -> None:
-        self.spent += produced
-        if self.spent > self.total:
+    @property
+    def available(self) -> int:
+        return max(0, self.total - self.spent - self.reserved)
+
+    def reserve(self) -> Reservation:
+        """Set aside this document's share before any work begins."""
+        allowance = min(max(1, self.total // self.shares), self.available)
+        if allowance <= 0:
             raise FrameExtractionError(
-                f"This call has produced {self.spent} bytes of preview, above the "
-                f"{self.total}-byte budget for one request. Ask for fewer items, "
-                "fewer frames, or a smaller max_dimension."
+                f"This call has already committed its {self.total}-byte preview budget. "
+                "Ask for fewer items, fewer frames, or a smaller max_dimension."
             )
+        self.reserved += allowance
+        return Reservation(self, allowance)
+
+    def check_deadline(self) -> None:
+        """Refuse before starting work the call no longer has time for."""
+        if time.monotonic() > self.deadline:
+            raise FrameExtractionError(
+                f"This call passed its {MAX_CALL_PREVIEW_SECONDS}s preview budget before this "
+                "item started. Ask for fewer items, fewer frames, or a smaller max_dimension."
+            )
+
+    def _release(self, allowance: int, produced: int) -> None:
+        self.reserved = max(0, self.reserved - allowance)
+        self.spent += min(produced, allowance)
 
 
 # How long a cancelled decode is given to unwind before the caller stops waiting
@@ -180,31 +300,93 @@ async def encode_frames_cancellable(
     Every caller goes through here rather than reaching for ``asyncio.to_thread``
     itself, so this exists once instead of at six call sites each free to forget it.
     """
+    return await _off_loop(_encode_frames, (raw, suffix, count, max_dimension), ledger)
+
+
+async def encode_still_cancellable(
+    raw: bytes,
+    max_dimension: int,
+    ledger: Optional["PreviewLedger"] = None,
+) -> tuple:
+    """Decode and encode ONE still off the event loop, cancellably and on budget.
+
+    The still path used to be a bare ``asyncio.to_thread(_encode_one, ...)`` at
+    four call sites, which is the same thread with none of the protections: no
+    deadline, no cancellation reaching the decoder, and no share of the call's
+    byte budget. Routing it through the same helper as the animated path is what
+    stops that being four places free to forget it.
+    """
+    return await _off_loop(_encode_one, (raw, max_dimension), ledger)
+
+
+async def _off_loop(work, arguments: tuple, ledger: Optional["PreviewLedger"]) -> tuple:
+    """Run one blocking decode on a worker thread, under the call's budget.
+
+    ``asyncio.to_thread`` alone is not enough. Cancelling the awaiting coroutine
+    raises in the caller and frees it, but the worker thread keeps running: Python
+    cannot stop a thread from outside, and a ``concurrent.futures`` job that has
+    already started cannot be cancelled either.
+
+    The event is how the thread gets told. What it can now promise, and could not
+    before, is that being told is enough: every decode below is a child process
+    bounded by ``run_bounded``, which sees the flag within one poll and kills the
+    child. So the drain is a real wait for the worker to be finished rather than a
+    best-effort five seconds after which it was abandoned - "cancelled" used to
+    mean "asked to stop", and anything that then counted processes or cleaned a
+    directory raced a worker still using them.
+
+    The share is taken BEFORE the work starts. Charging afterwards is what let a
+    parallel batch produce everything first and account for it second.
+    """
+    reservation = None
+    if ledger is not None:
+        ledger.check_deadline()
+        reservation = ledger.reserve()
+
     cancelled = threading.Event()
     loop = asyncio.get_running_loop()
     # run_in_executor rather than to_thread: the future has to outlive the await,
     # so that cancelling the await does not throw away the handle on the worker.
     worker = loop.run_in_executor(
-        None, _encode_frames, raw, suffix, count, max_dimension, cancelled
+        None,
+        work,
+        *arguments,
+        cancelled,
+        ledger.deadline if ledger is not None else None,
+        reservation.allowance if reservation is not None else None,
     )
     try:
         metas, images = await asyncio.shield(worker)
-        if ledger is not None:
-            ledger.charge(sum(len(image.data) for image in images))
-        return metas, images
     except asyncio.CancelledError:
         cancelled.set()
         await _drain(worker)
+        if reservation is not None:
+            reservation.settle(0)
         raise
+    except BaseException:
+        if reservation is not None:
+            reservation.settle(0)
+        raise
+    if reservation is not None:
+        reservation.settle(sum(len(image.data) for image in images))
+    return metas, images
 
 
 async def _drain(worker) -> None:
-    """Wait, briefly, for a cancelled worker to finish unwinding.
+    """Wait for a cancelled worker to finish unwinding, and say so if it does not.
 
     Every await in a cancelled task raises ``CancelledError`` immediately, so the
     wait cannot be an await on the worker itself. A callback plus a plain
     ``threading.Event`` is not subject to that: the loop keeps running, and this
-    returns as soon as the worker really is done - or when the budget expires.
+    returns as soon as the worker really is done.
+
+    The bound is generous rather than tight because it is no longer load-bearing:
+    the decode is a child process that ``run_bounded`` kills within a poll of the
+    flag being set, so the worker's remaining work is unwinding, not decoding. A
+    worker that outlasts even this is a bug worth a log line, not something to
+    pass over in silence - but the wait is still finite, because a drain that
+    could block for ever would hand a wedged decoder the power to hold up the
+    canceller too, which is the failure being cancelled in the first place.
     """
     finished = threading.Event()
     worker.add_done_callback(lambda _future: finished.set())
@@ -213,6 +395,18 @@ async def _drain(worker) -> None:
         # Yields to the loop without awaiting anything cancellable.
         await asyncio.sleep(0)
         finished.wait(0.02)
+    if not finished.is_set():
+        log_event(
+            logging.WARNING,
+            "preview-worker-outlived-cancellation",
+            seconds=CANCEL_DRAIN_SECONDS,
+        )
+        return
+    # Read the result nobody is going to look at. The worker ends in
+    # DecodingCancelled - that is the cancellation working - and an unretrieved
+    # future exception makes asyncio log it at ERROR on every cancelled preview,
+    # which turns correct behaviour into an alarm in the operator's log.
+    worker.exception()
 
 
 async def _premium_effect_frames(
@@ -436,10 +630,9 @@ async def _custom_emoji_preview(
                 raw, suffix, count, max_dimension, ledger
             )
         else:
-            record["preview"], images = await asyncio.to_thread(_encode_one, raw, max_dimension)
-            if ledger is not None:
-                # A still costs the call too - ten large stickers add up the same way.
-                ledger.charge(sum(len(image.data) for image in images))
+            # A still costs the call too - ten large stickers add up the same way,
+            # and its share is reserved before the decode starts.
+            record["preview"], images = await encode_still_cancellable(raw, max_dimension, ledger)
         record["preview_source"] = (
             "rlottie" if render_lottie else "thumbnail" if thumb_only else "document"
         )

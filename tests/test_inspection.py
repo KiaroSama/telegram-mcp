@@ -9,9 +9,12 @@ answer). The bounded-transfer helpers they call live in
 ``test_inspection_transfer.py``.
 """
 
+import threading
 from types import SimpleNamespace
 
 import pytest
+
+from telegram_mcp import media_preview
 
 from helpers_inspection import _CountingClient, _Iter, _MEDIUM, _photo_with
 from telegram_mcp.tools.inspection import _chat_names, _title_matches_chat
@@ -218,7 +221,7 @@ async def test_premium_effect_frames_are_labelled_as_asset_only():
             ), "the effect asset was not requested"
             return _Iter([bytes([0x1F, 0x8B]) + b"lottie-payload"], [])
 
-    def _fake_frames(raw, suffix, count, max_dimension, cancelled=None):
+    def _fake_frames(raw, suffix, count, max_dimension, *_bounds):
         # Verified against live Telegram data: the type="f" asset is a gzipped
         # Lottie, so asserting .webm here is what locked the bug in.
         assert suffix == ".tgs", f"the effect was decoded as {suffix}, not Lottie"
@@ -371,7 +374,7 @@ async def test_an_effect_at_exactly_the_limit_is_accepted():
 
     client = _EffectClient(payload=b"x" * 1000)
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    def _fake(raw, suffix, count, max_dimension, *_bounds):
         return [{"frame_index": 0}], ["image"]
 
     original = media_preview._encode_frames
@@ -417,7 +420,7 @@ async def test_a_gzipped_effect_asset_is_decoded_as_lottie():
 
     seen = {}
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    def _fake(raw, suffix, count, max_dimension, *_bounds):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 
@@ -449,7 +452,7 @@ async def test_a_non_gzip_effect_asset_still_falls_back_to_video():
 
     seen = {}
 
-    def _fake(raw, suffix, count, max_dimension, cancelled=None):
+    def _fake(raw, suffix, count, max_dimension, *_bounds):
         seen["suffix"] = suffix
         return [{"frame_index": 0}], ["image"]
 
@@ -491,10 +494,9 @@ async def test_custom_emoji_refuses_a_document_over_the_cap(monkeypatch):
     from telegram_mcp.tools import inspection
     from telegram_mcp.tools.inspection import _custom_emoji_preview
 
-    async def _to_thread(fn, *args):
-        return [{"frame_index": 0}], ["image"]
-
-    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(
+        media_preview, "_encode_one", lambda *a, **k: ([{"frame_index": 0}], ["image"])
+    )
 
     client = _CountingClient(total=512)
     oversized = SimpleNamespace(id=1, mime_type="image/webp", size=10_000_000, attributes=[])
@@ -534,8 +536,15 @@ async def test_both_thumbnail_encodes_run_off_the_event_loop(monkeypatch):
 
     threaded = []
 
-    async def _to_thread(fn, *args):
-        threaded.append(fn.__name__)
+    def _encode_off_loop(*_args, **_kwargs):
+        # The name AND the thread: "off the event loop" is a claim about where
+        # this runs, so recording that it was not the main thread is the half
+        # that actually checks it.
+        threaded.append(
+            "_encode_one"
+            if threading.current_thread() is not threading.main_thread()
+            else "on the event loop"
+        )
         return [{"width": 1}], ["image"]
 
     photo = _photo_with([_MEDIUM])
@@ -544,7 +553,7 @@ async def test_both_thumbnail_encodes_run_off_the_event_loop(monkeypatch):
     async def _get_message(chat_id, message_id, account=None):
         return _CountingClient(total=512), SimpleNamespace(title="Chat"), msg
 
-    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(media_preview, "_encode_one", _encode_off_loop)
     monkeypatch.setattr(inspection, "_get_message", _get_message)
     monkeypatch.setattr(
         inspection, "describe_media", lambda m: {"kind": "photo", "has_thumbnail": True}
@@ -612,7 +621,7 @@ async def test_a_broken_thumbnail_does_not_discard_the_whole_message(monkeypatch
 
     from telegram_mcp.tools import inspection
 
-    async def _to_thread(fn, *args):
+    def _truncated(*_args, **_kwargs):
         raise OSError("image file is truncated")
 
     photo = _photo_with([_MEDIUM])
@@ -621,7 +630,7 @@ async def test_a_broken_thumbnail_does_not_discard_the_whole_message(monkeypatch
     async def _get_message(chat_id, message_id, account=None):
         return _CountingClient(total=512), SimpleNamespace(title="Chat"), msg
 
-    monkeypatch.setattr(inspection.asyncio, "to_thread", _to_thread)
+    monkeypatch.setattr(media_preview, "_encode_one", _truncated)
     monkeypatch.setattr(inspection, "_get_message", _get_message)
     monkeypatch.setattr(
         inspection, "describe_media", lambda m: {"kind": "photo", "has_thumbnail": True}

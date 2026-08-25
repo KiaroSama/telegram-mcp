@@ -246,23 +246,22 @@ class _GzipStaticAssetClient(_StaticAssetClient):
 def _records_encoder(monkeypatch):
     """Remember which encoder the tool chose for the payload it was handed.
 
-    Two seams now, not one: the single-image path is still dispatched through
-    `to_thread`, while frame extraction moved to run_in_executor so a cancelled
-    decode can be waited on. Watching only the old dispatcher recorded an empty
-    list for the frame path and the assertion read as 'treated as static' - a
-    wrong diagnosis of a decoder choice that was actually correct.
+    Both encoders are seams of the same kind now: each spawns a child process, so
+    each has to be intercepted by name. Watching only one recorded an empty list
+    for the other path and the assertion read as 'treated as static' - a wrong
+    diagnosis of a decoder choice that was actually correct.
     """
     used = []
 
-    async def _record_still(fn, *args):
-        used.append(fn.__name__)
+    def _record_still(*_args, **_kwargs):
+        used.append("_encode_one")
         return [{"frame_index": 0}], ["image"]
 
-    def _record_frames(raw, suffix, count, max_dimension, cancelled=None):
+    def _record_frames(*_args, **_kwargs):
         used.append("_encode_frames")
         return [{"frame_index": 0}], ["image"]
 
-    monkeypatch.setattr(effects_tool.asyncio, "to_thread", _record_still)
+    monkeypatch.setattr(media_preview, "_encode_one", _record_still)
     monkeypatch.setattr(media_preview, "_encode_frames", _record_frames)
     return used
 

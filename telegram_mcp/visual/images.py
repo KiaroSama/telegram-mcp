@@ -69,20 +69,34 @@ def open_image_bytes(data: bytes):
         raise ImageError(f"Could not decode image data ({len(data)} bytes): {error}") from error
 
 
+def bounded_dimension(max_dimension) -> int:
+    """The longest side a caller may actually ask for, clamped to what is usable.
+
+    Its own function because it is the ceiling on every image this server returns,
+    and the decoders now emit at it directly rather than emitting large and being
+    shrunk afterwards. Two statements of one rule is how they drift apart, and the
+    one that drifts upward is the one that costs the caller tokens.
+
+    A caller-supplied 0 or negative must not become "unlimited": that is how a
+    tool argument turns into a 4K screenshot and tens of thousands of tokens.
+    """
+    try:
+        wanted = int(max_dimension)
+    except (TypeError, ValueError):
+        wanted = MAX_IMAGE_DIMENSION
+    return max(MIN_IMAGE_DIMENSION, min(MAX_IMAGE_DIMENSION, wanted or MAX_IMAGE_DIMENSION))
+
+
 def fit_image(image, max_dimension: Optional[int] = MAX_IMAGE_DIMENSION):
     """Shrink ``image`` so its longest side is at most ``max_dimension``.
 
     Never upscales: a 96x96 thumbnail stays 96x96 rather than being blown up into
     a blurry, token-expensive rectangle.
     """
-    # A caller-supplied 0/negative must not become "unlimited": that is how a tool
-    # argument turns into a 4K screenshot and tens of thousands of tokens. Only an
-    # explicit None (internal callers) disables the cap.
+    # Only an explicit None (internal callers) disables the cap.
     if max_dimension is None:
         return image, False
-    max_dimension = max(
-        MIN_IMAGE_DIMENSION, min(MAX_IMAGE_DIMENSION, int(max_dimension) or MAX_IMAGE_DIMENSION)
-    )
+    max_dimension = bounded_dimension(max_dimension)
     longest = max(image.width, image.height)
     if longest <= max_dimension:
         return image, False

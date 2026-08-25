@@ -22,7 +22,10 @@ from telegram_mcp.media_transfer import (
     _download_thumb_capped,
     _stream_capped,
 )
-from telegram_mcp.media_preview import encode_frames_cancellable, _encode_one
+from telegram_mcp.media_preview import (
+    encode_frames_cancellable,
+    encode_still_cancellable,
+)
 from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
@@ -302,7 +305,7 @@ async def get_message_effect(
         # gzip check inside sniff_asset_format still wins, so a payload that is really
         # Lottie is never called static.
         if fmt == "static_image" and suffix != ".tgs":
-            records, images = await asyncio.to_thread(_encode_one, raw, max_dimension)
+            records, images = await encode_still_cancellable(raw, max_dimension)
         else:
             records, images = await encode_frames_cancellable(raw, suffix, count, max_dimension)
         for record in records:

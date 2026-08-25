@@ -126,19 +126,16 @@ def _isolated(monkeypatch):
     async def _no_connect(cl):
         return None
 
-    async def _to_thread(fn, *args):
-        return [{"frame_index": 0}], ["image"]
-
-    def _frames(raw, suffix, count, max_dimension, cancelled=None):
+    def _encoded(*_args, **_kwargs):
         return [{"frame_index": 0}], ["image"]
 
     monkeypatch.setattr(effects_tool, "ensure_connected", _no_connect)
-    # Both, because they are two different seams. `to_thread` still dispatches
-    # the single-image path; frame extraction moved to run_in_executor so that a
-    # cancelled decode can be waited on, and stubbing the old dispatcher stopped
-    # intercepting it - the real rlottie then ran on a fake payload.
-    monkeypatch.setattr(effects_tool.asyncio, "to_thread", _to_thread)
-    monkeypatch.setattr(media_preview, "_encode_frames", _frames)
+    # Both encoders, because both are real decoders now: the still path stopped
+    # being an `asyncio.to_thread` call and became a child process like the frame
+    # path, so stubbing the old dispatcher would let the real one loose on a fake
+    # payload.
+    monkeypatch.setattr(media_preview, "_encode_one", _encoded)
+    monkeypatch.setattr(media_preview, "_encode_frames", _encoded)
     yield
     effect_catalog._reset_catalog()
 

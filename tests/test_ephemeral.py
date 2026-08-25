@@ -13,7 +13,7 @@ import pytest
 
 from tests.helpers_handles import refuse_source, source_gate
 
-from telegram_mcp import file_roots
+from telegram_mcp import file_roots, media_preview
 from telegram_mcp.tools import ephemeral as mod
 from telegram_mcp.tools.ephemeral import (
     VIEW_ONCE,
@@ -87,10 +87,13 @@ def _wire(monkeypatch):
         monkeypatch.setattr(mod, "resolve_entity", _resolve)
         monkeypatch.setattr(mod, "describe_media", lambda m: {"kind": kind, "extension": ".jpg"})
 
-        async def _to_thread(fn, *args):
+        def _encode(*_args, **_kwargs):
             return encoded if encoded is not None else ([{"width": 10}], ["<image>"])
 
-        monkeypatch.setattr(mod.asyncio, "to_thread", _to_thread)
+        # The still decode is a child process behind the same off-loop helper as
+        # the frame path now, so the encoder is the seam rather than to_thread.
+        monkeypatch.setattr(media_preview, "_encode_one", _encode)
+        monkeypatch.setattr(media_preview, "_encode_frames", _encode)
 
         # Saving writes a real file, so the path gate is part of the unit under
         # test. Default here: no roots configured.

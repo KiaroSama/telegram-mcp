@@ -73,16 +73,16 @@ def test_frames_carry_both_the_extractor_s_metadata_and_the_encoder_s(monkeypatc
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [
-            (png, {"frame_index": 0}),
-            (png, {"frame_index": 1}),
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None: [
+            (png, {"frame_index": 0, "width": 8, "height": 8, "bytes": len(png)}),
+            (png, {"frame_index": 1, "width": 8, "height": 8, "bytes": len(png)}),
         ],
     )
 
     metas, images = media_preview._encode_frames(b"ignored", ".webp", count=2, max_dimension=64)
 
     assert [m["frame_index"] for m in metas] == [0, 1]
-    assert all("width" in m for m in metas), "the encoder's metadata was dropped"
+    assert all("width" in m for m in metas), "the decoder's metadata was dropped"
     assert len(images) == 2
 
 
@@ -90,7 +90,7 @@ def test_no_frames_extracted_yields_no_images_rather_than_an_error(monkeypatch):
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [],
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None: [],
     )
 
     metas, images = media_preview._encode_frames(b"", ".webp", count=4, max_dimension=64)
@@ -114,7 +114,9 @@ async def test_cancelling_the_caller_stops_the_decode(monkeypatch):
     running = threading.Event()
     noticed = threading.Event()
 
-    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+    def _slow_extract(
+        raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None
+    ):
         running.set()
         for _ in range(200):
             if cancelled is not None and cancelled.is_set():
@@ -144,7 +146,7 @@ async def test_a_decode_that_is_not_cancelled_gets_no_signal(monkeypatch):
     """The event must stay clear on the happy path, or every decode would abort."""
     seen = {}
 
-    def _extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+    def _extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None):
         seen["set"] = cancelled is not None and cancelled.is_set()
         return []
 
@@ -172,7 +174,9 @@ async def test_cancellation_waits_for_the_worker_to_actually_stop(monkeypatch):
     running = threading.Event()
     finished = threading.Event()
 
-    def _slow_extract(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+    def _slow_extract(
+        raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None
+    ):
         running.set()
         try:
             for _ in range(400):
@@ -210,7 +214,7 @@ async def test_a_wedged_worker_cannot_hold_the_canceller_forever(monkeypatch):
     started = threading.Event()
     release = threading.Event()
 
-    def _wedged(raw, suffix, count, cancelled=None, deadline=None, max_side=None):
+    def _wedged(raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None):
         started.set()
         release.wait(30)  # ignores the cancel flag entirely
         return [], []
@@ -241,30 +245,30 @@ def test_the_call_ledger_refuses_once_the_whole_request_is_too_large():
     existing gate bounds SOURCE bytes in flight, which is a different and much
     smaller quantity than what those bytes decode into.
     """
-    ledger = media_preview.PreviewLedger(total=1000)
+    ledger = media_preview.PreviewLedger(shares=1, total=1000)
 
-    ledger.charge(600)
-    ledger.charge(300)  # 900, still inside
+    ledger.reserve().settle(600)
+    ledger.reserve().settle(300)  # 900, still inside
 
     with pytest.raises(media_preview.FrameExtractionError) as caught:
-        ledger.charge(200)
+        ledger.reserve().settle(200)
 
     message = str(caught.value)
-    assert "1100" in message and "1000" in message
     # It has to say what to change, or the only move left is to stop using the tool.
     assert "max_dimension" in message
+    assert ledger.spent <= 1000, "the ceiling was passed rather than enforced"
 
 
 def test_the_ledger_keeps_what_was_already_produced():
-    """Charged after each document, so the one that crosses the line is the one
-    refused - the nine already decoded are not thrown away with it."""
-    ledger = media_preview.PreviewLedger(total=100)
-    ledger.charge(90)
+    """The document that crosses the line is the one refused - the nine already
+    decoded are not thrown away with it."""
+    ledger = media_preview.PreviewLedger(shares=1, total=100)
+    ledger.reserve().settle(90)
 
     with pytest.raises(media_preview.FrameExtractionError):
-        ledger.charge(50)
+        ledger.reserve().settle(50)
 
-    assert ledger.spent == 140, "the refused charge still has to be recorded"
+    assert ledger.spent == 100, "what was produced has to stay booked"
 
 
 @pytest.mark.asyncio
@@ -275,12 +279,12 @@ async def test_frames_are_charged_to_the_ledger_they_were_given(monkeypatch):
     monkeypatch.setattr(
         media_preview,
         "extract_frames",
-        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None: [
+        lambda raw, suffix, count, cancelled=None, deadline=None, max_side=None, allowance=None: [
             (png, {"frame_index": 0}),
             (png, {"frame_index": 1}),
         ],
     )
-    ledger = media_preview.PreviewLedger(total=10_000_000)
+    ledger = media_preview.PreviewLedger(shares=1, total=10_000_000)
 
     _metas, images = await media_preview.encode_frames_cancellable(
         b"", ".webp", 2, max_dimension=64, ledger=ledger

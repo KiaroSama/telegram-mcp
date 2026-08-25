@@ -26,7 +26,7 @@ from telegram_mcp.media_preview import (  # noqa: F401  (re-exported for tests a
     PreviewLedger,
     _custom_emoji_preview,
     encode_frames_cancellable,
-    _encode_one,
+    encode_still_cancellable,
     _media_suffix,
     _premium_effect_frames,
 )
@@ -204,7 +204,7 @@ async def inspect_message(
                             "max_bytes of its own."
                         )
                     elif raw:
-                        metas, encoded = await asyncio.to_thread(_encode_one, raw, max_dimension)
+                        metas, encoded = await encode_still_cancellable(raw, max_dimension)
                         data["thumbnail"] = metas[0]
                         images.extend(encoded)
                 except Exception as error:
@@ -461,7 +461,7 @@ async def get_media_thumbnail(
             )
 
         # Pillow decode and LANCZOS resize are blocking; keep them off the loop.
-        metas, encoded = await asyncio.to_thread(_encode_one, raw, max_dimension)
+        metas, encoded = await encode_still_cancellable(raw, max_dimension)
         meta = metas[0]
         meta.update(
             {
@@ -689,7 +689,9 @@ async def get_custom_emoji(
         gate = asyncio.Semaphore(batch_width(len(documents), max_bytes))
         # The gate bounds SOURCE bytes in flight; this bounds what the call hands
         # back once decoded, which is a different and larger quantity.
-        ledger = PreviewLedger()
+        # One share per document: they all start before any of them finishes, so
+        # an allowance taken up front is the only thing that bounds the total.
+        ledger = PreviewLedger(shares=len(documents))
 
         async def _preview_within_budget(document):
             async with gate:

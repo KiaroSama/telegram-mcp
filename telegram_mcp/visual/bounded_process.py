@@ -49,6 +49,9 @@ _CHUNK_BYTES = 64 * 1024
 # EOF by then, so this is the cost of one final read, not a wait for the helper.
 _READER_JOIN_SECONDS = 30.0
 
+# Prefix for the pipe-pump threads, so a thread dump names them.
+READER_NAME = "bounded-process-reader"
+
 
 class ProcessError(RuntimeError):
     """A bounded helper did not produce a usable answer."""
@@ -196,9 +199,12 @@ def run_bounded(
 
     out = _Sink(max_output_bytes)
     err = _Sink(max_stderr_bytes, drain_past_limit=True)
+    # Named, so "is anything from this call still running?" is answerable from a
+    # thread dump - by an operator reading a hung server, and by the tests that
+    # assert nothing survives a bound.
     readers = [
-        threading.Thread(target=_pump, args=(stream, sink), daemon=True)
-        for stream, sink in ((process.stdout, out), (process.stderr, err))
+        threading.Thread(target=_pump, args=(stream, sink), daemon=True, name=f"{READER_NAME}-{n}")
+        for n, (stream, sink) in enumerate(((process.stdout, out), (process.stderr, err)))
     ]
     for reader in readers:
         reader.start()
