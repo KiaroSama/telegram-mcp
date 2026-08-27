@@ -1,0 +1,43 @@
+# Nothing was watching this project's dependencies. There was no file here at all,
+# so Dependabot had no version updates to run - and a fork starts with Dependabot
+# ALERTS switched off by default, which is why no security PR ever appeared either.
+# The alerts toggle is repository state, not config; it lives in Settings ->
+# Advanced Security and had to be turned on separately from this file.
+version: 2
+
+updates:
+  # uv, not pip: uv.lock is the source of truth here and `uv` updates it together
+  # with pyproject.toml. A `pip` entry would report the same dependencies a second
+  # time from requirements.txt and open competing pull requests for one bump.
+  #
+  # requirements.txt is left to the test that already guards it: every dependency
+  # is declared as a `>=` floor, so a lock refresh does not move the declared
+  # constraints, and tests/test_packaging.py fails loudly if the two ever diverge.
+  - package-ecosystem: "uv"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    open-pull-requests-limit: 5
+    groups:
+      # Grouped so a quiet week is one pull request rather than nine. Majors stay
+      # out of every group on purpose: they are the ones that need release notes
+      # read and a migration considered, which cannot be done in bulk.
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Four workflows run on every push, with credentials and repository write scope
+  # between them. An action is a dependency like any other.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "daily"
+    groups:
+      actions-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # The Dockerfile's base image. Ungrouped: a base image bump changes the whole
+  # runtime underneath the application, so it is never routine.
+  - package-ecosystem: "docker"
+    directory: "/"
+    schedule:
+      interval: "daily"

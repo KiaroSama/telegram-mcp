@@ -968,13 +968,8 @@ If this project helps you, donations are appreciated.
 
 ## Licence
 
-GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for the licence text and [NOTICE](NOTICE) for the copyright and prior-work attribution.
-
-Portions originated in an Apache-2.0 project (below), and that licence permits their
-inclusion in a GPLv3 work — the Apache Software Foundation states it plainly: *"Apache 2
-software can therefore be included in GPLv3 projects."* The compatibility runs one way
-only, so the program as a whole is GPLv3 while the prior Apache-2.0 grant continues to
-cover what it originally covered.
+GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for the licence text and
+[NOTICE](NOTICE) for the copyright and prior-work attribution.
 
 ## Built on
 
@@ -983,4 +978,4 @@ cover what it originally covered.
 
 Portions of this codebase originated in [telegram-mcp](https://github.com/chigwell/telegram-mcp)
 by chigwell and l1v0n1, under the Apache License 2.0, and have been substantially modified and
-extended since. That attribution is recorded in [LICENSE](LICENSE).
+extended since. That attribution is recorded in [NOTICE](NOTICE).
