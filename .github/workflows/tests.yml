@@ -34,22 +34,30 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # --cov-fail-under=0 overrides the floor in pyproject FOR THIS JOB. The
+      # floor is a claim about the project and no single runner can execute the
+      # whole project: telegram_mcp.visual.capture is Win32 and cannot run here.
+      # The `coverage` job applies the floor once, to the combined data.
       - name: Run tests with coverage
         env:
           TELEGRAM_API_ID: "12345"
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
+          COVERAGE_FILE: .coverage.linux-py${{ matrix.python-version }}
         run: >
           uv run python scripts/run_tests_guarded.py --
-          --cov --cov-report=term-missing --cov-report=xml
+          --cov --cov-report=term-missing --cov-fail-under=0
 
-      - name: Upload coverage report
+      - name: Upload this leg's coverage data
         uses: actions/upload-artifact@v4
         with:
           # Must be unique per matrix leg: upload-artifact@v4 refuses a second
           # upload to the same name, so a static name fails the 3.13 job.
-          name: coverage-xml-py${{ matrix.python-version }}
-          path: coverage.xml
+          name: coverage-data-linux-py${{ matrix.python-version }}
+          path: .coverage.linux-py${{ matrix.python-version }}
+          # The data file starts with a dot, and v4 drops hidden files unless
+          # told otherwise - which would leave the combine step short a leg.
+          include-hidden-files: true
 
   # The job above installs the base package, where the .tgs tests skip - which is
   # also the proof that the base install works without the optional renderer. This
@@ -91,12 +99,25 @@ jobs:
       # hole the guard above exists to close: a renderer-gated test added to any
       # unlisted file would run with the renderer nowhere and skip silently
       # everywhere. Running everything under the extra cannot drift.
+      # Measured here too. This is the only job that runs on Windows, so it is
+      # the only place the Win32 capture module executes at all - and the only
+      # place the .tgs renderer does. Both belong in the combined total.
       - name: Run the whole suite with the renderer available
         env:
           TELEGRAM_API_ID: "12345"
           TELEGRAM_API_HASH: "dummy_hash"
           TELEGRAM_SESSION_NAME: "test_session"
-        run: uv run --extra lottie python scripts/run_tests_guarded.py -- -q
+          COVERAGE_FILE: .coverage.lottie-${{ matrix.os }}
+        run: >
+          uv run --extra lottie python scripts/run_tests_guarded.py --
+          -q --cov --cov-report= --cov-fail-under=0
+
+      - name: Upload this leg's coverage data
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-data-lottie-${{ matrix.os }}
+          path: .coverage.lottie-${{ matrix.os }}
+          include-hidden-files: true
 
   # The launchers are PowerShell and Windows-only, and nothing ran their tests
   # until now - which is how `tests/test_update_menu.ps1` was able to outlive the
@@ -136,3 +157,55 @@ jobs:
           }
           if ($failed.Count -gt 0) { throw "PowerShell suites failed: $($failed -join '; ')" }
           Write-Host "All $($suites.Count) PowerShell suite(s) passed."
+
+  # The floor, applied once, to everything that ran.
+  #
+  # Neither runner can execute the whole project. telegram_mcp.visual.capture
+  # is Win32 (PrintWindow) and 110 of its lines cannot run on Linux; the POSIX
+  # branches of handles.py, owner_only.py and singleton.py cannot run on
+  # Windows. Measured on the first CI runs this repository ever had, the same
+  # commit read 85.49% on windows-latest and 81.90% on ubuntu-latest - so
+  # gating either number alone gates the runner, not the suite.
+  #
+  # No separate 'did every leg upload' check: a missing leg takes its platform's
+  # exclusive modules down to near zero, which puts the total under the floor
+  # and fails right here. The floor is its own guard.
+  coverage:
+    name: Combined Coverage Gate
+    runs-on: ubuntu-latest
+    needs: [test, lottie]
+    timeout-minutes: 10
+
+    steps:
+      # `coverage report` reads the source to say which lines were missed, so
+      # the checkout is load-bearing here, not habit.
+      - name: Check out repository code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Collect every leg's coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-data-*
+          path: coverage-data
+          merge-multiple: true
+
+      - name: Combine the platforms and apply the floor
+        run: |
+          uv run python -m coverage combine coverage-data
+          uv run python -m coverage report
+          uv run python -m coverage xml
+
+      - name: Upload the combined report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml-combined
+          path: coverage.xml

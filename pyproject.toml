@@ -103,6 +103,16 @@ addopts = [
 
 [tool.coverage.run]
 branch = true
+# Paths are recorded relative to this file's directory rather than to the
+# checkout root, so a data file written under /home/runner/work/... and one
+# written under D:\a\... name the same modules and `coverage combine`
+# can merge them. Required by the combine step in .github/workflows/tests.yml.
+#
+# It also normalises the separator: a relative path is stored with '/' even
+# when it was recorded on Windows. Verified by dumping the `file` table of a
+# data file written here. So no [tool.coverage.paths] aliasing is needed, and
+# adding some would only introduce patterns that can silently stop matching.
+relative_files = true
 # What is measured: every module whose behaviour a test can pin down without a
 # live Telegram connection. That is the rule - not "the fork's own modules" and
 # not "anything outside tools/". telegram_mcp.media_transfer sits outside tools/
@@ -121,34 +131,38 @@ source = [
     "telegram_mcp.client_identity",
     "telegram_mcp.connection",
     "telegram_mcp.console_theme",
+    "telegram_mcp.contact_sheet",
     "telegram_mcp.effect_catalog",
     "telegram_mcp.file_roots",
+    "telegram_mcp.handles",
     "telegram_mcp.install_guard",
     "telegram_mcp.media_preview",
     "telegram_mcp.media_transfer",
     "telegram_mcp.message_view",
+    "telegram_mcp.owner_only",
+    "telegram_mcp.paging",
+    "telegram_mcp.photo_source",
     "telegram_mcp.runner",
     "telegram_mcp.runtime",
+    "telegram_mcp.safe_log",
     "telegram_mcp.settings",
     "telegram_mcp.singleton",
     "telegram_mcp.text_fidelity",
     "telegram_mcp.visual",
+    "telegram_mcp.win_handles",
 ]
 
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-# A measured floor, not an aspiration. Measured 2026-08-24: 88.09% over 3626
-# statements and 1270 branches on Windows, where the Win32 capture tests run.
+# A measured floor over the UNION of both platforms, which is the only number
+# that describes this project. Measured 2026-08-27, on the first CI runs this
+# repository ever had: 85.49% on Windows, 81.90% on Linux, same commit, same
+# suite. The gap is not a testing gap. telegram_mcp.visual.capture is Win32
+# (PrintWindow) and 110 of its lines cannot execute on Linux at all, while the
+# POSIX branches of handles.py, owner_only.py and singleton.py cannot execute
+# on Windows. Gating either number on its own measures the runner.
 #
-# The CI job measures lower, for two reasons rather than one: it runs
-# ubuntu-latest, where the genuinely Windows-only capture tests skip, AND it
-# installs no optional rlottie, so every test gated on the renderer skips too.
-# An external audit measured 84.52% there - below this floor - while this host
-# read 88%.
-# Deselecting both groups here reproduces that: 84.75% at the audited commit
-# against the auditor's 84.52%, so the simulation runs ~0.2 points optimistic.
-# The same simulation now reads 86.34%, putting the CI job near 86%.
-# The floor stays 85 because an estimate is not a measurement: raise it only
-# with a real Linux number in hand.
+# So every test job writes its own data file and the `coverage` job combines
+# them and applies this floor once. See .github/workflows/tests.yml.
 fail_under = 85

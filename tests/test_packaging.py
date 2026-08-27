@@ -277,3 +277,70 @@ def test_the_build_backend_is_new_enough_to_understand_the_license_expression():
 
     floor = int(setuptools_pin.split(">=")[1].split(",")[0].strip())
     assert floor >= 77, f"{setuptools_pin} predates SPDX `license` support"
+
+
+def _declared_for_coverage() -> set:
+    return set(_pyproject()["tool"]["coverage"]["run"]["source"])
+
+
+def _measurable_modules() -> set:
+    """Every module the coverage floor is supposed to be a claim about.
+
+    telegram_mcp.tools.* is excluded by policy, stated in pyproject: those 29
+    adapters marshal arguments to Telethon and format what comes back, so
+    measuring them rewards mocking the API rather than testing anything.
+    """
+    return {
+        ".".join(module.relative_to(REPO).with_suffix("").parts)
+        for module in (REPO / PACKAGE).rglob("*.py")
+        if "__pycache__" not in module.parts and module.name != "__init__.py"
+    } - {
+        name
+        for name in (
+            ".".join(module.relative_to(REPO).with_suffix("").parts)
+            for module in (REPO / PACKAGE / "tools").rglob("*.py")
+        )
+    }
+
+
+def test_every_measurable_module_is_declared_for_coverage():
+    """The third hand-maintained list in this repository, and the third guard.
+
+    The wheel dropped telegram_mcp.visual from a hand-written package list, and CI
+    ran a hand-written list of PowerShell suites while one of them outlived the
+    script it tested. Both were replaced with discovery plus a check. This list
+    had quietly accumulated seven modules outside it - handles.py among them, at
+    822 lines and named in fourteen test files - so the coverage floor was a claim
+    about a project that excluded this fork's own security core.
+
+    A module left out is not caught by anything else: coverage reports happily on
+    what it was told to watch, and the number goes UP when the untested parts are
+    the ones nobody declared.
+    """
+    declared = _declared_for_coverage()
+    measurable = _measurable_modules()
+    assert measurable, "the module walk found nothing to check"
+
+    unmeasured = {
+        name
+        for name in measurable
+        if name not in declared and not any(name.startswith(parent + ".") for parent in declared)
+    }
+    assert not unmeasured, (
+        "these modules are invisible to the coverage floor. Add them to "
+        "[tool.coverage.run] source in pyproject.toml, or record why they are "
+        f"exempt the way telegram_mcp.tools.* is: {sorted(unmeasured)}"
+    )
+
+
+def test_no_coverage_source_names_something_that_is_gone():
+    """The other half. coverage warns about a source that matches nothing and
+    carries on, so a renamed module leaves an entry that quietly measures air.
+    """
+    stale = {
+        name
+        for name in _declared_for_coverage()
+        if not (REPO / (name.replace(".", "/") + ".py")).exists()
+        and not (REPO / name.replace(".", "/")).is_dir()
+    }
+    assert not stale, f"coverage is told to measure modules that do not exist: {sorted(stale)}"
