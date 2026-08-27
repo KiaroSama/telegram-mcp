@@ -119,7 +119,7 @@ relative_files = true
 # yet is measured, because byte budgets, thumbnail selection and reference retry
 # are decisions, testable against a mocked client.
 #
-# What stays out: the 31 telegram_mcp.tools.* adapters. They marshal arguments to
+# What stays out: the telegram_mcp.tools.* adapters. They marshal arguments to
 # Telethon and format what comes back, so measuring them rewards mocking the API
 # rather than testing anything. Their behavioural coverage is a separate effort.
 source = [

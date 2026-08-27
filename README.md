@@ -728,10 +728,24 @@ uv run --extra lottie python scripts/run_tests_guarded.py --
 Run tests with coverage:
 
 ```bash
-uv run python scripts/run_tests_guarded.py -- --cov --cov-report=term-missing --cov-report=xml
+uv run python scripts/run_tests_guarded.py -- --cov --cov-report=term-missing --cov-fail-under=0
 ```
 
-Coverage is configured in `pyproject.toml` (`fail_under` under `[tool.coverage.report]`), currently a 85% minimum gate for the deterministic, unit-testable modules listed in `[tool.coverage.run] source`. GitHub Actions runs the same coverage command and uploads `coverage.xml`.
+Coverage is configured in `pyproject.toml`: an 85% floor (`fail_under` under
+`[tool.coverage.report]`) over the modules listed in `[tool.coverage.run] source`, which is
+every module whose behaviour a test can pin down without a live Telegram connection. The
+`telegram_mcp.tools.*` adapters are deliberately outside it — they marshal arguments to
+Telethon, so measuring them would reward mocking the API rather than testing anything.
+`tests/test_packaging.py` fails if any other module drifts out of that list.
+
+**The floor is applied to both platforms combined, not to either one.** Neither runner can
+execute the whole project: `telegram_mcp.visual.capture` is Win32 and cannot run on Linux,
+while the POSIX branches of `handles.py`, `owner_only.py` and `singleton.py` cannot run on
+Windows. On one commit that read 85.56% on Windows and 81.90% on Linux, against 85.75%
+combined. So each CI test job writes its own coverage data file with `--cov-fail-under=0`,
+and a separate job combines them, applies the floor once and uploads the combined
+`coverage.xml`. `--cov-fail-under=0` above does the same locally: a single-platform number
+is worth reading, but it is not the gate.
 
 The launchers have their own suites, which `pytest` does not see. Run them on Windows:
 
