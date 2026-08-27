@@ -21,7 +21,6 @@ import json
 import logging
 import os
 import re
-import subprocess
 import tempfile
 import time
 import unicodedata
@@ -32,7 +31,7 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 
 import telethon
 
-from telegram_mcp.safe_log import log_event, logger
+from telegram_mcp.safe_log import log_event
 from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
 from telegram_mcp.settings import _parse_bool_env, state_dir
 from sanitize import sanitize_name
@@ -55,11 +54,6 @@ _LEGACY_ALIASES_FILE = Path(__file__).resolve().parent.parent / "aliases.json"
 # fuzzy-matched or an alias could hijack a real account.
 _HANDLE_RE = re.compile(r"^@?[a-zA-Z0-9_]{5,}$")
 _SELF_REFS = {"me", "self"}
-
-
-# icacls is a subprocess; it needs a ceiling like any other. Ten seconds is
-# generous for a local file and short enough that a wedged one is not a hang.
-_ACL_TIMEOUT_SECONDS = 10.0
 
 
 def restrict_to_owner(path: Union[str, Path]) -> bool:

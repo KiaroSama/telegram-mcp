@@ -239,7 +239,7 @@ def test_a_real_session_database_ends_up_mode_600(tmp_path, monkeypatch):
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
-@pytest.mark.skipif(os.name != "nt", reason="the Windows owner-only mechanism is icacls")
+@pytest.mark.skipif(os.name != "nt", reason="POSIX has no DACL to leave a foreign entry on")
 def test_session_hardening_leaves_no_foreign_entry_on_the_object(tmp_path, monkeypatch):
     """Seeds an explicit `Everyone` entry first, because that is the case the
     previous implementation silently failed: it dropped INHERITED entries and
