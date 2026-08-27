@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "telegram-mcp"
-version = "2.0.1"
+version = "1.0.0"
 description = "Telegram integration for Claude via the Model Context Protocol"
 readme = "README.md"
 authors = [

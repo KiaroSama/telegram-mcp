@@ -1514,7 +1514,7 @@ wheels = [
 
 [[package]]
 name = "telegram-mcp"
-version = "2.0.1"
+version = "1.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },
