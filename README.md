@@ -348,6 +348,12 @@ This server implements no authentication of its own, and that is deliberate — 
 scheme no real client had exercised would read as protection without being any. Put
 authentication in front of it, or keep it on localhost.
 
+The container path is the one place that acknowledges the bind by default: inside a
+container `MCP_HOST` has to be `0.0.0.0` for a published port to work at all, and the
+guard cannot tell the container's interface from the host's. So [Docker](#docker) sets
+`MCP_ALLOW_UNAUTHENTICATED_REMOTE=1` and relies on the `127.0.0.1:` prefix on the
+published port instead. Read that section before removing the prefix.
+
 Prefer `http` when more than one MCP client (or many coding-agent sessions)
 will use the server: a single long-lived process holds one Telegram
 connection, instead of every client spawning its own Telethon session —
@@ -648,14 +654,23 @@ docker run -d --name telegram-mcp --restart unless-stopped \
   --env-file .env \
   -e MCP_TRANSPORT=http \
   -e MCP_HOST=0.0.0.0 \
+  -e MCP_ALLOW_UNAUTHENTICATED_REMOTE=1 \
   -p 127.0.0.1:8765:8765 \
   telegram-mcp:latest
 ```
 
-`MCP_HOST=0.0.0.0` binds inside the container so the published port works;
-`-p 127.0.0.1:8765:8765` keeps the server reachable only from the local
-machine — the endpoint is unauthenticated, so never publish it on a public
-interface.
+`MCP_HOST=0.0.0.0` binds the container's own interface, not the host's, so the
+published port works. The bind guard described under [Transports](#transports)
+cannot tell those two apart, so it refuses to start until you acknowledge the
+bind with `MCP_ALLOW_UNAUTHENTICATED_REMOTE=1` — which is why that variable is
+set here and in the bundled Compose file.
+
+That makes `-p 127.0.0.1:8765:8765` the boundary that actually protects this
+server. The `127.0.0.1:` prefix is what keeps it reachable only from this
+machine; drop the prefix and you publish full Telegram account control on every
+interface, with the guard already acknowledged. If you need the server reachable
+from elsewhere, put authentication in front of it first — acknowledging the
+guard states that something authenticates the endpoint, it does not make it so.
 
 The bundled Compose file runs the same setup:
 

@@ -1,0 +1,25 @@
+# The build context is sent to the daemon in full - which with a remote or CI
+# builder means anything here leaves this machine. These are all git-ignored and
+# none of them belongs in an image.
+.env*
+!.env.example
+*.session*
+secrets.md
+logs/
+*.log
+.git/
+.venv/
+build/
+dist/
+.ai/
+plans/
+graphify-out/
+htmlcov/
+.coverage*
+__pycache__/
+*.pyc
+tests/
+.claude/
+.codex/
+.kiro/
+.cursor/

@@ -10,12 +10,24 @@ services:
     env_file:
       - .env
     # Serve streamable HTTP so one long-lived container is shared by all MCP
-    # clients (see the Transports section in README.md). MCP_HOST must be
-    # 0.0.0.0 inside the container for the published port to work.
+    # clients (see the Transports section in README.md).
     environment:
       MCP_TRANSPORT: http
+      # 0.0.0.0 here is the container's own interface, not the host's: the real
+      # boundary is the `127.0.0.1:` prefix on the published port below.
+      # Publishing this port without that prefix exposes full Telegram account
+      # control to every interface — the server's own bind guard cannot see the
+      # difference between the two, so this file is where the decision lives.
       MCP_HOST: 0.0.0.0
-    # The endpoint is unauthenticated — publish on localhost only.
+      # Acknowledges that bind. Without it the server refuses to start at all, and
+      # the operator's next move is to set this from the guard's own error message
+      # — which is how it ends up set for an unrelated reason on a container that
+      # later drops the loopback prefix. Setting it here, next to the prefix that
+      # actually protects the endpoint, keeps the two decisions in one place.
+      MCP_ALLOW_UNAUTHENTICATED_REMOTE: "1"
+    # The endpoint is unauthenticated: the `127.0.0.1:` prefix is what keeps it on
+    # this machine. Removing it publishes the server with the guard already
+    # acknowledged above, which is the one edit in this file that needs thought.
     ports:
       - "127.0.0.1:8765:8765"
     # Optional: Uncomment the following lines to mount a local directory

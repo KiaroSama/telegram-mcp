@@ -9,18 +9,27 @@ ENV PYTHONDONTWRITEBYTECODE=1
 # Ensure Python output is sent straight to terminal (useful for logs)
 ENV PYTHONUNBUFFERED=1
 
-# Install system dependencies if needed (e.g., for certain Python packages)
-# RUN apt-get update && apt-get install -y --no-install-recommends some-package && rm -rf /var/lib/apt/lists/*
+# uv.lock is the single dependency source of truth for this project. The image
+# used to install from the pip requirements file, which carries floors and not
+# pins, so two images built from the same commit a week apart held different
+# dependency trees, and a compromised release of Pillow or Telethon landed in
+# the container with no commit and no lockfile diff. --frozen fails loudly when
+# uv.lock and pyproject.toml disagree, which is the behaviour you want: a
+# manifest edit without a re-lock should break the image build rather than
+# quietly resolve something new.
+# --no-install-project installs the dependencies only. main.py is run as a
+# script from /app, so the project is never imported from site-packages, and
+# building it here would need README.md, LICENSE and NOTICE in the context for
+# nothing.
+# UV_PYTHON_DOWNLOADS=never keeps uv on the base image's own interpreter instead
+# of fetching a second managed CPython into an image chosen for being minimal.
+ENV UV_PYTHON_DOWNLOADS=never
+COPY pyproject.toml uv.lock ./
+RUN pip install --no-cache-dir uv && uv sync --frozen --no-dev --no-install-project
 
-# Copy dependency definition files
-# If using Poetry:
-# COPY pyproject.toml poetry.lock* ./
-# RUN pip install --no-cache-dir poetry
-# RUN poetry config virtualenvs.create false && poetry install --no-dev --no-interaction --no-ansi
-# If using pip with requirements.txt:
-COPY requirements.txt ./
-RUN pip install --no-cache-dir --upgrade pip
-RUN pip install --no-cache-dir -r requirements.txt
+# uv puts the environment in /app/.venv, so putting it first on PATH is what makes
+# the bare `python` in CMD below the interpreter holding the locked dependencies.
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Copy the rest of the application code
 COPY main.py sanitize.py ./
