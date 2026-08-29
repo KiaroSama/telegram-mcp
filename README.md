@@ -47,13 +47,13 @@ Message sent successfully:
 
 ## What It Can Do
 
-The server registers **165 MCP tools**. That count is measured, not estimated — see
+The server registers **169 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 
 - **Accounts:** list configured accounts and route tool calls by account label.
 - **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
-- **Messages:** send, schedule, edit, delete, forward, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry.
+- **Messages:** send, schedule, edit, delete, forward, copy, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `copy_message` is a forward without the attribution header, made by the server, so custom (premium) emoji and any media arrive exactly as they were - rebuilding the text locally cannot, because a premium emoji is a document id pinned to a UTF-16 offset. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry.
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
 ### Remembered contacts

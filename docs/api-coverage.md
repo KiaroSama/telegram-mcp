@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **168** |
+| MCP tools registered | **169** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -163,7 +163,7 @@ assumed missing and is not. Nothing below needs building.
 | Its photo | `edit_chat_photo`, `delete_chat_photo` |
 | Own name and bio | `update_profile` |
 | Own profile photo | `set_profile_photo`, `delete_profile_photo` |
-| Slow mode, forum mode | `toggle_slow_mode`, `enable_forum_topics` |
+| Slow mode, forum mode | `toggle_slow_mode`, `enable_forum_topics`; the interval and this account's next allowed send are read back by `get_full_chat` |
 | Admin log (recent actions) | `get_recent_actions` |
 | Participants | `get_participants` |
 | Archive, mute, pin | `archive_chat`, `mute_chat`, `pin_message`, `unpin_all_messages` |
