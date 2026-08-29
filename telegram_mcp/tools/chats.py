@@ -385,6 +385,11 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
     """
     Get full info of a channel or group including description/about text.
 
+    Reports `slowmode_seconds` for a supergroup that has slow mode configured
+    (0 means configured-and-off), and `slowmode_next_send_date` while this
+    account is actually waiting out an interval. Neither key appears for a chat
+    that cannot have slow mode.
+
     Args:
         chat_id: The channel/group username (without @) or ID.
 
@@ -426,6 +431,26 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
             "participants_count": participants_count,
             "linked_chat_id": getattr(full_chat, "linked_chat_id", None),
         }
+
+        # Slow mode. `toggle_slow_mode` could set it and nothing could read it back,
+        # so a caller had no way to check the interval it was about to change or to
+        # find out why a send was rejected. Both fields live on the FULL object only;
+        # the plain Channel an entity resolves to does not carry either.
+        #
+        # Absent rather than 0 when the chat cannot have slow mode at all (a basic
+        # group, a broadcast channel): 0 is Telegram's value for 'supergroup with slow
+        # mode switched off', which is a different fact.
+        seconds = getattr(full_chat, "slowmode_seconds", None)
+        if seconds is not None:
+            result["slowmode_seconds"] = seconds
+            # Only present while a wait is actually in force FOR THIS ACCOUNT, and
+            # Telegram omits it for admins, who are exempt. A missing value therefore
+            # means 'may post now', never 'slow mode is off'.
+            next_send = getattr(full_chat, "slowmode_next_send_date", None)
+            if next_send is not None:
+                result["slowmode_next_send_date"] = (
+                    next_send.isoformat() if hasattr(next_send, "isoformat") else next_send
+                )
 
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:
