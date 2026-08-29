@@ -73,7 +73,7 @@ can see. Treat a TL-verb grep as a starting point, never as the answer.
 |---|---|
 | Dialog folders / chat lists | `messages.GetDialogFilters`, `UpdateDialogFilter` |
 | Drafts | `messages.SaveDraft`, `GetAllDrafts` |
-| Forum topics (create / list) | `channels.CreateForumTopic`, `GetForumTopics` |
+| Forum topics (create / list / send into / read back) | `channels.CreateForumTopic`, `GetForumTopics`, plus `topic_id` on every sending tool |
 | Message search, in-chat and global | `search_messages` / `search_global`, through Telethon's `get_messages(search=…)` — no raw call, which is exactly why a raw-only count misses it |
 | Read receipts — *who* read a message | `get_message_read_by` → `messages.GetMessageReadParticipants` |
 | Reading who reacted | `messages.GetMessageReactionsList` |
@@ -172,6 +172,7 @@ assumed missing and is not. Nothing below needs building.
 | Its photo | `edit_chat_photo`, `delete_chat_photo` |
 | Own name and bio | `update_profile` |
 | Own profile photo | `set_profile_photo`, `delete_profile_photo` |
+| Posting in a topic | `topic_id` on `send_message`, `reply_to_message`, `save_draft`, `schedule_message` and the media senders; the id comes from `list_topics`, and every message-returning tool reports the `topic_id` it was in |
 | Slow mode, forum mode | `toggle_slow_mode`, `enable_forum_topics`; the interval and this account's next allowed send are read back by `get_full_chat` |
 | Admin log (recent actions) | `get_recent_actions` |
 | Participants | `get_participants` |
@@ -212,6 +213,20 @@ the tree, which is the cost of having deferred them.
    Splitting surfaced three instances of the same trap - a star import creates a second
    name for one object, and the two drift the moment either is rebound - so
    `tests/test_tool_registry.py` now guards it across the whole package.
+
+### Forums, fixed at source
+
+Reading and writing a topic used to be two half-implementations. A message posted
+into a topic carries the topic root in `reply_to_msg_id`, the same field an
+ordinary reply uses - so every topic post was reported as a reply to a message
+nobody replied to, and the topic itself never reached the caller. On the way out,
+`topic_id` existed on five media tools and nowhere else: text could not be sent
+into a topic at all, and nothing could reply to a message *inside* one, because
+that needs both ids and every call site passed a bare int.
+
+`telegram_mcp/forum.py` now holds that decision once, read forwards for sending
+and backwards for reporting, and `describe_topic` is a view over it rather than a
+second copy.
 
 ### Phase 1 — full channel and group settings
 
