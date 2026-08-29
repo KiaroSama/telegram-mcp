@@ -18,10 +18,15 @@ class _DialogClient:
 
     def __init__(self, total=250):
         self.limits = []
+        self.archived = []
         self.total = total
 
-    async def get_dialogs(self, limit=None, **kwargs):
+    async def get_dialogs(self, limit=None, archived=None, **extra):
+        # A paging suite whose fake silently accepted any offset argument was
+        # testing less than it looked. Anything unmodelled fails loudly here.
+        assert not extra, f"production passed {sorted(extra)}, which this fake does not model"
         self.limits.append(limit)
+        self.archived.append(archived)
         count = self.total if limit is None else min(limit, self.total)
         return [
             SimpleNamespace(entity=SimpleNamespace(id=index, title=f"Chat {index}"))

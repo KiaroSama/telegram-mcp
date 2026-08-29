@@ -117,8 +117,10 @@ def test_configure_allowed_roots_from_cli_updates_runtime_and_main_alias(tmp_pat
     runtime._configure_allowed_roots_from_cli([str(root), str(root)])
     assert runtime.SERVER_ALLOWED_ROOTS == [root.resolve()]
 
-    main._configure_allowed_roots_from_cli([str(root)])
-    assert main.SERVER_ALLOWED_ROOTS == [root.resolve()]
+    runtime._configure_allowed_roots_from_cli([str(root)])
+    # Asserted on the owning module: the list is mutated in place precisely so
+    # every star-importer keeps seeing the same object.
+    assert file_roots.SERVER_ALLOWED_ROOTS == [root.resolve()]
 
     with pytest.raises(SystemExit, match="Allowed root does not exist"):
         runtime._configure_allowed_roots_from_cli([str(tmp_path / "missing")])

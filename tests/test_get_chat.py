@@ -50,7 +50,10 @@ class FakeChatClient:
         self.get_messages_calls.append({"entity": entity, "limit": limit})
         return [self._last_message]
 
-    async def get_dialogs(self, *args, **kwargs):
+    # Spelled out rather than *args/**kwargs: production calls this with
+    # limit= and archived=, and a fake that swallows anything accepts a
+    # call the real client would reject.
+    async def get_dialogs(self, limit=None, archived=None):
         self.get_dialogs_called = True
         raise AssertionError(
             "get_chat must not use get_dialogs(offset_peer=...) — it returns the "

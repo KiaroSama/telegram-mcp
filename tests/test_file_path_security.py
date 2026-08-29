@@ -5,7 +5,10 @@ from mcp import types
 from mcp.shared.exceptions import McpError
 from mcp.types import ErrorData
 
-import main
+# Patched and called on the module that OWNS these names. `main` used to keep
+# copying wrappers so a test could reach them through it; the wrappers existed
+# only for this file and one other, and carried a rebind hazard in production
+# code to serve a test seam.
 from telegram_mcp import file_roots
 
 
@@ -51,9 +54,9 @@ async def test_readable_relative_path_resolves_inside_first_server_root(tmp_path
     target = root / "document.txt"
     target.write_text("ok", encoding="utf-8")
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="document.txt",
         ctx=None,
         tool_name="send_file",
@@ -67,9 +70,9 @@ async def test_readable_relative_path_resolves_inside_first_server_root(tmp_path
 async def test_readable_path_rejects_traversal(tmp_path, monkeypatch):
     root = (tmp_path / "root").resolve()
     root.mkdir(parents=True)
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="../etc/passwd",
         ctx=None,
         tool_name="send_file",
@@ -89,9 +92,9 @@ async def test_readable_path_rejects_outside_root(tmp_path, monkeypatch):
     outside_file = outside_root / "outside.txt"
     outside_file.write_text("no", encoding="utf-8")
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path=str(outside_file),
         ctx=None,
         tool_name="send_file",
@@ -112,13 +115,13 @@ async def test_client_roots_replace_server_allowlist(tmp_path, monkeypatch):
     client_file = client_root / "client.txt"
     client_file.write_text("client", encoding="utf-8")
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [server_root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
     ctx = _DummyContext([types.Root(uri=client_root.as_uri())])
 
-    roots = await main._get_effective_allowed_roots(ctx)
+    roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == [client_root]
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="client.txt",
         ctx=ctx,
         tool_name="send_file",
@@ -132,13 +135,13 @@ async def test_empty_client_roots_disable_file_tools(tmp_path, monkeypatch):
     server_root = (tmp_path / "server_root").resolve()
     server_root.mkdir(parents=True)
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [server_root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
     ctx = _DummyContext([])
 
-    roots = await main._get_effective_allowed_roots(ctx)
+    roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == []
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="server.txt",
         ctx=ctx,
         tool_name="send_file",
@@ -154,10 +157,10 @@ async def test_mcp_method_not_found_falls_back_to_server_allowlist(tmp_path, mon
     server_root = (tmp_path / "server_root").resolve()
     server_root.mkdir(parents=True)
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [server_root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
     ctx = _FailingContext(McpError(ErrorData(code=-32601, message="Method not found")))
 
-    roots = await main._get_effective_allowed_roots(ctx)
+    roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == [server_root]
 
 
@@ -166,10 +169,10 @@ async def test_missing_list_roots_method_falls_back_to_server_allowlist(tmp_path
     server_root = (tmp_path / "server_root").resolve()
     server_root.mkdir(parents=True)
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [server_root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
     ctx = _MissingRootsContext()
 
-    roots = await main._get_effective_allowed_roots(ctx)
+    roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == [server_root]
 
 
@@ -177,13 +180,13 @@ async def test_missing_list_roots_method_falls_back_to_server_allowlist(tmp_path
 async def test_unexpected_roots_error_disables_file_path_tools(tmp_path, monkeypatch):
     server_root = (tmp_path / "server_root").resolve()
     server_root.mkdir(parents=True)
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [server_root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
 
     ctx = _FailingContext(RuntimeError("transport failure"))
-    roots = await main._get_effective_allowed_roots(ctx)
+    roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == []
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="anything.txt",
         ctx=ctx,
         tool_name="send_file",
@@ -197,9 +200,9 @@ async def test_unexpected_roots_error_disables_file_path_tools(tmp_path, monkeyp
 async def test_writable_default_path_uses_downloads_subdir(tmp_path, monkeypatch):
     root = (tmp_path / "root").resolve()
     root.mkdir(parents=True)
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
-    resolved, error = await main._resolve_writable_file_path(
+    resolved, error = await file_roots._resolve_writable_file_path(
         raw_path=None,
         default_filename="example.bin",
         ctx=None,
@@ -228,9 +231,9 @@ async def test_extension_allowlist_is_enforced_for_sticker(tmp_path, monkeypatch
     file_path = root / "sticker.txt"
     file_path.write_text("bad", encoding="utf-8")
 
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path=str(file_path),
         ctx=None,
         tool_name="send_sticker",
@@ -243,9 +246,9 @@ async def test_extension_allowlist_is_enforced_for_sticker(tmp_path, monkeypatch
 
 @pytest.mark.asyncio
 async def test_file_tools_disabled_without_any_roots(monkeypatch):
-    monkeypatch.setattr(main, "SERVER_ALLOWED_ROOTS", [])
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [])
 
-    resolved, error = await main._resolve_readable_file_path(
+    resolved, error = await file_roots._resolve_readable_file_path(
         raw_path="anything.txt",
         ctx=None,
         tool_name="send_file",
