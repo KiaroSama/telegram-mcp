@@ -504,3 +504,55 @@ async def post_story(
         )
     except Exception as e:
         return log_and_format_error("post_story", e, chat_id=chat_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete Story", openWorldHint=True, destructiveHint=True, idempotentHint=True
+    )
+)
+@with_account(readonly=False)
+@validate_id("chat_id")
+async def delete_story(
+    story_id: Union[int, List[int]],
+    chat_id: Union[int, str] = "me",
+    account: str = None,
+) -> str:
+    """
+    Delete a story you posted. IRREVERSIBLE.
+
+    Telegram keeps no copy and offers no undo: the story, its views and its
+    reactions are gone the moment this returns. Confirm with the person asking
+    before calling it.
+
+    Args:
+        story_id: The story ID, or a list of them, from `list_peer_stories`.
+        chat_id: Whose stories - "me" (default), or a channel you post as.
+
+    `post_story` had no counterpart, which is a worse problem than it sounds: an
+    agent that can publish and cannot retract will, correctly, decline to publish.
+    """
+    try:
+        cl = get_client(account)
+        await ensure_connected(cl)
+        entity = await resolve_entity(chat_id, cl)
+        ids = [story_id] if isinstance(story_id, int) else list(story_id)
+        if not ids:
+            return "No story ID was given, so nothing was deleted."
+
+        result = await cl(functions.stories.DeleteStoriesRequest(peer=entity, id=ids))
+        # Telegram answers with the ids it actually removed. Reporting the request
+        # instead would claim a deletion that may not have happened.
+        removed = list(result or [])
+        if not removed:
+            return (
+                "No story was deleted: "
+                f"{'that id is' if len(ids) == 1 else 'those ids are'} not a story "
+                "this account posted, or it was already gone."
+            )
+        return format_tool_result(
+            [{"deleted": removed}],
+            {"requested": len(ids), "deleted": len(removed), "irreversible": True},
+        )
+    except Exception as e:
+        return log_and_format_error("delete_story", e, chat_id=chat_id, story_id=story_id)

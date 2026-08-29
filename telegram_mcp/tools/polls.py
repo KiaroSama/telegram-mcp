@@ -388,3 +388,71 @@ async def get_poll_voters(
         )
     except Exception as e:
         return log_and_format_error("get_poll_voters", e, chat_id=chat_id, message_id=message_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Close Poll", openWorldHint=True, destructiveHint=True, idempotentHint=True
+    )
+)
+@with_account(readonly=False)
+@validate_id("chat_id")
+async def close_poll(
+    chat_id: Union[int, str],
+    message_id: int,
+    account: str = None,
+) -> str:
+    """
+    Stop a poll from taking further votes. IRREVERSIBLE.
+
+    Telegram has no reopen: closing is a one-way edit, and the final tally becomes
+    visible to everyone who can see the poll - including, for a quiz, the correct
+    answer. Confirm before calling it.
+
+    `create_poll` had no counterpart, so a poll opened through this server could
+    only ever be ended by deleting the message and losing the results with it.
+
+    Args:
+        chat_id: The chat ID or username.
+        message_id: The message carrying the poll. Must be a poll this account
+            can edit - Telegram refuses otherwise.
+    """
+    try:
+        cl, entity, msg, poll, _results = await _read_poll(chat_id, message_id, account)
+        if not msg:
+            return f"Message {message_id} was not found in chat {chat_id}."
+        if poll is None:
+            return f"Message {message_id} carries no poll."
+        if getattr(poll, "closed", False):
+            return f"The poll in message {message_id} is already closed."
+
+        # A poll is closed by re-sending it with closed=True; there is no
+        # "close" request. Every other field is carried over verbatim, because
+        # this edit REPLACES the poll - dropping question or answers here would
+        # blank the poll rather than close it.
+        await cl(
+            functions.messages.EditMessageRequest(
+                peer=entity,
+                id=getattr(msg, "id", message_id),
+                media=types.InputMediaPoll(
+                    poll=types.Poll(
+                        id=poll.id,
+                        question=poll.question,
+                        answers=poll.answers,
+                        # Required by the constructor, and carried rather than
+                        # invented: it is Telegram's own handle on this poll.
+                        hash=getattr(poll, "hash", 0) or 0,
+                        closed=True,
+                        public_voters=getattr(poll, "public_voters", None),
+                        multiple_choice=getattr(poll, "multiple_choice", None),
+                        quiz=getattr(poll, "quiz", None),
+                    )
+                ),
+            )
+        )
+        return format_tool_result(
+            [{"message_id": getattr(msg, "id", message_id), "closed": True}],
+            {"chat_id": str(chat_id), "irreversible": True},
+        )
+    except Exception as e:
+        return log_and_format_error("close_poll", e, chat_id=chat_id, message_id=message_id)
