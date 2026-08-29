@@ -6,15 +6,21 @@
 version: 2
 
 updates:
-  # `pip`, not `uv`. The uv changelog announced version-update support, but the
-  # supported-ecosystems table still lists only `pip` for Python, and an
-  # unrecognised package-ecosystem does not fail loudly - it can invalidate the
-  # whole file, which looks exactly like Dependabot not running. `pip` reads
-  # pyproject.toml (this project is PEP 621) and requirements.txt together, so
-  # the two stay in step and the packaging test that compares them keeps passing.
+  # `uv`, and the reason it is not `pip` is worth writing down. The
+  # supported-ecosystems table still lists only `pip` for Python, so this was
+  # `pip` for a while on the theory that an unrecognised package-ecosystem could
+  # invalidate the whole file. It is recognised: the uv updater is real, in
+  # general availability since March 2025, and it is what keeps uv.lock in step
+  # with pyproject.toml. `pip` would have left the lock this project actually
+  # installs from drifting behind the manifest.
   #
-  # uv.lock is NOT refreshed by this. Run `uv lock` after merging a bump.
-  - package-ecosystem: "pip"
+  # Known limitation, worth remembering when an alert stays open: the uv updater
+  # resolves through pyproject.toml, not through uv.lock, so a CVE in a
+  # TRANSITIVE-only package fails with "No files have changed!" and no automated
+  # fix. The manual move is `uv lock --upgrade-package <name>`; to give Dependabot
+  # something it can update next time, pin a floor under
+  # [tool.uv] constraint-dependencies.
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "daily"

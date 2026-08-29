@@ -190,6 +190,15 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v5
 
+      # `merge-multiple` extracts every matched artifact into ONE directory, and
+      # the collision it silently loses to is on the FILE basename inside each
+      # artifact, not on the artifact name. Same-named files overwrite each other,
+      # a concurrent extraction can leave one half-written, and the combined
+      # number comes out lower with nothing failing to say so.
+      #
+      # Safe here only because every leg names its data file after itself:
+      # .coverage.linux-py3.11, .coverage.linux-py3.13, .coverage.lottie-ubuntu-latest,
+      # .coverage.lottie-windows-latest. Do not collapse those to a constant name.
       - name: Collect every leg's coverage data
         uses: actions/download-artifact@v4
         with:
