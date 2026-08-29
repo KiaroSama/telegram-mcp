@@ -113,6 +113,7 @@ history rewrite here left the two with no merge base):
 | Reversible channel settings | `set_join_to_send`, `set_join_request`, `set_prehistory_hidden`, `set_participants_hidden`, `set_signatures`, `set_view_forum_as_messages` | `tools/channel_settings.py` |
 | Closing the one-way pairs | `delete_story`, `close_poll`, `get_bot_commands` | `tools/stories.py`, `tools/polls.py`, `tools/profile.py` |
 | Editing a forum topic | `edit_forum_topic` | `tools/topics.py` |
+| Premium (custom-emoji) reactions | `send_reaction` and `react_to_story` take a `custom_emoji_id`; a message may carry several reactions at once. The read side already reported `custom:<id>` - only sending was missing. | `tools/messages_state.py`, `tools/stories.py` |
 
 `copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
 copy. That is the only way premium emoji and media survive: rebuilding a message from

@@ -329,6 +329,7 @@ async def react_to_story(
     chat_id: Union[int, str],
     story_id: int,
     emoji: str = None,
+    custom_emoji_id: int = None,
     account: str = None,
 ) -> str:
     """
@@ -341,8 +342,15 @@ async def react_to_story(
     Args:
         chat_id: The user, channel ID or username who posted the story.
         story_id: The story's id, from `list_peer_stories`.
-        emoji: The emoji to react with. Omit to remove your reaction. Telegram
-            validates the emoji server-side and rejects one it does not accept.
+        emoji: The emoji to react with. Omit BOTH this and `custom_emoji_id` to
+            remove your reaction. Telegram validates the emoji server-side and
+            rejects one it does not accept.
+        custom_emoji_id: Document ID of a premium/custom emoji to react with
+            instead, from `get_custom_emoji` or `inspect_message`. Telegram
+            requires Premium for this and refuses it otherwise.
+
+    A story takes ONE reaction, unlike a message: passing both is refused here
+    rather than sent as a pair Telegram would reject.
 
     Note: this is a real, visible action — the poster sees it attributed to you.
 
@@ -351,7 +359,17 @@ async def react_to_story(
     """
     try:
         chosen = (emoji or "").strip()
-        reaction = types.ReactionEmoji(emoticon=chosen) if chosen else types.ReactionEmpty()
+        if chosen and custom_emoji_id is not None:
+            return (
+                "A story takes one reaction: give `emoji` or `custom_emoji_id`, "
+                "not both. Nothing was sent."
+            )
+        if custom_emoji_id is not None:
+            reaction = types.ReactionCustomEmoji(document_id=int(custom_emoji_id))
+        elif chosen:
+            reaction = types.ReactionEmoji(emoticon=chosen)
+        else:
+            reaction = types.ReactionEmpty()
 
         cl = get_client(account)
         await ensure_connected(cl)

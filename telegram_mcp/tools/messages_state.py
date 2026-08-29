@@ -530,36 +530,89 @@ async def create_poll(
 async def send_reaction(
     chat_id: Union[int, str],
     message_id: int,
-    emoji: str,
+    emoji: str = None,
+    custom_emoji_id: Union[int, List[int]] = None,
     big: bool = False,
     account: str = None,
 ) -> str:
     """
-    Send a reaction to a message.
+    React to a message with a standard emoji, a premium (custom) emoji, or both.
 
     Args:
-        chat_id: The chat ID or username
-        message_id: The message ID to react to
-        emoji: The emoji to react with (e.g., "👍", "❤️", "🔥", "😂", "😮", "😢", "🎉", "💩", "👎")
-        big: Whether to show a big animation for the reaction (default: False)
+        chat_id: The chat ID or username.
+        message_id: The message ID to react to.
+        emoji: A standard emoji, e.g. "👍" "❤️" "🔥" "😂" "😮" "😢" "🎉" "💩" "👎".
+        custom_emoji_id: Document ID of a premium/custom emoji, or a list of
+            them. Get IDs from `get_custom_emoji`, `inspect_message`, or the
+            `custom:<id>` values `get_message_reactions` reports.
+        big: Show the big animation (default False).
+
+    Give `emoji`, `custom_emoji_id`, or both - both together sends several
+    reactions at once. Telegram allows a custom-emoji reaction and more than one
+    reaction only for Premium accounts, and refuses either without it; the
+    refusal comes back as a plain sentence rather than a raw RPC name.
+
+    `get_message_reactions` has always REPORTED custom-emoji reactions as
+    `custom:<document_id>`; until now nothing could send one.
     """
     try:
-        cl = get_client(account)
-        from telethon.tl.types import ReactionEmoji
+        from telethon.tl.types import ReactionCustomEmoji, ReactionEmoji
 
-        peer = await resolve_input_entity(chat_id, cl)
-        await cl(
-            functions.messages.SendReactionRequest(
-                peer=peer,
-                msg_id=message_id,
-                big=big,
-                reaction=[ReactionEmoji(emoticon=emoji)],
+        if emoji is None and custom_emoji_id is None:
+            return (
+                "Nothing to react with: pass `emoji` for a standard reaction, "
+                "`custom_emoji_id` for a premium one, or both."
             )
+
+        reactions = []
+        if emoji is not None:
+            reactions.append(ReactionEmoji(emoticon=emoji))
+        if custom_emoji_id is not None:
+            ids = [custom_emoji_id] if isinstance(custom_emoji_id, int) else list(custom_emoji_id)
+            reactions.extend(ReactionCustomEmoji(document_id=int(one)) for one in ids)
+
+        cl = get_client(account)
+        peer = await resolve_input_entity(chat_id, cl)
+        try:
+            await cl(
+                functions.messages.SendReactionRequest(
+                    peer=peer,
+                    msg_id=message_id,
+                    big=big,
+                    reaction=reactions,
+                )
+            )
+        except telethon.errors.RPCError as e:
+            # Both of these are Premium gates, and Telegram names them in a way
+            # nobody can act on. Say which one, and what it would take.
+            if is_premium_rpc_error(e):
+                what = (
+                    "more than one reaction at once"
+                    if len(reactions) > 1
+                    else "a custom (premium) emoji reaction"
+                )
+                return (
+                    f"Telegram refused {what}: that needs Telegram Premium on this "
+                    "account. Nothing was sent. A single standard emoji works without it."
+                )
+            raise
+
+        described = []
+        if emoji is not None:
+            described.append(emoji)
+        described.extend(f"custom:{r.document_id}" for r in reactions if hasattr(r, "document_id"))
+        return format_tool_result(
+            [{"message_id": message_id, "reactions": described}],
+            {"chat_id": str(chat_id), "count": len(reactions), "big": bool(big)},
         )
-        return f"Reaction '{emoji}' sent to message {message_id} in chat {chat_id}."
     except Exception as e:
         return log_and_format_error(
-            "send_reaction", e, chat_id=chat_id, message_id=message_id, emoji=emoji
+            "send_reaction",
+            e,
+            chat_id=chat_id,
+            message_id=message_id,
+            emoji=emoji,
+            custom_emoji_id=custom_emoji_id,
         )
 
 
