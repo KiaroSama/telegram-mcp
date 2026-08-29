@@ -215,6 +215,28 @@ class PreviewLedger:
     Still not a lock or a queue - the batch already limits how many downloads run
     at once, and this only has to bound the TOTAL handed back. The arithmetic runs
     on the event loop thread, where there is no interleaving to protect against.
+
+    **What this budget is, exactly.** It counts the ENCODED preview bytes one call
+    hands back, and nothing else. Every other cost in the same path has its own
+    explicit ceiling, because one number covering all of them would have to be the
+    largest and would therefore bound none of them:
+
+    * decoder subprocess stdout - the smaller of ``MAX_DECODER_OUTPUT_BYTES`` and
+      whatever THIS call's reservation still has, passed down per run;
+    * decoder stderr - ``MAX_DECODER_STDERR_BYTES``, truncated at the boundary;
+    * a probe's reply - ``MAX_PROBE_OUTPUT_BYTES``, which is metadata, not a decode;
+    * frames held inside one decode - ``MAX_TOTAL_FRAME_BYTES`` via ``_Budget``;
+    * the window capture reply - ``MAX_CAPTURE_RESPONSE_BYTES``, checked BEFORE each
+      frame is appended rather than after;
+    * the source transfer - ``MAX_FRAME_SOURCE_BYTES``, enforced mid-download.
+
+    Two costs are deliberately outside all of these and are stated rather than
+    silently absorbed. Pillow's decoded surface is bounded by pixels, not bytes:
+    ``open_image_bytes`` refuses a declared pixel count above
+    ``MAX_DECODED_PIXELS`` before anything is allocated. And the MCP reply carries
+    images base64-encoded, so what leaves this process is about four thirds of
+    what is counted here - the ratio is fixed and known, which is why it is
+    applied to the ceiling by whoever sets it rather than tracked per byte.
     """
 
     __slots__ = ("deadline", "reserved", "shares", "spent", "total")

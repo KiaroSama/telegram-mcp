@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -148,6 +149,197 @@ def _pump(stream, sink: _Sink) -> None:
         return
 
 
+# Windows: a job object whose closure kills everything in it. `process.kill()`
+# ends the DIRECT child and nothing else, so an ffmpeg that had spawned a helper
+# of its own left that helper running after a timeout or a cancellation - past
+# the deadline, past the caller, and past the point anyone was reading the answer.
+#
+# POSIX gets the same guarantee from a session: `start_new_session` puts the child
+# in its own process group and `killpg` ends the group.
+_JOB_OBJECT_EXTENDED_LIMIT = 9
+_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_CREATE_SUSPENDED = 0x00000004
+_TH32CS_SNAPTHREAD = 0x00000004
+_THREAD_SUSPEND_RESUME = 0x0002
+_RESUME_FAILED = 0xFFFFFFFF
+
+_WIN32: "Optional[tuple]" = None
+
+
+def _win32():
+    """The job and thread calls, bound once. Windows only.
+
+    Every function gets an explicit restype/argtypes: without them ctypes assumes
+    C int and truncates a 64-bit HANDLE to 32 bits, which works until the machine
+    is busy enough to hand out a large one. This project has been bitten by that
+    exact truncation before.
+    """
+    global _WIN32
+    if _WIN32 is not None:
+        return _WIN32
+
+    import ctypes
+    from ctypes import wintypes
+
+    class _BASIC_LIMITS(ctypes.Structure):
+        _fields_ = [
+            ("PerProcessUserTimeLimit", ctypes.c_int64),
+            ("PerJobUserTimeLimit", ctypes.c_int64),
+            ("LimitFlags", wintypes.DWORD),
+            ("MinimumWorkingSetSize", ctypes.c_size_t),
+            ("MaximumWorkingSetSize", ctypes.c_size_t),
+            ("ActiveProcessLimit", wintypes.DWORD),
+            ("Affinity", ctypes.POINTER(ctypes.c_ulong)),
+            ("PriorityClass", wintypes.DWORD),
+            ("SchedulingClass", wintypes.DWORD),
+        ]
+
+    class _IO_COUNTERS(ctypes.Structure):
+        _fields_ = [
+            ("ReadOperationCount", ctypes.c_ulonglong),
+            ("WriteOperationCount", ctypes.c_ulonglong),
+            ("OtherOperationCount", ctypes.c_ulonglong),
+            ("ReadTransferCount", ctypes.c_ulonglong),
+            ("WriteTransferCount", ctypes.c_ulonglong),
+            ("OtherTransferCount", ctypes.c_ulonglong),
+        ]
+
+    class _EXTENDED_LIMITS(ctypes.Structure):
+        _fields_ = [
+            ("BasicLimitInformation", _BASIC_LIMITS),
+            ("IoInfo", _IO_COUNTERS),
+            ("ProcessMemoryLimit", ctypes.c_size_t),
+            ("JobMemoryLimit", ctypes.c_size_t),
+            ("PeakProcessMemoryUsed", ctypes.c_size_t),
+            ("PeakJobMemoryUsed", ctypes.c_size_t),
+        ]
+
+    class _THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", ctypes.c_long),
+            ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    kernel32.CreateJobObjectW.argtypes = [wintypes.LPVOID, wintypes.LPCWSTR]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.SetInformationJobObject.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+
+    _WIN32 = (ctypes, kernel32, _EXTENDED_LIMITS, _THREADENTRY32)
+    return _WIN32
+
+
+def _contain(process) -> "Optional[int]":
+    """Put a SUSPENDED child in a kill-on-close job. Returns the job handle.
+
+    None means this platform or this Python gave nothing to contain with, which
+    the caller reports rather than treating as containment.
+    """
+    if os.name != "nt":
+        return None
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        return None
+    ctypes, kernel32, extended, _thread = _win32()
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        return None
+    limits = extended()
+    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)
+    ) or not kernel32.AssignProcessToJobObject(job, int(handle)):
+        kernel32.CloseHandle(job)
+        return None
+    return job
+
+
+def _resume(process) -> bool:
+    """Let a contained child start. ``Popen`` closed the thread handle, so the
+    one thread a suspended process has is found again by owner PID."""
+    if os.name != "nt":
+        return True
+    ctypes, kernel32, _extended, thread_entry = _win32()
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if snapshot in (None, -1):
+        return False
+    try:
+        entry = thread_entry()
+        entry.dwSize = ctypes.sizeof(thread_entry)
+        thread_id = None
+        more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == process.pid:
+                thread_id = entry.th32ThreadID
+                break
+            more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+    if thread_id is None:
+        return False
+    thread = kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
+    if not thread:
+        return False
+    try:
+        return kernel32.ResumeThread(thread) != _RESUME_FAILED
+    finally:
+        kernel32.CloseHandle(thread)
+
+
+def _end_tree(process, job) -> None:
+    """End the child AND anything it started, then release the job.
+
+    ``process.kill()`` alone ends the direct child, so a helper that ffmpeg
+    spawned outlived every timeout and cancellation this module reports.
+    """
+    if job is not None:
+        ctypes, kernel32, _extended, _thread = _win32()
+        try:
+            kernel32.TerminateJobObject(job, 1)
+        except OSError:  # pragma: no cover - the job is already gone
+            pass
+        kernel32.CloseHandle(job)
+        return
+    if os.name != "nt":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
+
 def run_bounded(
     command: list[str],
     *,
@@ -186,6 +378,14 @@ def run_bounded(
         timeout = min(timeout, remaining)
 
     try:
+        extras: dict = {}
+        if os.name == "nt":
+            # Suspended, so the job holds it before it runs: contained afterwards,
+            # anything it spawned in that window is outside the job and survives
+            # the kill.
+            extras["creationflags"] = _CREATE_SUSPENDED
+        else:
+            extras["start_new_session"] = True
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -193,11 +393,21 @@ def run_bounded(
             # Never inherit the parent's stdin: an unexpected prompt in a helper
             # would block for ever on a terminal nothing is watching.
             stdin=subprocess.DEVNULL,
+            **extras,
         )
     except FileNotFoundError as error:
         raise ProcessNotFound(
             f"{os.path.basename(command[0])} is not installed or not on PATH."
         ) from error
+
+    job = _contain(process)
+    if not _resume(process):
+        # A suspended child nobody resumed is a hang, so it does not get to
+        # stand. Reported as a failure to start rather than as a timeout later.
+        _end_tree(process, job)
+        raise ProcessNotFound(
+            f"{os.path.basename(command[0])} could not be started under containment."
+        )
 
     out = _Sink(max_output_bytes)
     err = _Sink(max_stderr_bytes, drain_past_limit=True)
@@ -239,16 +449,21 @@ def run_bounded(
             raise ProcessOutputTooLarge(
                 f"{label} produced more than the {max_output_bytes}-byte ceiling for one call."
             )
-        return Completed(
+        result = Completed(
             list(command), process.returncode, out.value(), err.value(), err.overflowed
         )
+        # Closing the job kills whatever is still in it, which after a clean exit
+        # is exactly the helpers the child left behind. One handle per call would
+        # otherwise leak for the life of the server.
+        if job is not None:
+            _win32()[1].CloseHandle(job)
+            job = None
+        return result
     except BaseException:
         # Timeout, cancellation, overflow, or anything at all: the child must not
-        # outlive the call that started it, and neither may its readers.
-        try:
-            process.kill()
-        except OSError:
-            pass
+        # outlive the call that started it, and neither may its readers - nor
+        # anything the child spawned, which `process.kill()` alone left running.
+        _end_tree(process, job)
         _finish(process, readers)
         raise
 

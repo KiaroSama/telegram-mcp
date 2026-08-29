@@ -90,10 +90,13 @@ def run(request: dict) -> int:
         meta["bytes"] = len(data)
         meta["index"] = index
         meta["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        # Measured BEFORE it is appended, not after. Appending and then checking
+        # the result materialises the whole over-limit buffer first - and `+=` on
+        # bytes copies, so at the moment of the copy the process holds both the
+        # old payload and the new one. The ceiling has to be consulted while
+        # there is still something to refuse.
+        check_response_bytes(len(payload) + len(data), limit)
         payload += data
-        # Checked as the frames accumulate, not once they all exist: the ceiling
-        # is on what is held, and the last frame is the one that would break it.
-        check_response_bytes(len(payload), limit)
         metas.append(meta)
         if time.monotonic() - frame_started > CAPTURE_FRAME_SECONDS:
             # A soft check between frames. It cannot end a capture that never

@@ -73,6 +73,11 @@ MAX_TOTAL_FRAME_BYTES = 96 * 1024 * 1024
 # allocator.
 MAX_DECODER_OUTPUT_BYTES = 32 * 1024 * 1024
 
+# ffprobe answers with a few hundred bytes of JSON. Handing it the decoder ceiling
+# described a budget nobody meant: 32 MB of metadata is not a thing that happens,
+# and a ceiling that can never be reached bounds nothing.
+MAX_PROBE_OUTPUT_BYTES = 1024 * 1024
+
 # Enough diagnostic to identify a decoder failure, and no more: stderr is
 # attacker-influenced text that ends up in a log line.
 MAX_DECODER_STDERR_BYTES = 64 * 1024
@@ -270,6 +275,7 @@ def _run(
     timeout: int,
     deadline: Optional[float] = None,
     cancelled: Optional[threading.Event] = None,
+    max_output_bytes: Optional[int] = None,
 ) -> Completed:
     """Run a decoder, bounded by its own timeout, the request budget, and the caller.
 
@@ -297,7 +303,15 @@ def _run(
             timeout=timeout,
             deadline=deadline,
             cancelled=cancelled,
-            max_output_bytes=MAX_DECODER_OUTPUT_BYTES,
+            # What this CALL has left, not a constant. The fixed ceiling let every
+            # decoder in a batch write up to 32 MB each, whatever the call's own
+            # reservation had already committed - so the per-call budget bounded
+            # what the workers were asked for and not what the pipe would accept.
+            max_output_bytes=(
+                MAX_DECODER_OUTPUT_BYTES
+                if max_output_bytes is None
+                else max(1, min(MAX_DECODER_OUTPUT_BYTES, int(max_output_bytes)))
+            ),
             # Truncated at the boundary rather than at each use, so no later
             # caller can forget and log the whole thing.
             max_stderr_bytes=MAX_DECODER_STDERR_BYTES,
@@ -343,6 +357,7 @@ def _probe(
             "json",
             path,
         ],
+        max_output_bytes=MAX_PROBE_OUTPUT_BYTES,
         timeout=FFPROBE_TIMEOUT_SECONDS,
         deadline=deadline,
         cancelled=cancelled,
@@ -494,6 +509,7 @@ def _frames_with_pillow(
         timeout=PILLOW_DECODE_TIMEOUT_SECONDS,
         deadline=budget.deadline,
         cancelled=budget.cancelled,
+        max_output_bytes=budget.remaining_bytes,
     )
     decoded = _pillow_reply(result, path, "animation")
     for data, _meta in decoded:
@@ -522,6 +538,7 @@ def still_with_pillow(
         timeout=PILLOW_DECODE_TIMEOUT_SECONDS,
         deadline=budget.deadline,
         cancelled=budget.cancelled,
+        max_output_bytes=budget.remaining_bytes,
     )
     data, meta = _pillow_reply(result, path, "image")[0]
     budget.charge(data)
@@ -595,6 +612,7 @@ def _frames_with_lottie(
         timeout=LOTTIE_RENDER_TIMEOUT_SECONDS,
         deadline=budget.deadline,
         cancelled=budget.cancelled,
+        max_output_bytes=budget.remaining_bytes,
     )
     if result.returncode == LOTTIE_EXIT_CANNOT_OPEN:
         raise FrameExtractionError(
@@ -762,6 +780,7 @@ def _frames_with_ffmpeg(
             timeout=FFMPEG_FRAME_TIMEOUT_SECONDS,
             deadline=budget.deadline,
             cancelled=budget.cancelled,
+            max_output_bytes=budget.remaining_bytes,
         )
         if result.returncode != 0 or not result.stdout:
             # The last iteration is the furthest-past-EOF seek and therefore the

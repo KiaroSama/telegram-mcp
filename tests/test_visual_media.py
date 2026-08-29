@@ -332,7 +332,7 @@ def test_ffmpeg_failure_reports_the_first_seek_not_the_last(monkeypatch, tmp_pat
         ]
     )
 
-    def _fake_run(command, timeout, deadline=None, cancelled=None):
+    def _fake_run(command, timeout, deadline=None, cancelled=None, max_output_bytes=None):
         # The temp path ffmpeg was handed is the one that must not reach the model.
         spooled = command[command.index("-i") + 1]
         return subprocess.CompletedProcess(
@@ -768,7 +768,7 @@ def test_the_ffmpeg_command_scales_before_it_encodes_a_png():
     so an 8K video built an 8K PNG per frame purely to throw it away."""
     seen = {}
 
-    def _fake_run(command, timeout, deadline=None, cancelled=None):
+    def _fake_run(command, timeout, deadline=None, cancelled=None, max_output_bytes=None):
         seen["command"] = command
         return SimpleNamespace(returncode=1, stdout=b"", stderr=b"no frame")
 
