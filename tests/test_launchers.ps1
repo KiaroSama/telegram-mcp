@@ -275,6 +275,46 @@ foreach ($shipped in $scripts) {
         throw "$(Split-Path -Leaf $shipped) is back to editing the ACL with icacls."
     }
 }
+# The two launchers each carry their own copy of these four functions, and that
+# duplication is deliberate: both are documented as standalone and runnable from
+# a shortcut, so dot-sourcing a shared module adds a load path a double-click can
+# fail on. Copies are fine only while something compares them - exactly the
+# argument tests/test_console_theme.py makes for the palette carried in two
+# languages.
+#
+# Compared as CODE, not as text: each launcher explains these functions in its own
+# context and the prose has legitimately diverged, while all four bodies are
+# statement-for-statement identical. The last change to Set-OwnerOnlyAcl was a real
+# security fix; the next one must not be able to land in one file and not the other.
+$sharedFunctions = @(
+    'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Test-OwnerOnlyAcl', 'Remove-StaleFiles')
+$shared = @{}
+foreach ($shipped in $scripts) {
+    $text = Get-Content -LiteralPath $shipped -Raw
+    $shared[$shipped] = @{}
+    foreach ($name in $sharedFunctions) {
+        $block = [regex]::Match($text, "(?ms)^function $name \{.*?^\}")
+        if (-not $block.Success) {
+            throw "$(Split-Path -Leaf $shipped) declares $name but its body could not be extracted."
+        }
+        # Drop <# #> blocks, # comments and blank lines; keep the executable shape.
+        $code = [regex]::Replace($block.Value, '(?s)<#.*?#>', '')
+        $shared[$shipped][$name] = @(
+            $code -split "`r?`n" |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { $_ -and -not $_.StartsWith('#') }
+        ) -join "`n"
+    }
+}
+$left, $right = $scripts
+foreach ($name in $sharedFunctions) {
+    if ($shared[$left][$name] -ne $shared[$right][$name]) {
+        throw ("$name has drifted between $(Split-Path -Leaf $left) and " +
+               "$(Split-Path -Leaf $right). Apply the change to both, or give them " +
+               "different names so the difference is deliberate and visible.")
+    }
+}
+
 # Every .env this manager creates is restricted before anything is written into
 # it: the file ends up holding session strings, and a session string is the
 # account, with no password and no second factor.
