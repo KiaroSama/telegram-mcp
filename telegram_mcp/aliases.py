@@ -196,6 +196,34 @@ def _split_store_key(raw: str) -> AliasKey:
     return account_key(account), alias_key(alias)
 
 
+# Parsed rows, keyed by the file they came from. load_aliases runs inside
+# resolve_entity on EVERY call - its own docstring says so - and tools/contacts.py
+# calls match_aliases inside a list comprehension, so the file was being read and
+# JSON-parsed once per candidate, synchronously, on the event loop. That blocks
+# Telethon's socket read and the incoming-feed pump along with it.
+#
+# Keyed on (mtime_ns, size) rather than a plain "loaded" flag so an edit made by
+# another process - Manage-Accounts.ps1, a second server, the session generator -
+# is still picked up. The residual gap is a same-size rewrite within one
+# filesystem tick; the save path below drops its own entry, which covers this
+# process.
+_ALIAS_CACHE: Dict[str, Any] = {}
+
+
+def _cache_stamp(path: Path):
+    """What makes a cached parse still valid: same file, same write, same size."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
+def _reset_alias_cache() -> None:
+    """Drop every cached parse. For tests, mirroring effect_catalog._reset_catalog."""
+    _ALIAS_CACHE.clear()
+
+
 def load_aliases(strict: bool = False) -> Dict[AliasKey, Dict[str, Any]]:
     """Return {(account, key): {"id": int, "name": str|None, "account": str|None}}.
 
@@ -210,6 +238,15 @@ def load_aliases(strict: bool = False) -> Dict[AliasKey, Dict[str, Any]]:
     path = aliases_file_path()
     if not path.exists() and not os.getenv(_ALIASES_ENV):
         path = _LEGACY_ALIASES_FILE
+
+    stamp = _cache_stamp(path)
+    cached = _ALIAS_CACHE.get(str(path))
+    if cached is not None and stamp is not None and cached[0] == stamp:
+        # A COPY: update_aliases hands this map to migrate_legacy_rows and then to
+        # the caller's mutate(), both of which change it in place. Sharing the
+        # cached object would let one call's edit leak into every later read.
+        return {key: dict(value) for key, value in cached[1].items()}
+
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
@@ -242,7 +279,11 @@ def load_aliases(strict: bool = False) -> Dict[AliasKey, Dict[str, Any]]:
         # version that scoped in the value and keyed flat.
         record["account"] = account_key(record.get("account")) or keyed_account
         records[(record["account"], alias)] = record
-    return records
+
+    if stamp is not None:
+        _ALIAS_CACHE[str(path)] = (stamp, records)
+    # A copy for the same reason the cache hit returns one: this map gets mutated.
+    return {key: dict(value) for key, value in records.items()}
 
 
 def _stored_row(key: Union[AliasKey, str], value: Any) -> tuple:
@@ -286,8 +327,20 @@ def save_aliases(aliases: Dict[Any, Any]) -> None:
             json.dump(payload, f, ensure_ascii=False, indent=2)
         # Before the rename, so the file is never briefly readable under its real
         # name: an ACL travels with the file, and mkstemp's 0600 is POSIX-only.
-        restrict_to_owner(tmp)
+        # False means the DACL could not be written - and on Windows that ACL is
+        # the ONLY thing making this file private, because mkstemp's 0600 is a
+        # POSIX guarantee. This file maps nicknames to real people. Publishing it
+        # under its real name because a permissions call quietly failed is the
+        # one outcome worth failing the write for, and it is what the contract at
+        # the top of this module already demanded of callers: treat False as a
+        # refusal, not a warning. connection.py and tools/events.py both do.
+        if not restrict_to_owner(tmp):
+            raise AliasStoreUnprotected(
+                f"the alias store could not be made readable only by this account, "
+                f"so it was not written: {path}"
+            )
         os.replace(tmp, path)  # atomic: a crash leaves the previous file intact
+        _ALIAS_CACHE.pop(str(path), None)
     except BaseException:
         os.unlink(tmp)
         raise
@@ -295,6 +348,10 @@ def save_aliases(aliases: Dict[Any, Any]) -> None:
 
 class AliasStoreUnreadable(Exception):
     """The alias file exists but could not be read, so writing would destroy it."""
+
+
+class AliasStoreUnprotected(Exception):
+    """The alias file could not be restricted to its owner, so it was not written."""
 
 
 # How long a writer waits for the lock before giving up, and how often it retries.
