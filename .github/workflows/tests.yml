@@ -7,6 +7,9 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Pytest With Coverage
@@ -31,8 +34,15 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # Without the cache every push re-resolves and re-downloads the whole tree -
+      # telethon, pillow, regex, plus the native rlottie wheel - once per job, on
+      # two platforms. Keyed on uv.lock, so a dependency change still gets a cold
+      # resolve rather than a stale environment.
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       # --cov-fail-under=0 overrides the floor in pyproject FOR THIS JOB. The
       # floor is a claim about the project and no single runner can execute the
@@ -88,6 +98,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       - name: Fail if the lottie extra did not install
         run: >
@@ -189,6 +202,9 @@ jobs:
 
       - name: Install uv
         uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: "uv.lock"
 
       # `merge-multiple` extracts every matched artifact into ONE directory, and
       # the collision it silently loses to is on the FILE basename inside each

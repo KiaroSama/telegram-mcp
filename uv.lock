@@ -1517,7 +1517,6 @@ name = "telegram-mcp"
 version = "1.0.0"
 source = { editable = "." }
 dependencies = [
-    { name = "httpx" },
     { name = "mcp", extra = ["cli"] },
     { name = "pillow" },
     { name = "python-dotenv" },
@@ -1550,7 +1549,6 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "httpx", specifier = ">=0.28.1" },
     { name = "mcp", extras = ["cli"], specifier = ">=1.8.0,<2" },
     { name = "pillow", specifier = ">=11.0" },
     { name = "python-dotenv", specifier = ">=1.1.0" },
