@@ -12,7 +12,13 @@ import sys
 
 import pytest
 
-from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
+from telegram_mcp.owner_only import (
+    _is_owner_only,
+    restrict_handle_to_owner,
+    restrict_to_owner_strict,
+    verify_handle_owner_only,
+    verify_owner_only,
+)
 
 windows_only = pytest.mark.skipif(sys.platform != "win32", reason="Windows DACLs")
 posix_only = pytest.mark.skipif(sys.platform == "win32", reason="POSIX file modes")
@@ -121,3 +127,137 @@ def test_the_posix_path_verifies_the_mode_it_set(tmp_path):
 
     os.chmod(target, 0o604)
     assert not verify_owner_only(target), "a group/other bit still verified as private"
+
+
+# --- what "owner-only" has to mean, beyond the SID set ----------------------
+#
+# The check used to be `set(sids) == {mine}`, and three lists pass that while
+# leaving the object open in ways the name does not suggest. `_is_owner_only` is
+# a pure decision over what was read back, so every rule is asserted directly
+# rather than by trying to construct four exotic DACLs on a real filesystem.
+
+MINE = "S-1-5-21-1-2-3-1001"
+FULL = 0x001F01FF
+INHERIT = 0x01 | 0x02
+ALLOW = 0x00
+DENY = 0x01
+
+
+def _entry(**overrides):
+    """One ACE as `_read_dacl` reports it: owner-only, allow, full, inheritable."""
+    entry = {"sid": MINE, "mask": FULL, "flags": INHERIT, "type": ALLOW}
+    entry.update(overrides)
+    return [entry]
+
+
+def test_a_correct_list_is_accepted_for_a_directory_and_for_a_file():
+    """Guard the guard: a check that refused everything would pass every case
+    below and break every caller."""
+    assert _is_owner_only(_entry(), protected=True, mine=MINE, inheritable=True)
+    assert _is_owner_only(
+        _entry(flags=0), protected=False, mine=MINE, inheritable=False
+    ), "a file inherits its entry from the protected directory it was born in"
+
+
+def test_a_directory_that_is_still_attached_to_inheritance_is_refused():
+    """One entry, this account, full rights - and whatever the parent grants
+    tomorrow arrives inside it, along with everything born there afterwards."""
+    assert not _is_owner_only(_entry(), protected=False, mine=MINE, inheritable=True)
+
+
+def test_a_directory_whose_entry_does_not_propagate_is_refused():
+    """The directory is private and nothing born in it is. That is the exact
+    hole: SQLite makes -wal and -shm files whenever it likes, long after any
+    startup sweep, and they inherit nothing."""
+    assert not _is_owner_only(_entry(flags=0), protected=True, mine=MINE, inheritable=True)
+    assert not _is_owner_only(
+        _entry(flags=0x01), protected=True, mine=MINE, inheritable=True
+    ), "object inheritance alone leaves subdirectories out"
+
+
+def test_a_single_deny_entry_is_not_owner_only():
+    """It has a one-element SID set and it grants nobody anything, including the
+    account that is supposed to own the file."""
+    assert not _is_owner_only(_entry(type=DENY), protected=True, mine=MINE, inheritable=True)
+
+
+def test_an_entry_that_does_not_grant_the_owner_full_control_is_refused():
+    """READ_CONTROL alone also names this account and nothing else."""
+    assert not _is_owner_only(_entry(mask=0x00020000), protected=True, mine=MINE, inheritable=True)
+
+
+def test_somebody_else_is_still_refused():
+    assert not _is_owner_only(
+        _entry(sid="S-1-5-21-9-9-9-513"), protected=True, mine=MINE, inheritable=True
+    )
+
+
+def test_a_null_dacl_is_never_owner_only():
+    """A NULL DACL grants everyone everything, so it must not read as an empty
+    list of foreign identities."""
+    assert not _is_owner_only(
+        [{"sid": "<null-dacl>", "mask": 0, "flags": 0, "type": ALLOW}],
+        protected=True,
+        mine=MINE,
+        inheritable=False,
+    )
+
+
+def test_an_unreadable_dacl_is_never_success():
+    """None means the question could not be answered, which is not the same as
+    'nobody else is on it'."""
+    assert not _is_owner_only(None, protected=True, mine=MINE, inheritable=True)
+    assert not _is_owner_only(_entry(), protected=None, mine=MINE, inheritable=True)
+    assert not _is_owner_only(_entry(), protected=True, mine=None, inheritable=True)
+
+
+# --- applying and verifying through one handle ------------------------------
+
+
+@windows_only
+def test_a_directory_is_hardened_and_proved_through_the_same_handle(tmp_path):
+    """The pathname form resolves the name to apply the descriptor and again to
+    read it back, so it can report success about an object it never wrote to.
+    One handle has nothing left to re-resolve."""
+    import msvcrt
+
+    from telegram_mcp import win_handles
+
+    target = tmp_path / "staging"
+    target.mkdir()
+
+    descriptor = win_handles.open_for_security(str(target))
+    try:
+        handle = msvcrt.get_osfhandle(descriptor)
+        assert restrict_handle_to_owner(handle, inheritable=True)
+        assert verify_handle_owner_only(handle, inheritable=True)
+    finally:
+        os.close(descriptor)
+
+    # And the same object, asked by name, agrees.
+    assert verify_owner_only(target)
+    born = target / "born.txt"
+    born.write_text("x", encoding="utf-8")
+    assert verify_owner_only(born), "the inheritable entry did not reach a new file"
+
+
+@windows_only
+def test_the_transfer_directory_is_hardened_through_a_handle():
+    """Where it matters, not merely where it is available."""
+    import inspect
+
+    from telegram_mcp.handles import SystemCalls
+
+    body = inspect.getsource(SystemCalls.restrict_directory)
+
+    assert "open_for_security" in body
+    assert "restrict_handle_to_owner" in body
+    assert "restrict_to_owner_strict" not in body
+
+
+@posix_only
+def test_the_handle_form_declines_where_there_is_no_handle_security():
+    """POSIX answers this with mode bits through the path form; a handle-addressed
+    descriptor does not exist there, and saying False is the honest answer."""
+    assert not restrict_handle_to_owner(3, inheritable=True)
+    assert not verify_handle_owner_only(3, inheritable=True)

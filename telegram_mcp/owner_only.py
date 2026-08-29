@@ -45,6 +45,11 @@ _FILE_ALL_ACCESS = 0x001F01FF
 # So that files created inside a hardened directory start out hardened too, rather
 # than relying on every writer remembering to call this.
 _OBJECT_INHERIT_ACE = 0x01
+_ACCESS_ALLOWED_ACE_TYPE = 0x00
+# The control bit that says the DACL is detached from inheritance. Without it a
+# list that reads as owner-only today gains whatever the parent grants tomorrow,
+# so the SID set alone was never the whole answer.
+_SE_DACL_PROTECTED = 0x1000
 _CONTAINER_INHERIT_ACE = 0x02
 
 _ACL_SIZE_INFORMATION = 2
@@ -172,6 +177,40 @@ def _api():
         ctypes.c_void_p,
         ctypes.c_void_p,
     ]
+    # The HANDLE forms. A pathname is resolved again by every call that takes
+    # one, so applying a descriptor by name and then verifying it by name proves
+    # nothing about a single object: the name can change hands in between. These
+    # take the handle the caller already holds, and that handle IS the object.
+    advapi32.GetSecurityInfo.restype = wintypes.DWORD
+    advapi32.GetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+
+    advapi32.SetSecurityInfo.restype = wintypes.DWORD
+    advapi32.SetSecurityInfo.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+    ]
+
+    advapi32.GetSecurityDescriptorControl.restype = wintypes.BOOL
+    advapi32.GetSecurityDescriptorControl.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(wintypes.WORD),
+        ctypes.POINTER(wintypes.DWORD),
+    ]
+
     advapi32.GetNamedSecurityInfoW.restype = wintypes.DWORD
     advapi32.GetNamedSecurityInfoW.argtypes = [
         wintypes.LPWSTR,
@@ -265,60 +304,133 @@ def _build_owner_only_acl(sid, inheritable: bool):
     return buffer
 
 
-def _dacl_sids(path: str) -> Optional[list]:
-    """Every SID with an entry in the object's DACL, read back off the object itself.
+def _read_dacl(target, by_handle: bool):
+    """``(entries, protected)`` read off the object, or ``(None, None)``.
+
+    Each entry is ``{sid, mask, flags, type}``. The SID alone was what this used to
+    return, and a SID set passes three lists that are not owner-only in any useful
+    sense: one still attached to inheritance, one whose single entry is a DENY, and
+    one on a directory whose entry does not propagate - so files born inside inherit
+    nothing and fall back to the creator's token.
 
     ``None`` means the DACL could not be read, which is not the same as "no other
     identities" and must never be reported as success.
     """
-    ctypes, advapi32, kernel32, _tu, _acl, _ace, size_info_type = _api()
+    ctypes, advapi32, kernel32, _tu, _acl, ace_type, size_info_type = _api()
     from ctypes import wintypes
 
     dacl = ctypes.c_void_p()
     descriptor = ctypes.c_void_p()
-    status = advapi32.GetNamedSecurityInfoW(
-        str(path),
-        _SE_FILE_OBJECT,
-        _DACL_SECURITY_INFORMATION,
-        None,
-        None,
-        ctypes.byref(dacl),
-        None,
-        ctypes.byref(descriptor),
-    )
+    if by_handle:
+        status = advapi32.GetSecurityInfo(
+            wintypes.HANDLE(target),
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
+    else:
+        status = advapi32.GetNamedSecurityInfoW(
+            str(target),
+            _SE_FILE_OBJECT,
+            _DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            ctypes.byref(dacl),
+            None,
+            ctypes.byref(descriptor),
+        )
     if status != 0:
-        return None
+        return None, None
     try:
+        control = wintypes.WORD()
+        revision = wintypes.DWORD()
+        if not advapi32.GetSecurityDescriptorControl(
+            descriptor, ctypes.byref(control), ctypes.byref(revision)
+        ):
+            return None, None
+        protected = bool(control.value & _SE_DACL_PROTECTED)
+
         if not dacl:
-            # A NULL DACL grants everyone everything. It is the loosest possible
-            # answer, so it is reported as an identity nobody expects rather than
-            # as an empty list.
-            return ["<null-dacl>"]
+            # A NULL DACL grants everyone everything. The loosest possible answer,
+            # so it is reported as an identity nobody expects rather than as an
+            # empty list.
+            return ([{"sid": "<null-dacl>", "mask": 0, "flags": 0, "type": 0}], protected)
+
         info = size_info_type()
         if not advapi32.GetAclInformation(
             dacl, ctypes.byref(info), ctypes.sizeof(info), _ACL_SIZE_INFORMATION
         ):
-            return None
+            return None, None
+
         found = []
         for index in range(info.AceCount):
             ace = wintypes.LPVOID()
             if not advapi32.GetAce(dacl, index, ctypes.byref(ace)):
-                return None
-            entry = ctypes.cast(ace, ctypes.POINTER(_api()[5])).contents
+                return None, None
+            entry = ctypes.cast(ace, ctypes.POINTER(ace_type)).contents
             sid_pointer = ctypes.addressof(entry) + type(entry).SidStart.offset
-            text = _sid_text(ctypes.c_void_p(sid_pointer))
-            found.append(text or "<unreadable-sid>")
-        return found
+            found.append(
+                {
+                    "sid": _sid_text(ctypes.c_void_p(sid_pointer)) or "<unreadable-sid>",
+                    "mask": entry.Mask,
+                    "flags": entry.Header.AceFlags,
+                    "type": entry.Header.AceType,
+                }
+            )
+        return found, protected
     finally:
         if descriptor:
             kernel32.LocalFree(descriptor)
 
 
+def _is_owner_only(entries, protected, mine, inheritable: bool) -> bool:
+    """Whether what was read back is a protected, owner-only, usable list."""
+    if entries is None or protected is None or mine is None:
+        return False
+    # Protection is required of a DIRECTORY and not of a file, and the asymmetry
+    # is the design rather than an oversight. A directory that is not protected
+    # allows today whatever its parent grants tomorrow, and everything born
+    # inside it inherits that. A FILE inside such a directory is private BY
+    # inheritance - that is how a SQLite -wal file gets its permissions at all -
+    # so demanding protection of it would refuse the very mechanism this module
+    # exists to establish. What is demanded of a file is that the list, however
+    # it arrived, names this account and nobody else.
+    if inheritable and not protected:
+        return False
+    if len(entries) != 1:
+        return False
+
+    only = entries[0]
+    if only["sid"] != mine:
+        return False
+    # A single DENY entry for this account also has a one-element SID set.
+    if only["type"] != _ACCESS_ALLOWED_ACE_TYPE:
+        return False
+    # And an entry granting this account nothing useful locks the owner out of the
+    # file it is supposed to own.
+    if only["mask"] & _FILE_ALL_ACCESS != _FILE_ALL_ACCESS:
+        return False
+
+    if inheritable:
+        # Without these the DIRECTORY is private and everything born in it is not:
+        # a SQLite -wal or -shm file inherits nothing and falls back to whatever
+        # the creator's token grants.
+        wanted = _OBJECT_INHERIT_ACE | _CONTAINER_INHERIT_ACE
+        if only["flags"] & wanted != wanted:
+            return False
+    return True
+
+
 def verify_owner_only(path: Union[str, Path]) -> bool:
-    """Whether the object's DACL names this account and nothing else.
+    """Whether the object's DACL names this account, and nothing else, usably.
 
     Read off the object, not inferred from the call that set it. A tool exiting 0
-    says the tool ran; this says what the file actually allows.
+    says the tool ran; this says what the file actually allows - and for a
+    directory, what the files born inside it will allow.
     """
     if os.name != "nt":
         try:
@@ -329,13 +441,67 @@ def verify_owner_only(path: Union[str, Path]) -> bool:
         sid = _current_user_sid()
         if sid is None:
             return False
-        mine = _sid_text(sid)
-        present = _dacl_sids(str(path))
+        entries, protected = _read_dacl(str(path), by_handle=False)
+        return _is_owner_only(entries, protected, _sid_text(sid), Path(path).is_dir())
     except (OSError, AttributeError, ValueError):
         return False
-    if mine is None or present is None:
+
+
+def verify_handle_owner_only(handle: int, *, inheritable: bool) -> bool:
+    """The same question asked of an OPEN HANDLE rather than of a name.
+
+    Windows only; there is no handle-addressed equivalent on POSIX, where the
+    caller uses the path form and the mode bits answer it.
+    """
+    if os.name != "nt":
         return False
-    return set(present) == {mine}
+    try:
+        sid = _current_user_sid()
+        if sid is None:
+            return False
+        entries, protected = _read_dacl(handle, by_handle=True)
+        return _is_owner_only(entries, protected, _sid_text(sid), inheritable)
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+def restrict_handle_to_owner(handle: int, *, inheritable: bool) -> bool:
+    """Write the whole DACL through a HELD HANDLE, then read it back through it.
+
+    The pathname form resolves the name once to apply and once to verify, and
+    between those two calls the name can be given to a different object - so it can
+    report success about something it never wrote to. A handle IS the object; there
+    is nothing left to re-resolve.
+    """
+    if os.name != "nt":
+        return False
+    try:
+        ctypes, advapi32, *_ = _api()
+        from ctypes import wintypes
+
+        sid = _current_user_sid()
+        if sid is None:
+            return False
+        acl = _build_owner_only_acl(sid, inheritable=inheritable)
+        if acl is None:
+            return False
+        status = advapi32.SetSecurityInfo(
+            wintypes.HANDLE(handle),
+            _SE_FILE_OBJECT,
+            # PROTECTED is the half that makes this a replacement rather than an
+            # addition: it detaches the object from inheritance, so nothing flows
+            # back in behind the new list.
+            _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
+            None,
+            None,
+            ctypes.cast(acl, ctypes.c_void_p),
+            None,
+        )
+        if status != 0:
+            return False
+    except (OSError, AttributeError, ValueError):
+        return False
+    return verify_handle_owner_only(handle, inheritable=inheritable)
 
 
 def restrict_to_owner_strict(path: Union[str, Path]) -> bool:
@@ -343,6 +509,9 @@ def restrict_to_owner_strict(path: Union[str, Path]) -> bool:
 
     Returns whether the object is *now* owner-only, which is a different claim from
     "the call succeeded" - and the one every caller actually wanted.
+
+    Prefer :func:`restrict_handle_to_owner` where a handle is already held: this
+    form resolves the name twice and cannot prove both times found the same object.
     """
     if os.name != "nt":
         try:
@@ -364,9 +533,6 @@ def restrict_to_owner_strict(path: Union[str, Path]) -> bool:
         status = advapi32.SetNamedSecurityInfoW(
             str(path),
             _SE_FILE_OBJECT,
-            # PROTECTED is the half that makes this a replacement rather than an
-            # addition: it detaches the object from inheritance, so nothing flows
-            # back in behind the new list.
             _DACL_SECURITY_INFORMATION | _PROTECTED_DACL_SECURITY_INFORMATION,
             None,
             None,
@@ -380,4 +546,9 @@ def restrict_to_owner_strict(path: Union[str, Path]) -> bool:
     return verify_owner_only(path)
 
 
-__all__ = ["restrict_to_owner_strict", "verify_owner_only"]
+__all__ = [
+    "restrict_handle_to_owner",
+    "restrict_to_owner_strict",
+    "verify_handle_owner_only",
+    "verify_owner_only",
+]

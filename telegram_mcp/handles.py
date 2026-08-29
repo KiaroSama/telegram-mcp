@@ -170,9 +170,27 @@ class SystemCalls:
         """
         if os.name != "nt":
             return (stat_module.S_IMODE(os.stat(path).st_mode) & 0o077) == 0
-        from telegram_mcp.owner_only import restrict_to_owner_strict
 
-        return bool(restrict_to_owner_strict(path))
+        import msvcrt
+
+        from telegram_mcp import win_handles
+        from telegram_mcp.owner_only import restrict_handle_to_owner
+
+        # Through ONE handle, not through the name twice. The pathname form
+        # resolves the name to apply the descriptor and again to read it back, so
+        # it can report success about an object it never wrote to. This handle is
+        # opened for exactly this and closed straight after; the pin taken by
+        # `open_subdirectory` deliberately asks for no security rights, because
+        # requiring WRITE_DAC to open a directory would break the roots gate on
+        # every folder an operator did not create.
+        try:
+            descriptor = win_handles.open_for_security(str(path))
+        except OSError:
+            return False
+        try:
+            return restrict_handle_to_owner(msvcrt.get_osfhandle(descriptor), inheritable=True)
+        finally:
+            os.close(descriptor)
 
     def fsync(self, fd):
         os.fsync(fd)

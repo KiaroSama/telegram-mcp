@@ -72,6 +72,11 @@ _FILE_LIST_DIRECTORY = 0x00000001
 _FILE_READ_ATTRIBUTES = 0x00000080
 _DELETE = 0x00010000
 _SYNCHRONIZE = 0x00100000
+# Reading and writing a security descriptor are separate rights, and the pin
+# above asks for neither: a handle held only to stop a rename cannot be used to
+# change what the object allows.
+_READ_CONTROL = 0x00020000
+_WRITE_DAC = 0x00040000
 
 _FILE_SHARE_READ = 0x00000001
 _FILE_SHARE_WRITE = 0x00000002
@@ -155,6 +160,33 @@ def pin_directory(path: str) -> int:
         str(path),
         _FILE_LIST_DIRECTORY | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
         _FILE_SHARE_READ | _FILE_SHARE_WRITE,
+        None,
+        _OPEN_EXISTING,
+        _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    if handle == _INVALID_HANDLE_VALUE:
+        raise _fail(str(path))
+    return _adopt(handle, str(path))
+
+
+def open_for_security(path: str) -> int:
+    """Open an object so its DACL can be written and read back through ONE handle.
+
+    Deliberately not the pin: that handle is held to stop a rename and asks for
+    no security rights at all, and adding WRITE_DAC to it would make opening any
+    directory require a right the operator's own folders may not grant this
+    account - breaking the roots gate for every caller, to serve the few places
+    that harden something.
+
+    BACKUP_SEMANTICS so a directory can be opened at all; OPEN_REPARSE_POINT so a
+    link standing where the object should be is opened AS the link rather than
+    silently followed.
+    """
+    handle = _kernel32().CreateFileW(
+        str(path),
+        _READ_CONTROL | _WRITE_DAC,
+        _FILE_SHARE_READ | _FILE_SHARE_WRITE | _FILE_SHARE_DELETE,
         None,
         _OPEN_EXISTING,
         _FILE_FLAG_BACKUP_SEMANTICS | _FILE_FLAG_OPEN_REPARSE_POINT,
