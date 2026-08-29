@@ -340,6 +340,58 @@ def _end_tree(process, job) -> None:
         pass
 
 
+# What a decoder legitimately needs in order to start, and nothing else.
+#
+# The workers take their whole input as argv and read no environment variable at
+# all - verified across pillow_worker, lottie_worker and capture_worker - so the
+# inherited environment was pure accident. What it accidentally included was the
+# login: TELEGRAM_API_HASH and TELEGRAM_SESSION_STRING* are loaded by
+# load_dotenv() in runtime.py and live in os.environ for the process lifetime.
+#
+# These children are the ones that decode ATTACKER-SUPPLIED bytes. The job object
+# bounds what a compromised decoder can DO; it does nothing about what the
+# decoder can READ out of its own environ. Without this, a memory-safety failure
+# in Pillow or a Lottie parser turns from "denial of service, contained" into
+# "the account".
+#
+# PATH finds ffmpeg. SYSTEMROOT is not optional on Windows: a child started
+# without it fails in ways that look like a corrupted Python install.
+_CHILD_ENV_KEYS = (
+    "PATH",
+    "PYTHONPATH",
+    "PYTHONHOME",
+    "PYTHONIOENCODING",
+    "PYTHONUTF8",
+    "VIRTUAL_ENV",
+    "SYSTEMROOT",
+    "SYSTEMDRIVE",
+    "WINDIR",
+    "COMSPEC",
+    "NUMBER_OF_PROCESSORS",
+    "PROCESSOR_ARCHITECTURE",
+    "TEMP",
+    "TMP",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "HOME",
+    "USERPROFILE",
+    "LOCALAPPDATA",
+    "APPDATA",
+)
+
+
+def child_environment() -> dict:
+    """The parent's environment reduced to what a helper needs to start.
+
+    An allowlist rather than a denylist: a new secret added to the server's
+    environment must not reach the decoders by default. A helper that genuinely
+    needs a variable gets it added here deliberately - and one that needs a
+    TELEGRAM_* value would be a design error worth stopping on.
+    """
+    return {key: os.environ[key] for key in _CHILD_ENV_KEYS if key in os.environ}
+
+
 def run_bounded(
     command: list[str],
     *,
@@ -393,6 +445,8 @@ def run_bounded(
             # Never inherit the parent's stdin: an unexpected prompt in a helper
             # would block for ever on a terminal nothing is watching.
             stdin=subprocess.DEVNULL,
+            # Not the parent's environment: see _CHILD_ENV_KEYS above.
+            env=child_environment(),
             **extras,
         )
     except FileNotFoundError as error:

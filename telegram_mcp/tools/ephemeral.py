@@ -34,6 +34,8 @@ from typing import Any, Optional, Union
 
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
+from telegram_mcp.file_roots import safe_suffix as _safe_suffix
+from telegram_mcp.file_roots import target_path as _target_path
 from telegram_mcp.media_preview import (
     encode_frames_cancellable,
     encode_still_cancellable,
@@ -58,73 +60,6 @@ _MIME_EXTENSIONS = {
     "audio/mpeg": ".mp3",
     "audio/mp4": ".m4a",
 }
-
-# A leading dot then 1-7 ASCII alphanumerics. That admits every real media
-# extension (.jpg, .webm, .ogg, .tgs, .sticker) while rejecting colons, spaces,
-# path separators, inner dots and the empty suffix.
-_WELL_FORMED_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,7}$")
-
-# Well formed and still dangerous: Windows runs or follows these when the
-# operator double-clicks the saved file in the folder they chose. The rule above
-# cannot catch them -- ".hta" is a dot and three ASCII letters, exactly like
-# ".jpg".
-#
-# A denylist is normally the weaker shape and is chosen deliberately here. This
-# tool saves *arbitrary* media -- a PDF, a zip, an mp3 -- so an allowlist of
-# media extensions would refuse legitimate documents the operator asked to save.
-# The threat answered is narrow and its members are enumerable: a suffix Windows
-# itself executes or follows. That, and only that, justifies adding one.
-_SHELL_INTERPRETED_SUFFIXES = frozenset(
-    {
-        ".hta",
-        ".cmd",
-        ".bat",
-        ".com",
-        ".exe",
-        ".scr",
-        ".pif",
-        ".msi",
-        ".ps1",
-        ".vbs",
-        ".vbe",
-        ".js",
-        ".jse",
-        ".wsf",
-        ".wsh",
-        ".reg",
-        ".lnk",
-        ".url",
-    }
-)
-
-
-def _safe_suffix(candidate: str) -> str:
-    """The candidate suffix if it is well formed, else ``.bin``.
-
-    The suffix arrives from Telethon's ``File.ext``, i.e. from the mime type or
-    filename the *sender* chose, and it is concatenated into a real filename
-    written into one of the operator's configured roots. ".webm:ads" is the case
-    this closes: on Windows that makes NTFS create an alternate data stream, so
-    the visible file looks empty while the payload lives in the stream and the
-    reported path carries the ":stream" suffix. Separators, spaces, inner dots
-    and an over-long or empty suffix go the same way.
-
-    The second rule answers the other threat: ".hta" is well formed, so the
-    first rule keeps it, and double-clicking the saved file would then run it.
-    Shell-interpreted suffixes are replaced even though their shape is fine.
-
-    ``visual/frames.py`` guards the temp-file path with a decoder allowlist. It
-    can, because it only ever decodes. This tool saves arbitrary media, so the
-    shape here is well-formedness plus a narrow denylist rather than a fixed set
-    of decodable types.
-    """
-    if not _WELL_FORMED_SUFFIX.match(candidate):
-        return ".bin"
-    # Case-folded: a sender can send ".HTA" as easily as ".hta".
-    if candidate.lower() in _SHELL_INTERPRETED_SUFFIXES:
-        return ".bin"
-    return candidate
-
 
 # Telegram's own "view once" convention: the maximum int, meaning the media is
 # destroyed after a single viewing rather than after a countdown.
@@ -326,25 +261,6 @@ async def send_disappearing_media(
         )
     except Exception as e:
         return log_and_format_error("send_disappearing_media", e, chat_id=chat_id)
-
-
-def _target_path(out_path: Path, suffix: str) -> tuple:
-    """The path to write, with the media's extension enforced over the caller's.
-
-    Returns ``(path, replaced_suffix)``; ``replaced_suffix`` is None when the
-    caller's own extension already agreed.
-
-    A caller-supplied suffix used to win outright, so ``file_path="note.exe"``
-    wrote sender-controlled bytes into a file Windows executes on double-click.
-    That is the same hole the sender-side guard above closes, entered through the
-    other door - and the comment two lines up already claimed the extension comes
-    from the media and never from the caller.
-    """
-    if not out_path.suffix:
-        return out_path.with_suffix(suffix), None
-    if out_path.suffix.lower() == suffix.lower():
-        return out_path, None
-    return out_path.with_suffix(suffix), out_path.suffix
 
 
 @mcp.tool(

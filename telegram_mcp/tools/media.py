@@ -276,7 +276,13 @@ async def download_media(
                 # The bytes reach storage before the name that promises them does.
                 staging.sync_child(produced.name)
 
-                final = out_path.with_suffix(produced.suffix)
+                # The suffix comes from the SENDER's mime type, and this file
+                # lands in a directory the operator opened for downloads. The
+                # bytes were always untrusted; the extension is what decides
+                # whether opening the result runs it. save_disappearing_media
+                # has had this guard since it was written; this path did not.
+                safe = safe_suffix(produced.suffix)
+                final = out_path.with_suffix(safe)
                 final_name = parent.reserve_free_name(final.stem, final.suffix)
                 if final_name is None:
                     return (

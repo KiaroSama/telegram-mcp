@@ -418,7 +418,14 @@ async def add_contact(
             if result.imported:
                 return f"Contact {first_name} {last_name} added successfully."
             else:
-                return f"Contact not added. Response: {str(result)}"
+                # The counts, never the object: str() on the answer dumps every
+                # nested entity, access_hash included.
+                retry = len(getattr(result, "retry_contacts", None) or [])
+                return (
+                    "Contact not added: Telegram imported none of the contacts "
+                    f"({retry} queued to retry). The number may not be registered, "
+                    "or its owner may not allow being found by phone."
+                )
         else:
             return "Error: Phone number is required when username is not provided."
     except (ImportError, AttributeError) as type_err:
@@ -440,7 +447,11 @@ async def add_contact(
                 if hasattr(result, "imported") and result.imported:
                     return f"Contact {first_name} {last_name} added successfully (alt method)."
                 else:
-                    return f"Contact not added. Alternative method response: {str(result)}"
+                    retry = len(getattr(result, "retry_contacts", None) or [])
+                    return (
+                        "Contact not added by the alternative method either: Telegram "
+                        f"imported none of the contacts ({retry} queued to retry)."
+                    )
             except Exception as alt_e:
                 return log_and_format_error("add_contact", alt_e, phone=phone)
         else:
@@ -747,7 +758,11 @@ async def set_contact_alias(
                 {"saved": True, "alias": key, "account": scope, "resolved": formatted}
             )
 
-        return update_aliases(_store)
+        # `update_aliases` takes a cross-process file lock and polls it with
+        # time.sleep for up to ten seconds. On the loop that stalls Telethon's
+        # socket and every concurrent tool call; runner.py:81 does the same for
+        # the startup session lock.
+        return await asyncio.to_thread(update_aliases, _store)
     except AliasStoreUnreadable as e:
         return format_tool_result(
             {
@@ -823,7 +838,7 @@ async def delete_contact_alias(alias: str, account: Optional[str] = None) -> str
                     return f"Alias '{alias}' deleted."
             return f"Alias '{alias}' not found."
 
-        return update_aliases(_forget)
+        return await asyncio.to_thread(update_aliases, _forget)
     except Exception as e:
         return log_and_format_error("delete_contact_alias", e, alias=alias)
 
