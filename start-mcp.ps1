@@ -210,7 +210,7 @@ try {
     try {
         if ($logPath) {
             $pythonWrapper = @'
-import os, re, runpy, sys, threading, traceback
+import atexit, os, re, runpy, sys, threading, traceback
 
 # STDERR ONLY. On the stdio transport stdout carries the MCP protocol -- complete
 # tool results, i.e. the user's own messages, contacts and files -- so it is
@@ -285,40 +285,62 @@ def roll():
         log = None
         persist = False
 
+# Only the server's OWN diagnostics are written down. `telegram_mcp` logs through
+# safe_log, whose RedactingFilter replaces every value with a shape and a digest
+# before it reaches stderr, so those lines are safe by construction and carry this
+# exact prefix. Everything else on the child's stderr was composed by something
+# that made no such promise - a Telethon warning naming a chat, a deprecation
+# notice quoting an argument, a third-party traceback with locals in it. Removing
+# ANSI escapes does not make that safe; it only makes it tidy. Those lines go to
+# the terminal and are COUNTED, not persisted.
+SERVER_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} \[[A-Z]+\] telegram_mcp - ')
+partial = ''
+withheld = 0
+
+def emit(line):
+    # The one place anything reaches the log, so the size ceiling is enforced in
+    # one place too.
+    global log, persist
+    if not persist:
+        return
+    encoded = line.encode('utf-8')
+    if max_bytes:
+        if log.tell() + len(encoded) > max_bytes:
+            roll()
+            if not persist:
+                return
+        if len(encoded) > max_bytes:
+            marker = '... [truncated at the log size ceiling]' + chr(10)
+            keep = max(0, max_bytes - len(marker.encode('utf-8')))
+            line = encoded[:keep].decode('utf-8', 'ignore') + marker
+    log.write(line)
+
+def persist_chunk(text):
+    # Line by line, because the allowlist is a per-line decision and the pump
+    # delivers arbitrary chunks.
+    global partial, withheld
+    partial += text
+    while chr(10) in partial:
+        line, partial = partial.split(chr(10), 1)
+        if SERVER_LINE.match(line):
+            emit(line + chr(10))
+        else:
+            withheld += 1
+
 class Tee:
     def __init__(self, stream):
         self.stream = stream
 
     def write(self, text):
         with lock:
+            # The terminal gets everything, always and first. What is written
+            # down is decided by `persist_chunk`, one line at a time.
             written = self.stream.write(text)
             self.stream.flush()
             if not persist:
                 return written
-            cleaned = ansi.sub('', text)
-            if max_bytes:
-                # Roll BEFORE writing when this chunk would cross the ceiling. The
-                # old order wrote and measured afterwards, so the cap only ever
-                # applied to the write AFTER the one that crossed it.
-                if log.tell() + len(cleaned.encode('utf-8')) > max_bytes:
-                    roll()
-                    # `roll` gives up when the rename did not happen, and it
-                    # closes the handle when it does. Writing on regardless is
-                    # an AttributeError on the next line.
-                    if not persist:
-                        return written
-                # And a single write larger than the whole ceiling cannot be
-                # bounded by rolling - the file would still hold it. Truncated,
-                # and said so, because a silently shortened diagnostic is worse
-                # than a short one.
-                encoded = cleaned.encode('utf-8')
-                if len(encoded) > max_bytes:
-                    marker = '... [truncated at the log size ceiling]' + chr(10)
-                    keep = max(0, max_bytes - len(marker.encode('utf-8')))
-                    cleaned = encoded[:keep].decode('utf-8', 'ignore') + marker
-            log.write(cleaned)
+            persist_chunk(ansi.sub('', text))
         return written
-
     def flush(self):
         with lock:
             self.stream.flush()
@@ -330,6 +352,23 @@ class Tee:
 
     def __getattr__(self, name):
         return getattr(self.stream, name)
+
+def _report_withheld():
+    # atexit, registered BEFORE the server is loaded, so it runs LAST: handlers
+    # fire in reverse registration order, and anything the child writes from its
+    # own atexit hook has to be counted before this line is written.
+    global withheld
+    with lock:
+        if partial and not SERVER_LINE.match(partial):
+            withheld += 1
+        if withheld and persist:
+            emit(
+                f'[launcher] {withheld} line(s) of child output were shown on the '
+                'terminal and not written here: they did not come from this '
+                'server' + chr(39) + 's redacting logger.' + chr(10)
+            )
+
+atexit.register(_report_withheld)
 
 stderr = sys.stderr
 sys.stderr = Tee(stderr)
@@ -359,11 +398,20 @@ except BaseException as exc:
         if frames
         else 'unknown'
     )
-    print(f'{type(exc).__name__} at {where}', file=sys.stderr)
+    # Straight to both, bypassing the tee: this record is composed HERE from a
+    # type name and a basename, so it is the one thing on this stream already
+    # known to be safe - and routing it through the allowlist withheld it, which
+    # left the log with nothing at all about the failure.
+    shape = f'{type(exc).__name__} at {where}'
+    print(shape, file=stderr)
+    stderr.flush()
+    with lock:
+        emit(shape + chr(10))
     exit_code = 1
 finally:
     sys.stdout.flush()
     sys.stderr.flush()
+
 if exit_code:
     raise SystemExit(exit_code)
 '@
@@ -385,10 +433,21 @@ if exit_code:
     }
 }
 catch {
-    $errorMessage = "[$([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss UTC'))] [ERROR] [launcher] $($_.Exception.Message)"
-    Write-Error $errorMessage -ErrorAction Continue
+    $stamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss UTC')
+    # The MESSAGE goes to the terminal and nowhere else. Whatever threw composed
+    # it, so it can carry a path, a chat title, an invite link or a credential out
+    # of a connection string - and the log file is the thing an operator attaches
+    # to a bug report. What is persisted is the SHAPE: the exception type and the
+    # script line that raised it, by basename.
+    Write-Error "[$stamp] [ERROR] [launcher] $($_.Exception.Message)" -ErrorAction Continue
     if ($logPath) {
-        [IO.File]::AppendAllText($logPath, "$errorMessage$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
+        $type = $_.Exception.GetType().Name
+        $where = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptName) {
+            "$(Split-Path -Leaf $_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+        }
+        else { 'unknown' }
+        $record = "[$stamp] [ERROR] [launcher] $type at $where"
+        [IO.File]::AppendAllText($logPath, "$record$([Environment]::NewLine)", [Text.UTF8Encoding]::new($false))
     }
 }
 finally {

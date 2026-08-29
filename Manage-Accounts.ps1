@@ -885,10 +885,16 @@ try {
 }
 catch {
     $exitCode = 1
-    $message = $_.Exception.Message
+    # Shown in full, persisted as its shape. This log records account operations,
+    # so an exception message here can carry a label, a path or part of a session
+    # string - and the file outlives the terminal.
     Write-Host ''
-    Write-Failure "Failed: $message"
-    Write-Log $message -Level ERROR
+    Write-Failure "Failed: $($_.Exception.Message)"
+    $where = if ($_.InvocationInfo -and $_.InvocationInfo.ScriptName) {
+        "$(Split-Path -Leaf $_.InvocationInfo.ScriptName):$($_.InvocationInfo.ScriptLineNumber)"
+    }
+    else { 'unknown' }
+    Write-Log "$($_.Exception.GetType().Name) at $where" -Level ERROR
 }
 finally {
     Write-Log "Account manager stopped with exit code $exitCode"

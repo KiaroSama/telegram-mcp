@@ -114,18 +114,29 @@ try {
     if ($shutdownTerminalText -notmatch 'late-shutdown-output') {
         throw 'Python tee wrapper terminal is missing late shutdown output.'
     }
-    if ($shutdownLogText -notmatch 'late-shutdown-output') {
-        throw 'Python tee wrapper log is missing late shutdown output.'
+    # NOT in the log, and that is the point: `late-shutdown-output` is arbitrary
+    # child stderr, and the tee keeps arbitrary stderr on the terminal only. What
+    # proves the tee still SAW a write made during interpreter shutdown - the
+    # thing this case exists for - is that it counted it.
+    if ($shutdownLogText -match 'late-shutdown-output') {
+        throw 'The log persisted arbitrary child stderr.'
+    }
+    if ($shutdownLogText -notmatch '1 line\(s\) of child output') {
+        throw "The tee never noticed the late write: $shutdownLogText"
     }
 
     # The server runs for as long as the client keeps it, so the tee needs a size
     # ceiling of its own: a retention count alone bounds the number of files, not
     # the one file being written.
+    # What `telegram_mcp` itself puts on stderr: safe_log has already replaced
+    # every value with a shape and a digest by the time it looks like this, which
+    # is why the tee persists this form and counts everything else.
+    $serverPrefix = '2026-01-01 00:00:00,000 [ERROR] telegram_mcp - '
     $chattyScript = Join-Path $wrapperTestDirectory 'chatty.py'
     $chattyLog = Join-Path $wrapperTestDirectory 'chatty.log'
     [IO.File]::WriteAllText(
         $chattyScript,
-        "import sys$([Environment]::NewLine)for i in range(400): print('x' * 100, file=sys.stderr)$([Environment]::NewLine)",
+        "import sys$([Environment]::NewLine)for i in range(400): print('$serverPrefix' + 'x' * 100, file=sys.stderr)$([Environment]::NewLine)",
         [Text.UTF8Encoding]::new($false)
     )
 
@@ -154,7 +165,7 @@ try {
     $burstLog = Join-Path $wrapperTestDirectory 'burst.log'
     [IO.File]::WriteAllText(
         $burstScript,
-        "import sys$([Environment]::NewLine)print('y' * 40, file=sys.stderr)$([Environment]::NewLine)print('z' * 9000, file=sys.stderr)$([Environment]::NewLine)",
+        "import sys$([Environment]::NewLine)print('$serverPrefix' + 'y' * 40, file=sys.stderr)$([Environment]::NewLine)print('$serverPrefix' + 'z' * 9000, file=sys.stderr)$([Environment]::NewLine)",
         [Text.UTF8Encoding]::new($false)
     )
     $null = & $python -c $wrapperMatch.Groups['body'].Value $burstLog 1024 $burstScript 2>&1
@@ -178,7 +189,7 @@ try {
     $protocolLog = Join-Path $wrapperTestDirectory 'protocol.log'
     [IO.File]::WriteAllText(
         $protocolScript,
-        "import sys$([Environment]::NewLine)print('protocol-payload-must-not-be-logged')$([Environment]::NewLine)print('diagnostic-line', file=sys.stderr)$([Environment]::NewLine)",
+        "import sys$([Environment]::NewLine)print('protocol-payload-must-not-be-logged')$([Environment]::NewLine)print('$serverPrefix' + 'diagnostic-line', file=sys.stderr)$([Environment]::NewLine)print('unrecognised-stderr-line', file=sys.stderr)$([Environment]::NewLine)",
         [Text.UTF8Encoding]::new($false)
     )
 
@@ -193,9 +204,18 @@ try {
         throw 'The wrapper wrote the MCP protocol channel to disk.'
     }
     if ($protocolLogText -notmatch 'diagnostic-line') {
-        throw 'The wrapper stopped persisting stderr diagnostics.'
+        throw 'The wrapper stopped persisting the server''s own diagnostics.'
     }
-    Write-Output 'ok  the wrapper persists stderr only and leaves stdout on the wire'
+    # And the other half of the rule: stderr that did NOT come from the server's
+    # redacting logger stays on the terminal. Anything else on that stream was
+    # composed by a library that promised nothing about what it quotes.
+    if ($protocolTerminalText -notmatch 'unrecognised-stderr-line') {
+        throw 'The wrapper swallowed unrecognised stderr instead of showing it.'
+    }
+    if ($protocolLogText -match 'unrecognised-stderr-line') {
+        throw 'The wrapper persisted stderr it cannot vouch for.'
+    }
+    Write-Output 'ok  only the server''s own diagnostics are persisted; stdout stays on the wire'
 }
 finally {
     [IO.Directory]::Delete($wrapperTestDirectory, $true)
