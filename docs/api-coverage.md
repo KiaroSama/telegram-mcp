@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **170** |
+| MCP tools registered | **176** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -102,7 +102,7 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-Added since, 165 → **170**, ported from the original project rather than merged (a
+Added since, 165 → **176**, ported from the original project rather than merged (a
 history rewrite here left the two with no merge base):
 
 | Capability | Tools | Module |
@@ -110,6 +110,7 @@ history rewrite here left the two with no merge base):
 | Peer photos | `list_photos`, `open_photo`, `get_photo_sheet` | `tools/photos.py` |
 | Copying a message whole | `copy_message` | `tools/messages.py` |
 | Saying why the file tools are off | `get_file_roots_status` | `tools/diagnostics.py` |
+| Reversible channel settings | `set_join_to_send`, `set_join_request`, `set_prehistory_hidden`, `set_participants_hidden`, `set_signatures`, `set_view_forum_as_messages` | `tools/channel_settings.py` |
 
 `copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
 copy. That is the only way premium emoji and media survive: rebuilding a message from
@@ -214,7 +215,8 @@ the tree, which is the cost of having deferred them.
 
 ### Phase 1 — full channel and group settings
 
-**42 of 59 `channels.*` requests are unreached** (17 raw-called, remeasured after the
+**36 of 59 `channels.*` requests are unreached** (was 42; the six reversible
+join-gate and visibility toggles are built) (17 raw-called, remeasured after the
 username work). What exists today is title, photo,
 admin rights, bans, slow mode, forum toggle, invite, join/leave and the admin log.
 The settings an operator actually reaches for are all missing:
@@ -222,8 +224,8 @@ The settings an operator actually reaches for are all missing:
 | Group | Requests |
 |---|---|
 | Usernames | ~~`UpdateUsername`, `CheckUsername`~~ **built**; still open: `ToggleUsername`, `ReorderUsernames`, `DeactivateAllUsernames` |
-| Join gates | `ToggleJoinToSend`, `ToggleJoinRequest` |
-| Visibility | `TogglePreHistoryHidden`, `ToggleParticipantsHidden`, `ToggleSignatures`, `ToggleViewForumAsMessages` |
+| Join gates | ~~`ToggleJoinToSend`, `ToggleJoinRequest`~~ **built** |
+| Visibility | ~~`TogglePreHistoryHidden`, `ToggleParticipantsHidden`, `ToggleSignatures`, `ToggleViewForumAsMessages`~~ **built** |
 | Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
 | Moderation | `ToggleAntiSpam`, `ReportAntiSpamFalsePositive`, `SetBoostsToUnblockRestrictions` |
 | Appearance | `UpdateColor`, `UpdateEmojiStatus`, `SetStickers`, `SetEmojiStickers` |
