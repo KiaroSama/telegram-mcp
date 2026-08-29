@@ -17,6 +17,11 @@ from typing import Any, Optional
 
 from sanitize import sanitize_name
 
+# The topic rule lives in one place because the send path needs it read
+# backwards; two copies of "which id means the topic" drift the first time
+# Telegram adds a field.
+from telegram_mcp.forum import reply_target_of
+
 # The string rules live next door so they can be tested without a message; they
 # are re-exported here because every existing caller imports them from this
 # module, and moving code should not move anyone's import.
@@ -589,16 +594,10 @@ def describe_media(msg) -> Optional[dict[str, Any]]:
 
 def describe_topic(msg) -> Optional[dict[str, Any]]:
     """Forum topic membership, when the message lives in one."""
-    reply = getattr(msg, "reply_to", None)
-    if reply is None:
+    topic_id, _reply_to = reply_target_of(msg)
+    if topic_id is None:
         return None
-    if not getattr(reply, "forum_topic", False):
-        return None
-    topic: dict[str, Any] = {"is_topic_message": True}
-    top_id = getattr(reply, "reply_to_top_id", None) or getattr(reply, "reply_to_msg_id", None)
-    if top_id is not None:
-        topic["topic_id"] = top_id
-    return topic
+    return {"is_topic_message": True, "topic_id": topic_id}
 
 
 def channel_link_id(chat_id: int) -> int:

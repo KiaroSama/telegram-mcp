@@ -4,6 +4,7 @@ from contextlib import AsyncExitStack
 
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
+from telegram_mcp.forum import topic_reply_to, topic_reply_to_request
 from telegram_mcp.handles import NAME_ATTEMPTS
 
 # What one download_media call may write before it is stopped. Telegram files run
@@ -57,7 +58,9 @@ async def send_file(
             if path_error:
                 return path_error
             entity = await resolve_entity(chat_id, cl)
-            await cl.send_file(entity, source.handle, caption=caption, reply_to=topic_id)
+            await cl.send_file(
+                entity, source.handle, caption=caption, reply_to=topic_reply_to(topic_id)
+            )
             return f"File sent to chat {chat_id} from {source.path}."
     except Exception as e:
         return log_and_format_error(
@@ -95,7 +98,7 @@ async def _send_album(
             sources.append(source.handle)
 
         entity = await resolve_entity(chat_id, cl)
-        await cl.send_file(entity, sources, caption=caption, reply_to=topic_id)
+        await cl.send_file(entity, sources, caption=caption, reply_to=topic_reply_to(topic_id))
         return f"Album sent to chat {chat_id} with {len(sources)} files."
 
 
@@ -381,7 +384,9 @@ async def send_voice(
                 return "Voice file must be .ogg or .opus format."
 
             entity = await resolve_entity(chat_id, cl)
-            await cl.send_file(entity, source.handle, voice_note=True, reply_to=topic_id)
+            await cl.send_file(
+                entity, source.handle, voice_note=True, reply_to=topic_reply_to(topic_id)
+            )
             return f"Voice message sent to chat {chat_id} from {source.path}."
     except Exception as e:
         return log_and_format_error(
@@ -510,7 +515,9 @@ async def send_sticker(
                 return path_error
 
             entity = await resolve_entity(chat_id, cl)
-            await cl.send_file(entity, source.handle, force_document=False, reply_to=topic_id)
+            await cl.send_file(
+                entity, source.handle, force_document=False, reply_to=topic_reply_to(topic_id)
+            )
             return f"Sticker sent to chat {chat_id} from {source.path}."
     except Exception as e:
         return log_and_format_error(
@@ -662,8 +669,6 @@ async def send_gif(
     try:
         import random
 
-        from telethon.tl.types import InputReplyToMessage
-
         cl = get_client(account)
         parsed, error = _parse_gif_handle(gif_id, account)
         if error:
@@ -679,7 +684,7 @@ async def send_gif(
                 random_id=random.randint(0, 2**63 - 1),
                 # A topic id is a message id to reply into, which this request takes
                 # as an InputReplyTo rather than as the plain integer send_file took.
-                reply_to=InputReplyToMessage(reply_to_msg_id=topic_id) if topic_id else None,
+                reply_to=topic_reply_to_request(topic_id),
             )
         )
         return f"GIF sent to chat {chat_id}."

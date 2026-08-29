@@ -49,7 +49,9 @@ async def test_send_rich_without_premium_sends_nothing():
 @pytest.mark.asyncio
 async def test_send_rich_with_premium_sends_rich_request():
     cl = _FakeClient(premium=True)
-    result = json.loads(await messages._send_rich(cl, "peer", "| a |", "rich", reply_to=5))
+    result = json.loads(
+        await messages._send_rich(cl, "peer", "| a |", "rich", reply_to_message_id=5)
+    )
 
     assert result == {"sent": True, "rich": True}
     (req,) = cl.requests

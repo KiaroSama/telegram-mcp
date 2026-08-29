@@ -1,118 +1,175 @@
-import json
+"""Forums: one field means two things, and the server used to read only one.
+
+A message's `reply_to` carries both "which topic am I in" and "which message am
+I replying to". Posting into topic T *is* replying to T's root, so a topic post
+arrives with `reply_to_msg_id = T` and nothing else. Read that field alone and
+every topic post looks like a reply to a message nobody replied to — while the
+topic itself, the thing the caller actually needs, is never reported.
+
+The send path had the mirror-image gap. `topic_id` existed on five media tools
+and nowhere else: `send_message` could not address a topic at all, and nothing
+in the server could reply to a message *inside* one, because that needs both ids
+and every call site passed a bare int.
+"""
+
 from types import SimpleNamespace
 
 import pytest
-from telethon.tl import functions
-from telethon.tl.types import Channel
+from telethon.tl.types import InputReplyToMessage
 
-from telegram_mcp.tools import topics
+from telegram_mcp.forum import (
+    GENERAL_TOPIC_ID,
+    reply_target_of,
+    topic_reply_to,
+    topic_reply_to_request,
+)
+from telegram_mcp.message_view import describe_topic
 
 
-def _supergroup(*, forum=False):
-    return Channel(
-        id=12345,
-        title="Hermes Topics",
-        photo=None,
-        date=None,
-        creator=True,
-        left=False,
-        broadcast=False,
-        verified=False,
-        megagroup=True,
-        restricted=False,
-        signatures=False,
-        min=False,
-        scam=False,
-        has_link=False,
-        has_geo=False,
-        slowmode_enabled=False,
-        call_active=False,
-        call_not_empty=False,
-        fake=False,
-        gigagroup=False,
-        noforwards=False,
-        join_to_send=False,
-        join_request=False,
-        forum=forum,
-        stories_hidden=False,
-        stories_hidden_min=False,
-        stories_unavailable=False,
-        access_hash=67890,
+def _msg(*, forum=False, msg_id=None, top_id=None, has_reply=True):
+    if not has_reply:
+        return SimpleNamespace(reply_to=None)
+    return SimpleNamespace(
+        reply_to=SimpleNamespace(forum_topic=forum, reply_to_msg_id=msg_id, reply_to_top_id=top_id)
     )
 
 
-class RecordingClient:
-    def __init__(self, result=None):
-        self.requests = []
-        self.result = result or SimpleNamespace(updates=[])
-
-    async def __call__(self, request):
-        self.requests.append(request)
-        return self.result
+# --- reading ----------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_enable_forum_topics_sends_toggle_forum_request(monkeypatch):
-    entity = _supergroup(forum=False)
-    client = RecordingClient()
+def test_a_post_in_a_topic_is_not_a_reply_to_anything():
+    """The defect this file exists for. `reply_to_msg_id` holds the topic root,
+    so the old reading reported "reply to 42" about a message nobody replied to,
+    and never said the post was in topic 42."""
+    topic_id, reply_to = reply_target_of(_msg(forum=True, msg_id=42))
 
-    async def fake_resolve(chat_id, cl):
-        return entity
-
-    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
-    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
-
-    result = await topics.enable_forum_topics(chat_id=12345)
-
-    assert result == "Forum topics enabled for Hermes Topics."
-    assert len(client.requests) == 1
-    request = client.requests[0]
-    assert isinstance(request, functions.channels.ToggleForumRequest)
-    assert request.channel is entity
-    assert request.enabled is True
-    assert request.tabs is True
-    assert entity.forum is True
+    assert topic_id == 42
+    assert reply_to is None
 
 
-@pytest.mark.asyncio
-async def test_create_forum_topic_sends_raw_create_forum_topic_request(monkeypatch):
-    entity = _supergroup(forum=True)
-    client = RecordingClient(SimpleNamespace(updates=[SimpleNamespace(id=777)]))
+def test_a_reply_inside_a_topic_carries_both_ids():
+    topic_id, reply_to = reply_target_of(_msg(forum=True, msg_id=99, top_id=42))
 
-    async def fake_resolve(chat_id, cl):
-        return entity
-
-    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
-    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
-
-    result = await topics.create_forum_topic(chat_id=12345, title="Dev", icon_color=0x6FB9F0)
-
-    payload = json.loads(result)
-    assert payload["results"] == [{"chat_id": -1000000012345, "topic_id": 777, "title": "Dev"}]
-    assert len(client.requests) == 1
-    request = client.requests[0]
-    assert isinstance(request, topics.CreateForumTopicRequest)
-    assert request.peer is entity
-    assert request.title == "Dev"
-    assert request.icon_color == 0x6FB9F0
-    assert isinstance(request.random_id, int)
+    assert topic_id == 42
+    assert reply_to == 99
 
 
-@pytest.mark.asyncio
-async def test_create_forum_topic_requires_forum_enabled(monkeypatch):
-    entity = _supergroup(forum=False)
-    client = RecordingClient()
+def test_an_ordinary_reply_outside_a_forum_is_unchanged():
+    """Guard the guard: the common case must not acquire a phantom topic."""
+    topic_id, reply_to = reply_target_of(_msg(forum=False, msg_id=7))
 
-    async def fake_resolve(chat_id, cl):
-        return entity
+    assert topic_id is None
+    assert reply_to == 7
 
-    monkeypatch.setattr(topics, "get_client", lambda account=None: client)
-    monkeypatch.setattr(topics, "resolve_entity", fake_resolve)
 
-    result = await topics.create_forum_topic(chat_id=12345, title="Dev")
+def test_a_message_with_no_reply_has_neither():
+    assert reply_target_of(_msg(has_reply=False)) == (None, None)
 
-    assert (
-        result
-        == "The specified supergroup does not have forum topics enabled. Use enable_forum_topics first."
-    )
-    assert client.requests == []
+
+def test_general_is_a_topic_even_though_it_carries_no_id():
+    """A message in General frequently arrives with the forum flag and no ids at
+    all. Reporting "no topic" there would be wrong in the one topic every forum
+    has."""
+    topic_id, reply_to = reply_target_of(_msg(forum=True))
+
+    assert topic_id == GENERAL_TOPIC_ID
+    assert reply_to is None
+
+
+def test_describe_topic_agrees_with_the_shared_rule():
+    """`message_view.describe_topic` is a view over the same decision, not a
+    second copy of it — two copies drift the first time Telegram adds a field."""
+    assert describe_topic(_msg(forum=True, msg_id=42)) == {
+        "is_topic_message": True,
+        "topic_id": 42,
+    }
+    assert describe_topic(_msg(forum=True, msg_id=99, top_id=42))["topic_id"] == 42
+    assert describe_topic(_msg(forum=False, msg_id=7)) is None
+
+
+# --- writing ----------------------------------------------------------------
+
+
+def test_no_target_is_no_reply_to():
+    assert topic_reply_to() is None
+    assert topic_reply_to_request() is None
+
+
+def test_a_topic_alone_is_sent_as_a_bare_id():
+    """Telethon's high-level senders accept an int, and Telegram reads "reply to
+    the topic root" as "post in this topic"."""
+    assert topic_reply_to(topic_id=42) == 42
+
+
+def test_a_reply_alone_is_sent_as_a_bare_id():
+    assert topic_reply_to(reply_to_message_id=99) == 99
+
+
+def test_replying_inside_a_topic_needs_both_ids():
+    """The case that was impossible before: a bare int cannot say which topic the
+    message being replied to lives in, so the reply landed against the topic root
+    instead — in the wrong place, with no error."""
+    target = topic_reply_to(topic_id=42, reply_to_message_id=99)
+
+    assert isinstance(target, InputReplyToMessage)
+    assert target.reply_to_msg_id == 99
+    assert target.top_msg_id == 42
+
+
+def test_a_raw_request_always_gets_the_tl_type():
+    """`SendMessageRequest.reply_to` takes an InputReplyTo, never an int: passing
+    one raises inside the serializer rather than being cast."""
+    for kwargs in ({"topic_id": 42}, {"reply_to_message_id": 99}):
+        target = topic_reply_to_request(**kwargs)
+        assert isinstance(target, InputReplyToMessage), kwargs
+
+    pair = topic_reply_to_request(topic_id=42, reply_to_message_id=99)
+    assert (pair.reply_to_msg_id, pair.top_msg_id) == (99, 42)
+
+
+def test_the_round_trip_holds():
+    """What is sent for a topic is what is read back for it."""
+    sent_topic = 42
+    posted = _msg(forum=True, msg_id=topic_reply_to(topic_id=sent_topic))
+
+    assert reply_target_of(posted) == (sent_topic, None)
+
+
+# --- the tools that had none of this ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "module_name,tool_name",
+    [
+        ("messages", "send_message"),
+        ("messages", "reply_to_message"),
+        ("messages_queue", "save_draft"),
+        ("scheduled", "schedule_message"),
+        ("media", "send_file"),
+        ("media", "send_album"),
+        ("media", "send_voice"),
+    ],
+)
+def test_every_sending_tool_can_address_a_topic(module_name, tool_name):
+    """`topic_id` used to exist on five media tools and nowhere else, so text —
+    the thing people actually send — could not reach a topic at all."""
+    import importlib
+    import inspect
+
+    module = importlib.import_module(f"telegram_mcp.tools.{module_name}")
+    params = inspect.signature(getattr(module, tool_name)).parameters
+
+    assert "topic_id" in params, f"{tool_name} cannot send into a forum topic"
+
+
+def test_no_tool_builds_its_own_reply_to():
+    """Six copies of "which id means the topic" is six chances to disagree."""
+    from pathlib import Path
+
+    offenders = [
+        path.name
+        for path in Path("telegram_mcp/tools").glob("*.py")
+        if "InputReplyToMessage(" in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == [], f"{offenders} bypass telegram_mcp.forum"

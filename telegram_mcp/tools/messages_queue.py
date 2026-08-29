@@ -13,6 +13,7 @@ these dedicated per-queue calls.
 """
 
 from telegram_mcp.runtime import *
+from telegram_mcp.forum import topic_reply_to_request
 from telegram_mcp.tools.scheduled import (
     cancel_scheduled_message,
     list_scheduled_messages,
@@ -116,6 +117,7 @@ async def save_draft(
     message: str,
     reply_to_msg_id: Optional[int] = None,
     no_webpage: bool = False,
+    topic_id: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
@@ -127,17 +129,15 @@ async def save_draft(
         message: The draft message text
         reply_to_msg_id: Optional message ID to reply to
         no_webpage: If True, disable link preview in the draft
+        topic_id: Forum topic ID from `list_topics`. Telegram keeps ONE draft
+            per topic, so a draft saved without this goes to General and the
+            topic the caller meant keeps whatever was there before.
     """
     try:
         cl = get_client(account)
         peer = await resolve_input_entity(chat_id, cl)
 
-        # Build reply_to parameter if provided
-        reply_to = None
-        if reply_to_msg_id:
-            from telethon.tl.types import InputReplyToMessage
-
-            reply_to = InputReplyToMessage(reply_to_msg_id=reply_to_msg_id)
+        reply_to = topic_reply_to_request(topic_id, reply_to_msg_id)
 
         await cl(
             functions.messages.SaveDraftRequest(

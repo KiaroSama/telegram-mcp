@@ -20,6 +20,7 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 """
 
 from telegram_mcp.runtime import *
+from telegram_mcp.forum import reply_target_of, topic_reply_to, topic_reply_to_request
 from telegram_mcp.text_fidelity import display_name
 
 # The one place that knows the `/c/` permalink id shape, so the two builders
@@ -204,9 +205,13 @@ def message_to_dict(msg) -> dict:
     if grouped_id:
         d["grouped_id"] = grouped_id  # album: messages sharing one grouped_id form a single group
 
-    reply_to_id = (
-        getattr(msg.reply_to, "reply_to_msg_id", None) if getattr(msg, "reply_to", None) else None
-    )
+    # Which topic, and a real reply - not the same field twice. A message posted
+    # into a forum topic carries the topic root in reply_to_msg_id, so reading
+    # that alone reported every topic post as a reply to a message nobody had
+    # replied to, and never said which topic it was in.
+    topic_id, reply_to_id = reply_target_of(msg)
+    if topic_id:
+        d["topic_id"] = topic_id
     if reply_to_id:
         d["reply_to"] = reply_to_id
     reply_quote = get_reply_quote(msg)
@@ -403,7 +408,14 @@ def _as_utc(value: Union[str, int]) -> datetime:
     return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
-async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[int] = None):
+async def _send_rich(
+    cl,
+    entity,
+    text: str,
+    parse_mode: str,
+    topic_id: Optional[int] = None,
+    reply_to_message_id: Optional[int] = None,
+):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
     import random
 
@@ -415,9 +427,11 @@ async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[
                 peer=entity,
                 message=text,
                 random_id=random.randint(0, 2**62),
-                reply_to=(
-                    types.InputReplyToMessage(reply_to_msg_id=reply_to) if reply_to else None
-                ),
+                # A raw request takes the TL type, never a bare int: passing one
+                # raises inside the serializer rather than being cast. The old
+                # form here could also not express "reply inside a topic", which
+                # needs both ids.
+                reply_to=topic_reply_to_request(topic_id, reply_to_message_id),
                 rich_message=make_rich_input(parse_mode, text),
             )
         )
@@ -460,13 +474,21 @@ async def send_message(
     chat_id: Union[int, str],
     message: str,
     parse_mode: Optional[str] = None,
+    topic_id: Optional[int] = None,
+    reply_to_message_id: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
-    Send a message to a specific chat.
+    Send a message to a specific chat, or into one forum topic.
     Args:
         chat_id: The ID or username of the chat.
         message: The message content to send.
+        topic_id: Forum topic ID from `list_topics`. In a forum supergroup a
+            message sent without this lands in General, not in the topic the
+            conversation is in. Pass 1 for General explicitly.
+        reply_to_message_id: Reply to this message. Combine with `topic_id` to
+            reply to a message that lives inside a topic - naming only the
+            message would put the reply in the wrong topic.
         parse_mode: Optional formatting mode. Use 'html' for HTML tags (<b>, <i>, <code>, <pre>,
             <a href="...">), 'md' or 'markdown' for Markdown (**bold**, __italic__, `code`,
             ```pre```), or omit for plain text. Use 'rich'/'rich_markdown' for full
@@ -481,8 +503,15 @@ async def send_message(
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
-            return await _send_rich(cl, entity, message, parse_mode.lower())
-        sent = await cl.send_message(entity, message, parse_mode=parse_mode)
+            return await _send_rich(
+                cl, entity, message, parse_mode.lower(), topic_id, reply_to_message_id
+            )
+        sent = await cl.send_message(
+            entity,
+            message,
+            parse_mode=parse_mode,
+            reply_to=topic_reply_to(topic_id, reply_to_message_id),
+        )
         # The id, because everything a caller might do next needs it: edit, react,
         # pin, forward, delete. Returning only "sent" leaves an agent holding a
         # message it cannot address.
@@ -493,7 +522,7 @@ async def send_message(
             [{"message_id": message_id, "chat_id": str(chat_id)}], {"sent": True}
         )
     except Exception as e:
-        return log_and_format_error("send_message", e, chat_id=chat_id)
+        return log_and_format_error("send_message", e, chat_id=chat_id, topic_id=topic_id)
 
 
 @mcp.tool(
@@ -959,14 +988,23 @@ async def reply_to_message(
     message_id: int,
     text: str,
     parse_mode: Optional[str] = None,
+    topic_id: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
-    Reply to a specific message in a chat.
+    Reply to a specific message in a chat, including one inside a forum topic.
     Args:
         chat_id: The chat ID or username.
         message_id: The message ID to reply to.
         text: The reply text.
+        topic_id: The forum topic the message you are replying to lives in, from
+            `list_topics`. Without it a reply to a message inside a topic is
+            posted against the topic root instead, which puts it in the wrong
+            place with no error. Omit outside forums.
+
+            To post a NEW message in a topic rather than reply to one, use
+            `send_message` with `topic_id` - passing a topic id here as the
+            message id happens to work and is not what this argument means.
         parse_mode: Optional formatting mode — same values as send_message: 'md'/'markdown',
             'html', or 'rich'/'rich_markdown'/'rich_html' for full server-side formatting
             (tables, headings, formulas; REQUIRES Telegram Premium — without it nothing is
@@ -976,8 +1014,13 @@ async def reply_to_message(
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
-            return await _send_rich(cl, entity, text, parse_mode.lower(), reply_to=message_id)
-        await cl.send_message(entity, text, reply_to=message_id, parse_mode=parse_mode)
+            return await _send_rich(cl, entity, text, parse_mode.lower(), topic_id, message_id)
+        await cl.send_message(
+            entity,
+            text,
+            reply_to=topic_reply_to(topic_id, message_id),
+            parse_mode=parse_mode,
+        )
         return f"Replied to message {message_id} in chat {chat_id}."
     except Exception as e:
         return log_and_format_error(

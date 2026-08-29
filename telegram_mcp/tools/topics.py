@@ -172,8 +172,9 @@ class CreateForumTopicRequest(TLRequest):
 
 @mcp.tool(annotations=ToolAnnotations(title="List Topics", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
+@validate_id("chat_id")
 async def list_topics(
-    chat_id: int,
+    chat_id: Union[int, str],
     limit: int = 200,
     offset_topic: int = 0,
     search_query: str = None,
@@ -182,12 +183,17 @@ async def list_topics(
     """
     Retrieve forum topics from a supergroup with the forum feature enabled.
 
-    Note for LLM: Send into a topic by passing Topic ID as topic_id to send_file /
-    send_album / send_voice / send_sticker / send_gif, or as message_id to
-    reply_to_message for text.
+    Note for LLM: pass a Topic ID back as `topic_id` to `send_message`,
+    `send_file`, `send_album`, `send_voice`, `send_sticker`, `send_gif` or
+    `schedule_message` to post into that topic. To REPLY to a message inside a
+    topic, give `reply_to_message` both the message id and that `topic_id` -
+    naming only the message puts the reply in the wrong topic.
+
+    Topic 1 is "General". A message sent to a forum with no topic_id lands
+    there, not in whichever topic the conversation is in.
 
     Args:
-        chat_id: The ID of the forum-enabled chat (supergroup).
+        chat_id: The ID or username of the forum-enabled chat (supergroup).
         limit: Maximum number of topics to retrieve (1-200; a larger value is
             served as 200).
         offset_topic: Topic ID offset for pagination.

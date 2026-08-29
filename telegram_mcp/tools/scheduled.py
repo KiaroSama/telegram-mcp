@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Union
 
 from telegram_mcp.runtime import *
+from telegram_mcp.forum import reply_target_of, topic_reply_to_request
 from telegram_mcp.message_view import (
     describe_entities,
     describe_media_label,
@@ -181,6 +182,15 @@ def _describe(msg) -> dict[str, Any]:
     entities = describe_entities(msg, (clean, offset_map))
     if entities:
         described["entities"] = entities
+    # A scheduled message is queued against a topic like any other, and the
+    # caller needs the id back to correct or re-target it. The reply is reported
+    # separately from the topic because posting IN a topic is not replying to
+    # anything - see telegram_mcp.forum.
+    topic_id, reply_to_id = reply_target_of(msg)
+    if topic_id:
+        described["topic"] = {"is_topic_message": True, "topic_id": topic_id}
+    if reply_to_id:
+        described["reply_to"] = reply_to_id
     label = describe_media_label(msg)
     if label:
         described["media"] = label
@@ -249,6 +259,7 @@ async def schedule_message(
     when: Union[str, int],
     repeat: str = None,
     entities: List[dict] = None,
+    topic_id: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
@@ -266,6 +277,9 @@ async def schedule_message(
             or a Unix timestamp. A naive datetime is read as UTC.
         repeat: "daily", "weekly", or omitted for a single send. Telegram
             validates the period server-side and requires Premium for it.
+        topic_id: Optional forum topic ID (from list_topics). Schedules into
+            that topic in a forum-enabled supergroup, like send_message's
+            topic support in media tools.
         entities: Optional formatting list in the same shape `inspect_message`
             returns (type/offset/length plus each kind's own fields), used to
             place custom emoji and other formatting exactly. Every entity kind
@@ -304,6 +318,7 @@ async def schedule_message(
             schedule_date=target,
             schedule_repeat_period=period,
             entities=built_entities,
+            reply_to=topic_reply_to_request(topic_id),
         )
         result = await cl(request)
         message_id = None
