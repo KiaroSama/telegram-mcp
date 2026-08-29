@@ -389,7 +389,7 @@ to their own location, so they work from any directory and from a shortcut.
 
 | Script | What it does |
 |---|---|
-| `start-mcp.ps1` | Runs the server through `uv`, teeing its output to a timestamped file in `logs/` without losing the terminal's colours or its TTY. |
+| `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Pass `-LogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG`) to also keep a timestamped log; it goes to `logs/` inside the private state directory, never beside the source, and records only this server's own diagnostics. |
 | `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. |
 
 `Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of

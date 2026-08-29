@@ -153,11 +153,10 @@ def _refuse_unauthenticated_remote_bind(host: str) -> None:
     if _parse_bool_env(os.getenv("MCP_TRUSTED_PROXY_AUTH"), False):
         return
     if _parse_bool_env(os.getenv("MCP_ALLOW_UNAUTHENTICATED_REMOTE"), False):
-        print(
+        startup_note(
             f"WARNING: serving on {host} with no authentication, because "
             "MCP_ALLOW_UNAUTHENTICATED_REMOTE is set. Anyone who can reach this "
-            "port controls the configured Telegram account(s).",
-            file=sys.stderr,
+            "port controls the configured Telegram account(s)."
         )
         return
 
@@ -252,11 +251,31 @@ def _startup_text(error: BaseException) -> str:
     return safe_exception(error)
 
 
+# The launcher persists the server's own diagnostics and withholds everything
+# else on stderr, because a Telethon warning naming a chat or a third-party
+# traceback with locals in it was never composed with persistence in mind. The
+# lines below WERE: every one is a literal this file writes, and any exception in
+# them goes through `_startup_text`/`safe_exception` first, so it carries a shape
+# and a digest rather than what the failing call was given.
+#
+# They cannot go through the logger instead - it sits at ERROR, so the whole
+# startup narrative would vanish - and they cannot be recognised by shape,
+# because a bare print is indistinguishable from anyone else's. The marker is
+# what makes the promise checkable from outside: start-mcp.ps1 allowlists this
+# exact prefix, and nothing else can claim it by accident.
+STARTUP_MARKER = "[telegram-mcp]"
+
+
+def startup_note(text: str) -> None:
+    """One startup diagnostic, marked so the launcher may keep it."""
+    print(f"{STARTUP_MARKER} {text}", file=sys.stderr)
+
+
 async def _main() -> None:
     try:
         labels = ", ".join(clients.keys())
         _reject_duplicate_sessions(clients)
-        print(f"Starting {len(clients)} Telegram client(s) ({labels})...", file=sys.stderr)
+        startup_note(f"Starting {len(clients)} Telegram client(s) ({labels})...")
         await asyncio.gather(
             *(_connect_authorized_client(label, cl) for label, cl in clients.items())
         )
@@ -266,45 +285,35 @@ async def _main() -> None:
         # Runs in background: blocking startup on this (e.g. under a
         # GetDialogsRequest flood wait) makes MCP clients time out, and
         # resolve_entity() re-warms the cache on miss anyway.
-        print("Warming entity caches (background)...", file=sys.stderr)
+        startup_note("Warming entity caches (background)...")
 
         async def _warm_caches() -> None:
             try:
                 await asyncio.gather(*(cl.get_dialogs() for cl in clients.values()))
-                print("Entity caches warmed.", file=sys.stderr)
+                startup_note("Entity caches warmed.")
             except Exception as warm_exc:
                 # stderr may be persisted by the launcher, so this says what
                 # failed and where, never what the failing call was given.
-                print(
-                    f"Entity cache warm failed: {safe_exception(warm_exc)}",
-                    file=sys.stderr,
-                )
+                startup_note(f"Entity cache warm failed: {safe_exception(warm_exc)}")
 
         # Held deliberately: asyncio keeps only a weak reference to a running task,
         # so dropping this name can let the cache warm-up be collected mid-flight.
         warm_task = asyncio.create_task(_warm_caches())  # noqa: F841
 
         transport = os.getenv("MCP_TRANSPORT", "stdio").lower()
-        print(
-            f"Telegram client(s) started ({labels}). Running MCP server ({transport})...",
-            file=sys.stderr,
-        )
+        startup_note(f"Telegram client(s) started ({labels}). Running MCP server ({transport})...")
         await _serve(transport)
     except Exception as e:
-        print(f"Error starting client: {_startup_text(e)}", file=sys.stderr)
+        startup_note(f"Error starting client: {_startup_text(e)}")
         if isinstance(e, sqlite3.OperationalError) and "database is locked" in str(e):
-            print(
-                "Database lock detected. Please ensure no other instances are running.",
-                file=sys.stderr,
-            )
+            startup_note("Database lock detected. Please ensure no other instances are running.")
         elif isinstance(e, SessionLockError):
-            print(
+            startup_note(
                 "Another instance of this MCP server already holds this Telegram "
                 "session (e.g. the client restarted the connector without the old "
                 "process exiting yet). This instance is exiting instead of "
                 "connecting a second time, which would risk Telegram invalidating "
-                "the session for both. Retry once the other instance is gone.",
-                file=sys.stderr,
+                "the session for both. Retry once the other instance is gone."
             )
         sys.exit(1)
     finally:

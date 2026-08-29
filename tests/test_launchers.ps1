@@ -81,6 +81,45 @@ try {
         throw "The log lost the bounded failure record: $wrapperLogText"
     }
 
+
+    # The reason a run failed has to survive into the log, and for a long time it
+    # did not. The allowlist matched only `telegram_mcp` LOGGER records - but that
+    # logger sits at ERROR, so the whole startup narrative, including the sentence
+    # explaining a refusal, travels as bare stderr prints from runner.py. Every one
+    # was counted and thrown away, and an operator who opened the log after a failed
+    # launch found nothing about the failure. That is what made this launcher look
+    # broken when it was working.
+    $noteScript = Join-Path $wrapperTestDirectory 'startup_note.py'
+    $noteLog = Join-Path $wrapperTestDirectory 'startup_note.log'
+    [IO.File]::WriteAllText(
+        $noteScript,
+        (@(
+            'import sys',
+            'print("[telegram-mcp] Error starting client: SessionLockError", file=sys.stderr)',
+            'print(''WARNING telethon: chat "Private Group" flood wait'', file=sys.stderr)',
+            'sys.exit(1)'
+        ) -join [Environment]::NewLine) + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
+
+    $noteOutput = & $python -c $wrapperMatch.Groups['body'].Value $noteLog 0 $noteScript 2>&1
+    $noteTerminal = $noteOutput -join [Environment]::NewLine
+    [string] $noteLogText = Get-Content -LiteralPath $noteLog -Raw
+
+    if ($noteLogText -notmatch 'Error starting client') {
+        throw 'The log dropped the marked startup note that says WHY the run failed.'
+    }
+    # And the marker must not have become a way to persist anything at all:
+    # a third-party line still goes to the terminal only, and is counted.
+    if ($noteTerminal -notmatch 'Private Group') {
+        throw 'The terminal lost a third-party line it should still show.'
+    }
+    if ($noteLogText -match 'Private Group') {
+        throw 'The log persisted a line composed by something that made no redaction promise.'
+    }
+    if ($noteLogText -notmatch 'line\(s\) of child output') {
+        throw 'The log did not record how many lines it withheld.'
+    }
     $interruptScript = Join-Path $wrapperTestDirectory 'keyboard_interrupt.py'
     $interruptLog = Join-Path $wrapperTestDirectory 'interrupt.log'
     [IO.File]::WriteAllText(

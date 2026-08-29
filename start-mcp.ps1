@@ -251,7 +251,11 @@ def secure(path):
     except OSError:
         return False
 
-log = open(log_path, "a", encoding="utf-8", buffering=1)
+# newline="" for the same reason roll() has it, twenty lines down: without it
+# Windows turns each written line ending into two bytes on disk while the cap
+# counts one, so the FIRST segment overran the ceiling by one byte per line.
+# Only the rolled segments were ever correct.
+log = open(log_path, "a", encoding="utf-8", buffering=1, newline="")
 # Fail closed. This file is what an operator attaches to a bug report, and it
 # carries whatever the server wrote to stderr; ignoring a failed hardening kept
 # writing that into a file whose permissions nobody established.
@@ -293,7 +297,22 @@ def roll():
 # notice quoting an argument, a third-party traceback with locals in it. Removing
 # ANSI escapes does not make that safe; it only makes it tidy. Those lines go to
 # the terminal and are COUNTED, not persisted.
-SERVER_LINE = re.compile(r'^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} \[[A-Z]+\] telegram_mcp - ')
+# Two shapes, both composed by this project and both safe by construction:
+#
+#   1. `telegram_mcp` logger records, redacted by safe_log's RedactingFilter
+#      before they reach stderr.
+#   2. `[telegram-mcp] ` startup notes from runner.py's `startup_note`, whose
+#      comment states the same promise and routes every exception through
+#      safe_exception first.
+#
+# The second was missing, and its absence is what made this launcher look
+# broken: the logger sits at ERROR, so the entire startup narrative - including
+# the sentence explaining WHY a run refused to start - travels as those notes,
+# and every one of them was being counted and thrown away. An operator opened
+# the log after a failed launch and found nothing about the failure.
+SERVER_LINE = re.compile(
+    r'^(?:\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} \[[A-Z]+\] telegram_mcp - |\[telegram-mcp\] )'
+)
 partial = ''
 withheld = 0
 

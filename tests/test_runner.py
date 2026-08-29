@@ -474,3 +474,52 @@ def test_an_unparseable_host_is_treated_as_remote(_no_remote_env):
     """Wrong in the safe direction. Guessing "probably local" about an address that
     decides who can read someone's messages is not a guess worth making."""
     assert runner._binds_beyond_this_machine("not-an-address at all") is True
+
+
+def test_no_diagnostic_can_reach_stdout():
+    """Under the stdio transport, stdout IS the MCP protocol channel: a stray
+    diagnostic written there is not noise, it is a corrupted stream the client
+    tries to parse as a message.
+
+    One `print` in this module is legitimate - `startup_note`'s own, which names
+    stderr explicitly. Everything else routes through it.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(runner))
+    unrouted = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and getattr(node.func, "id", None) == "print"
+        and not any(keyword.arg == "file" for keyword in node.keywords)
+    ]
+
+    assert unrouted == [], (
+        f"runner.py writes to stdout at line(s) {unrouted}; under stdio transport "
+        "that corrupts the MCP stream"
+    )
+
+
+def test_every_startup_diagnostic_carries_the_marker():
+    """The launcher persists this server's own diagnostics and withholds the
+    rest. The marker is what makes that promise checkable from outside - without
+    it the whole startup narrative, including the reason a run refused to start,
+    was counted and thrown away, and the log an operator attaches to a bug report
+    said nothing about the failure.
+    """
+    import inspect
+    from pathlib import Path
+
+    source = inspect.getsource(runner)
+
+    assert 'STARTUP_MARKER = "[telegram-mcp]"' in source
+
+    # start-mcp.ps1 allowlists this exact prefix, escaped for its own regex. The
+    # two sides live in different languages in different files, so this assertion
+    # is the only thing keeping them in step.
+    launcher = (Path(__file__).resolve().parents[1] / "start-mcp.ps1").read_text(encoding="utf-8")
+    assert (
+        "telegram-mcp" in launcher and "SERVER_LINE" in launcher
+    ), "the launcher no longer allowlists the marker runner.py emits"
