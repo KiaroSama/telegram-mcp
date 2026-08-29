@@ -256,6 +256,20 @@ def adopt_legacy_session(destination) -> None:
         return
 
 
+def _close_unprotected(client) -> None:
+    """Release what the constructor opened before reporting it unprotected.
+
+    The client is not connected yet - only its SQLite session is open - and the
+    file that handle holds is the very one the error is about. Raising over a
+    live client left it open for the life of the process, which is both a leaked
+    handle and a lock on the database an operator is about to be told to fix.
+    """
+    try:
+        client.session.close()
+    except Exception:  # pragma: no cover - a session that never opened
+        pass
+
+
 def harden_session_files(
     path,
     restrict: Optional[Callable[[Any], bool]] = None,
@@ -379,18 +393,25 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     session_path = None
     if isinstance(session, str):
         session_path = session_file_path(session)
+        # The destination is made private BEFORE anything is put in it. The
+        # adoption below MOVES a legacy session file - which is the account
+        # itself - and running it first left that file sitting in a directory
+        # nothing had hardened yet.
+        if not harden_session_files(session_path):
+            raise SessionNotProtected(_UNPROTECTED_SESSION_MESSAGE)
         adopt_legacy_session(session_path)
-        # The directory has to exist and be private BEFORE SQLite creates the
-        # database in it, or the file is born readable and stays that way for
-        # the length of the constructor.
+        # Again, over whatever the adoption brought with it, and before SQLite
+        # creates anything: a database born in an unproven directory is readable
+        # for the length of the constructor.
         if not harden_session_files(session_path):
             raise SessionNotProtected(_UNPROTECTED_SESSION_MESSAGE)
         session = str(session_path)
 
     client = TelegramClient(session, TELEGRAM_API_ID, TELEGRAM_API_HASH, **kwargs)
-    # And again over what the constructor actually put on disk: the first call
+    # And again over what the constructor actually put on disk: the calls above
     # proved the directory, this one proves the database that was born in it.
     if session_path is not None and not harden_session_files(session_path):
+        _close_unprotected(client)
         raise SessionNotProtected(_UNPROTECTED_SESSION_MESSAGE)
     return client
 

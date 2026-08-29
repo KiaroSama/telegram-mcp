@@ -149,7 +149,16 @@ try {
         if (-not $script:LogEnabled) { throw 'not requested' }
         $logsDirectory = Join-Path (Get-StateDirectory) 'logs'
         [void] (New-Item -ItemType Directory -Path $logsDirectory -Force)
-        [void] (Set-OwnerOnlyAcl -Path $logsDirectory)
+        # The directory first, and fatally: its inheritable entries are what make
+        # every log file born inside it owner-only, including the rolled parts the
+        # Python tee creates later, which no startup sweep can reach.
+        #
+        # A throw here is caught below, which sets $logPath to $null - and that is
+        # what turns file logging off. Warning and carrying on would keep writing
+        # diagnostics into a directory whose permissions nobody established.
+        if (-not (Set-OwnerOnlyAcl -Path $logsDirectory)) {
+            throw 'the log directory could not be made owner-only'
+        }
 
         $timestamp = [DateTime]::UtcNow.ToString('yyyy-MM-dd_HH-mm-ss_UTC')
         $logPath = Join-Path $logsDirectory "start-mcp_$timestamp.log"
@@ -166,7 +175,10 @@ try {
         }
 
         [IO.File]::WriteAllText($logPath, '', [Text.UTF8Encoding]::new($true))
-        [void] (Set-OwnerOnlyAcl -Path $logPath)
+        if (-not (Set-OwnerOnlyAcl -Path $logPath)) {
+            Remove-Item -LiteralPath $logPath -Force -ErrorAction SilentlyContinue
+            throw 'the log file could not be made owner-only'
+        }
         # `.log` AND `.log.1`: the Python tee rolls a full log to `<name>.log.1`,
         # and a filter ending in `.log` never matched those, so every rotated part
         # survived every prune and the retention count bounded half the files.
@@ -223,41 +235,55 @@ def secure(path):
     if os.name != "nt":
         try:
             os.chmod(path, 0o600)
+            return True
         except OSError:
-            pass
-        return
+            return False
     try:
         from telegram_mcp.owner_only import restrict_to_owner_strict
     except Exception:
-        # The logs directory is already owner-only with inheritable entries, so
-        # anything born in it is born private. Without the package there is no
-        # honest way to add to that here, and a call that reports success while
-        # leaving other accounts on the file is worse than none.
-        return
+        # The launcher made the logs directory owner-only with INHERITABLE
+        # entries, and fatally, before this process started - so a file born in
+        # it is born private and there is nothing left to prove here. On POSIX
+        # this branch is unreachable: the chmod above needs no package.
+        return True
     try:
-        restrict_to_owner_strict(path)
+        return bool(restrict_to_owner_strict(path))
     except OSError:
-        pass
+        return False
 
 log = open(log_path, "a", encoding="utf-8", buffering=1)
-secure(log_path)
+# Fail closed. This file is what an operator attaches to a bug report, and it
+# carries whatever the server wrote to stderr; ignoring a failed hardening kept
+# writing that into a file whose permissions nobody established.
+persist = secure(log_path)
+if not persist:
+    log.close()
+    log = None
 
 def roll():
     # One previous part, not an archive: a server that logs for days must not be
     # able to fill the disk, and the interesting end of a wedged run is the tail.
-    global log
+    global log, persist
     log.close()
     try:
         os.replace(log_path, log_path + ".1")
     except OSError:
-        pass
+        # The roll did NOT happen. Re-opening in append mode would carry on
+        # growing the same file past a ceiling this code believes it enforces,
+        # so persistence stops rather than the bound quietly ceasing to hold.
+        log = None
+        persist = False
+        return
     secure(log_path + ".1")
     # newline='' disables Windows newline translation. Without it a written line
     # ending becomes two bytes on disk while the cap counts one, so a ceiling
     # computed in bytes is wrong by the number of lines written - and the file
     # ends up over a limit the code believes it enforced.
     log = open(log_path, "a", encoding="utf-8", buffering=1, newline="")
-    secure(log_path)
+    if not secure(log_path):
+        log.close()
+        log = None
+        persist = False
 
 class Tee:
     def __init__(self, stream):
@@ -267,6 +293,8 @@ class Tee:
         with lock:
             written = self.stream.write(text)
             self.stream.flush()
+            if not persist:
+                return written
             cleaned = ansi.sub('', text)
             if max_bytes:
                 # Roll BEFORE writing when this chunk would cross the ceiling. The
@@ -274,6 +302,11 @@ class Tee:
                 # applied to the write AFTER the one that crossed it.
                 if log.tell() + len(cleaned.encode('utf-8')) > max_bytes:
                     roll()
+                    # `roll` gives up when the rename did not happen, and it
+                    # closes the handle when it does. Writing on regardless is
+                    # an AttributeError on the next line.
+                    if not persist:
+                        return written
                 # And a single write larger than the whole ceiling cannot be
                 # bounded by rolling - the file would still hold it. Truncated,
                 # and said so, because a silently shortened diagnostic is worse
@@ -289,7 +322,8 @@ class Tee:
     def flush(self):
         with lock:
             self.stream.flush()
-            log.flush()
+            if persist:
+                log.flush()
 
     def isatty(self):
         return self.stream.isatty()
@@ -318,7 +352,13 @@ except BaseException as exc:
     traceback.print_exception(exc, file=stderr)
     stderr.flush()
     frames = traceback.extract_tb(exc.__traceback__)
-    where = f'{frames[-1].filename}:{frames[-1].lineno}' if frames else 'unknown'
+    # Basename, not the full filename: the path leaks the install location and
+    # with it the OS account name, into the file operators attach to reports.
+    where = (
+        f'{os.path.basename(frames[-1].filename)}:{frames[-1].lineno}'
+        if frames
+        else 'unknown'
+    )
     print(f'{type(exc).__name__} at {where}', file=sys.stderr)
     exit_code = 1
 finally:

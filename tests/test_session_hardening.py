@@ -499,3 +499,81 @@ def test_the_warning_does_not_quote_the_credential_path(tmp_path, caplog):
 
     written = " ".join(record.getMessage() for record in caplog.records)
     assert "very-distinctive-directory-name" not in written
+
+
+# --- the order the lifecycle happens in -------------------------------------
+
+
+def test_the_destination_is_private_before_a_legacy_session_is_moved_into_it(
+    tmp_path, monkeypatch
+):
+    """Adoption MOVES a legacy session file, and that file is the account.
+
+    It used to run first, so the credential landed in a directory nothing had
+    hardened yet and sat there until the next call got round to it. Ordering is
+    the whole fix, so ordering is what this pins."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    order = []
+
+    def _harden(_path, restrict=None, verify=None):
+        order.append("harden")
+        return True
+
+    monkeypatch.setattr(connection, "harden_session_files", _harden)
+    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: order.append("adopt"))
+    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
+
+    connection._build_client("work", "work")
+
+    assert order[0] == "harden", f"the destination was not private first: {order}"
+    assert "adopt" in order
+    # And again afterwards, over whatever the move brought with it.
+    assert order.index("adopt") < len(order) - 1, order
+
+
+def test_a_refusal_after_the_constructor_closes_the_database(tmp_path, monkeypatch):
+    """The constructor opens SQLite. Raising over a live client left that
+    handle open for the life of the process - a leak, and a lock on the very
+    file the operator is being told to go and fix."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    closed = []
+    calls = []
+
+    def _harden(_path, restrict=None, verify=None):
+        calls.append(1)
+        # True for the two before the constructor, False for the one after it.
+        return len(calls) < 3
+
+    class _Session:
+        def close(self):
+            closed.append(True)
+
+    class _Client:
+        def __init__(self, *a, **k):
+            self.session = _Session()
+
+    monkeypatch.setattr(connection, "harden_session_files", _harden)
+    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: None)
+    monkeypatch.setattr(connection, "TelegramClient", _Client)
+
+    with pytest.raises(connection.SessionNotProtected):
+        connection._build_client("work", "work")
+
+    assert closed == [True], "the constructed session was left open"
+
+
+def test_a_session_that_never_opened_does_not_turn_the_refusal_into_a_crash(tmp_path, monkeypatch):
+    """Guard the guard: the cleanup must not replace the error worth reporting."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    calls = []
+
+    def _harden(_path, restrict=None, verify=None):
+        calls.append(1)
+        return len(calls) < 3
+
+    monkeypatch.setattr(connection, "harden_session_files", _harden)
+    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: None)
+    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
+
+    with pytest.raises(connection.SessionNotProtected):
+        connection._build_client("work", "work")

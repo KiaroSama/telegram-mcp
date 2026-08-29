@@ -155,12 +155,20 @@ function Write-FileAtomic {
         $stream = [IO.File]::Open(
             $temp, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
+            # The DACL goes on while the file is still EMPTY, and while this
+            # process holds it with FileShare::None so nothing else can open that
+            # name at all. Hardening AFTER the write left the session strings on
+            # disk under inherited permissions for the length of the write.
+            #
+            # Fail closed: no file at all beats a readable one holding accounts.
+            if (-not (Set-OwnerOnlyAcl -Path $temp)) {
+                throw "Refusing to write ${Path}: its temporary file could not be made owner-only."
+            }
             $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Text)
             $stream.Write($bytes, 0, $bytes.Length)
             $stream.Flush($true)  # $true: to the disk, not just to the OS cache
         }
         finally { $stream.Dispose() }
-        [void] (Set-OwnerOnlyAcl -Path $temp)
         if (Test-Path -LiteralPath $Path -PathType Leaf) {
             # [NullString]::Value, not $null: PowerShell binds $null to a string
             # parameter as "", and File.Replace reads that as "back it up to a
@@ -175,7 +183,12 @@ function Write-FileAtomic {
         Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue
         throw
     }
-    [void] (Set-OwnerOnlyAcl -Path $Path)
+    # ReplaceFile carries the destination's own ACL onto the replacement, so this
+    # normally confirms rather than acts - which is exactly why a failure here is
+    # worth raising: it means the file in place is not owner-only.
+    if (-not (Set-OwnerOnlyAcl -Path $Path)) {
+        throw "$Path was written but could not be verified as owner-only."
+    }
 }
 
 function Remove-StaleFiles {
@@ -211,7 +224,13 @@ function Start-Logging {
             $suffix++
         }
         [IO.File]::WriteAllText($path, '', [Text.UTF8Encoding]::new($false))
-        [void] (Set-OwnerOnlyAcl -Path $path)
+        # A log that cannot be made private does not get written to. The catch
+        # below turns this into a warning and leaves $script:LogPath unset, which
+        # is what disables file logging for the rest of the run.
+        if (-not (Set-OwnerOnlyAcl -Path $path)) {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            throw 'the log file could not be made owner-only'
+        }
         Remove-StaleFiles -Directory $logsDirectory -Filter 'Manage-Accounts_*.log' `
             -Keep $script:LogRetention
         $script:LogPath = $path
@@ -262,7 +281,11 @@ function Backup-EnvFile {
             if (-not (Test-Path -LiteralPath $backup)) { throw }
             continue
         }
-        [void] (Set-OwnerOnlyAcl -Path $backup)
+        # A backup of .env is a second copy of every session string.
+        if (-not (Set-OwnerOnlyAcl -Path $backup)) {
+            Remove-Item -LiteralPath $backup -Force -ErrorAction SilentlyContinue
+            throw "Refusing to keep a backup of $envPath that is not owner-only."
+        }
         Remove-StaleFiles -Directory (Split-Path -Parent $envPath) `
             -Filter "$(Split-Path -Leaf $envPath).backup-*" -Keep $script:EnvBackupRetention
         Write-Log "Backed up .env to $(Split-Path -Leaf $backup)"
@@ -827,7 +850,11 @@ try {
             [IO.File]::WriteAllText($envPath, '', [Text.UTF8Encoding]::new($false))
             # Before anything is put in it: this file ends up holding session
             # strings, and a session string is the account.
-            [void] (Set-OwnerOnlyAcl -Path $envPath)
+            if (-not (Set-OwnerOnlyAcl -Path $envPath)) {
+                Remove-Item -LiteralPath $envPath -Force -ErrorAction SilentlyContinue
+                Write-Host 'The .env could not be made owner-only, so it was not created.'
+                exit 1
+            }
             Write-Log 'Created an empty .env'
         }
         else {
