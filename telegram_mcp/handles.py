@@ -157,6 +157,23 @@ class SystemCalls:
             return os.listdir(path)
         return os.listdir(dir_fd)
 
+    def restrict_directory(self, path) -> bool:
+        """Make a just-created directory owner-only, and say whether it now is.
+
+        POSIX: ``mkdir(0o700)`` already did it - umask can only clear bits, never
+        add them - so this confirms rather than acts.
+
+        Windows: the mode argument to ``mkdir`` is ignored ENTIRELY. Without this
+        a transfer directory inherits whatever its parent grants, and the bytes
+        staged in it are readable by every account that inherits, for as long as
+        the download takes.
+        """
+        if os.name != "nt":
+            return (stat_module.S_IMODE(os.stat(path).st_mode) & 0o077) == 0
+        from telegram_mcp.owner_only import restrict_to_owner_strict
+
+        return bool(restrict_to_owner_strict(path))
+
     def fsync(self, fd):
         os.fsync(fd)
 
@@ -420,6 +437,19 @@ class DirHandle:
                 self._calls.mkdir(target, 0o700, **where)
             except FileExistsError:
                 continue
+            # Owner-only BEFORE any path-only third-party write begins. Fail
+            # closed: a staging directory that cannot be made private is not one
+            # to stage a private file in, and removing it again is cheaper than
+            # explaining who could read the download.
+            if not self._calls.restrict_directory(self.path / name):
+                try:
+                    self._calls.rmdir(target, **where)
+                except OSError:  # pragma: no cover - best effort cleanup
+                    pass
+                raise UnsafeTarget(
+                    "the transfer directory could not be made owner-only, so nothing "
+                    "was staged in it"
+                )
             return name, self.open_subdirectory(name)
         raise UnsafeTarget("could not create a private transfer directory")
 
@@ -549,7 +579,9 @@ class DirHandle:
                     raise
                 self.rmdir(name)
 
-    def install(self, source: "DirHandle", source_name: str, name: str) -> None:
+    def install(
+        self, source: "DirHandle", source_name: str, name: str, expect_source=None
+    ) -> None:
         """Give ``source_name`` its final name in *this* directory.
 
         Both ends are bound to a held directory, so neither the origin nor the
@@ -564,17 +596,40 @@ class DirHandle:
         name that changed hands in between makes the rename fail rather than
         clobber. POSIX keeps ``renameat`` between two held descriptors, which is
         atomic and cannot be redirected.
+
+        ``expect_source`` is the identity of the object that was VERIFIED, and
+        without it this call was only ever bound at one end. A staged file is
+        written by a third party through a pathname, checked, and then opened by
+        that name again here -- so replacing it in between published the
+        replacement, measured by a deterministic seam test. Pass what
+        :func:`open_verified_file` recorded and the object that passed the checks
+        is the object that gets the final name.
+
+        The proof is airtight on Windows, where the identity is read off the very
+        handle the rename then moves. On POSIX ``renameat`` still names its source
+        component, so the check narrows the window rather than closing it; the
+        staging directory being owner-only is what makes the remainder small.
         """
         self.verify()
         source.verify()
         self._permit(name)
         expect = self._made.get(name)
         if self.held is not None and source.held is not None and self._calls.pins:
-            if expect is not None:
-                self._remove_object(name, expect)
-                self._made.pop(name, None)
             moving = self._calls.open_for_change(source.path / source_name)
             try:
+                # Proved BEFORE the placeholder is deleted. Checking afterwards
+                # spends the caller's reserved name on a refusal: the reservation
+                # is a real file holding the name the caller was promised, and a
+                # rejected install would leave them with neither it nor the data.
+                if expect_source is not None and not same_object(
+                    self._calls.fstat(moving), expect_source
+                ):
+                    raise UnsafeTarget(
+                        f"{source_name!r} is no longer the object that was verified"
+                    )
+                if expect is not None:
+                    self._remove_object(name, expect)
+                    self._made.pop(name, None)
                 self._calls.rename_object(moving, self.path / name, replace=expect is None)
             finally:
                 self._calls.close(moving)
@@ -582,6 +637,10 @@ class DirHandle:
             return
         if expect is not None and not same_object(self.child_stat(name), expect):
             raise UnsafeTarget(f"{name!r} is no longer the placeholder this call reserved")
+        if expect_source is not None and not same_object(
+            source.child_stat(source_name), expect_source
+        ):
+            raise UnsafeTarget(f"{source_name!r} is no longer the object that was verified")
         if self.fd is not None and source.fd is not None:
             self._calls.replace(source_name, name, src_dir_fd=source.fd, dst_dir_fd=self.fd)
         else:
@@ -774,13 +833,16 @@ class VerifiedFile:
     directory layout is not part of an upload.
     """
 
-    __slots__ = ("handle", "name", "size", "path")
+    __slots__ = ("handle", "name", "size", "path", "identity")
 
-    def __init__(self, handle, name: str, size: int, path: Path):
+    def __init__(self, handle, name: str, size: int, path: Path, identity=None):
         self.handle = handle
         self.name = name
         self.size = size
         self.path = path
+        #: The ``fstat`` of the object that was verified, so a later step can
+        #: prove it is acting on THAT object rather than on the name again.
+        self.identity = identity
 
     def close(self) -> None:
         try:
@@ -819,4 +881,4 @@ def open_verified_file(
         handle.raw.name = name
     except (AttributeError, TypeError):  # pragma: no cover - a wrapper without a raw
         pass
-    return VerifiedFile(handle, name, opened.st_size, directory.path / name)
+    return VerifiedFile(handle, name, opened.st_size, directory.path / name, opened)

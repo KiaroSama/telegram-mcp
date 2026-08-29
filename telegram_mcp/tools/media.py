@@ -268,6 +268,11 @@ async def download_media(
                             f"Download refused: the file turned out to be larger than the "
                             f"{cap}-byte limit (max_bytes). Nothing was kept."
                         )
+                    # Which object passed, not just that one did. Telethon wrote
+                    # this file through a PATHNAME, so between the check above and
+                    # the install below the name can be given to something else -
+                    # and the install would publish that instead.
+                    staged = fetched.identity
                 # The bytes reach storage before the name that promises them does.
                 staging.sync_child(produced.name)
 
@@ -283,7 +288,7 @@ async def download_media(
                 # directory: this can neither clobber a file that appeared in the
                 # meantime nor publish into a directory that took over the name.
                 try:
-                    parent.install(staging, produced.name, final_name)
+                    parent.install(staging, produced.name, final_name, expect_source=staged)
                 except BaseException:
                     # The reservation is a real, empty file. Leaving it behind
                     # wearing the name the caller was about to be given is the
