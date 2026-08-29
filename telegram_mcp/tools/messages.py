@@ -915,6 +915,11 @@ async def delete_messages_bulk(
         chat_id: Chat ID or username.
         message_ids: List of message IDs to delete.
         revoke: If True, delete for both parties (default True). Ignored for channels.
+
+    Outside channels Telegram treats a message id as account-global, not scoped
+    to a chat: `messages.DeleteMessagesRequest` carries no peer field at all. So
+    in a private chat or a basic group these ids are NOT restricted to `chat_id`
+    - pass ids you read from this same chat.
     """
     try:
         cl = get_client(account)
