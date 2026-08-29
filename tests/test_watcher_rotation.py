@@ -15,6 +15,7 @@ Two things this pins that the older test could not:
 """
 
 import os
+from pathlib import Path
 import queue
 import subprocess
 import sys
@@ -36,6 +37,29 @@ WATCH_TIMEOUT_SECONDS = 40.0
 def _collect(stream, sink):
     for line in iter(stream.readline, ""):
         sink.put(line)
+
+
+def _replace_when_windows_lets_go(source: Path, destination: Path) -> None:
+    """Rename over a file a reader may be holding, bounded.
+
+    The watcher opens the feed with FILE_SHARE_DELETE, so a rename over it is
+    permitted - but not instantaneously in every ordering, and under a loaded
+    machine this lost often enough to make the test red while the watcher was
+    behaving correctly.
+
+    Production does the same thing: `_rotate_feed_if_needed` logs the OSError
+    and leaves the rotation to the next open. Retrying here models that rather
+    than pretending the rename is infallible.
+    """
+    deadline = time.monotonic() + 10.0
+    while True:
+        try:
+            os.replace(source, destination)
+            return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.05)
 
 
 class _Watcher:
@@ -114,7 +138,7 @@ def test_a_rotation_to_a_longer_file_still_emits_its_first_event(monkeypatch, tm
             "tests the shrink case the old logic already handled"
         )
 
-        os.replace(replacement, path)
+        _replace_when_windows_lets_go(replacement, path)
 
         watcher.await_line("first_of_the_new_generation")
     finally:
