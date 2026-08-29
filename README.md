@@ -106,7 +106,7 @@ By default, an agent waits for replies by calling `wait_for_settled_message`, wh
 
 Clients that can wake an agent on external output (Claude Code's persistent `Monitor` on `tail -f`) can switch to callback mode instead:
 
-1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created readable by its owner alone — mode `0600` on POSIX, and a real owner-only ACL on Windows, where `chmod` toggles nothing but the read-only flag. Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path and a ready-to-use watch command.
+1. The agent calls `enable_incoming_feed` (or set `TELEGRAM_EVENT_FEED=1` in the environment to auto-enable). Each settled incoming burst is appended as one JSON line to `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/incoming_feed.jsonl`, created readable by its owner alone — mode `0600` on POSIX, and a real owner-only ACL on Windows, where `chmod` toggles nothing but the read-only flag. Override the path with `TELEGRAM_EVENT_FEED_FILE` — an explicit path's directory must already exist. `incoming_feed_status` reports the effective path, a ready-to-use `watch_command`, and the readable `watch_script` behind it - on Windows the command is `-EncodedCommand` base64 so that pasting it into a shell cannot expand the script's own variables first.
 2. The agent arms a persistent Monitor with the `watch_command` returned by the tool. Every new line re-invokes the agent with the burst summary; no blocking tool call is held open, and the chat stays free.
 
 `disable_incoming_feed` switches back and waits for the consumer to actually stop; `incoming_feed_status` reports the current mode. While the feed is enabled it consumes settled bursts, so don't combine it with `wait_for_settled_message`. Feed lines contain user-generated `name` fields — treat them as untrusted data.
@@ -179,13 +179,16 @@ readable by every account on the machine.
 install -m 600 .env.example .env
 ```
 
-On Windows, `Copy-Item` then strip the inherited access. `/inheritance:r` is the
-half that matters: `icacls /grant` on its own ADDS an entry and leaves the
-inherited `BUILTIN\Users` one in place.
+On Windows, `Copy-Item` and let the account manager lock it down. `icacls` is not
+the tool for this and the reason is narrow enough to have looked like a fix:
+`/inheritance:r` drops the INHERITED entries and `/grant:r` replaces the entry for
+the principal it names, so every OTHER explicit entry survives and the command
+still exits 0. Measured on a GitHub Windows runner, whose workspace files carry
+three explicit entries: all three remained.
 
 ```powershell
 Copy-Item .env.example .env
-icacls .env /inheritance:r /grant:r "${env:USERDOMAIN}\${env:USERNAME}:(F)"
+./Manage-Accounts.ps1   # writes the whole DACL, then reads it back to prove it
 ```
 
 The server re-applies this at startup on both platforms and warns if it cannot,
@@ -822,8 +825,13 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   code, numeric ids and an exception type with a stable digest. Message text, names, titles,
   paths and queries are deliberately not in it, so quote the error code when reporting a bug.
 - **Want the server's diagnostics on disk:** run `./start-mcp.ps1 -LogToFile` (or set
-  `TELEGRAM_MCP_LAUNCHER_LOG=1`). Only stderr is written; stdout is the MCP protocol channel
-  and carries whole tool results, so it is never persisted.
+  `TELEGRAM_MCP_LAUNCHER_LOG=1`). Stdout is the MCP protocol channel and carries whole
+  tool results, so it is never persisted. Of stderr, only this server's OWN log lines are
+  written down: they come through a redacting filter that replaces every value with a
+  shape and a digest before it reaches the stream. Anything else on stderr - a library
+  warning quoting a chat title, a third-party traceback - stays on the terminal and the
+  file records how many lines were withheld. A crash persists the exception type and the
+  script line that raised it, never the message.
 
 ## Working on it
 
