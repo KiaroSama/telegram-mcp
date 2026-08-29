@@ -21,6 +21,23 @@ from telegram_mcp.handles import SystemCalls, UnsafeTarget, open_verified_file
 from telegram_mcp.owner_only import verify_owner_only
 
 
+def _substitute(target: Path, payload: bytes = b"planted") -> None:
+    """Put a DIFFERENT object under an existing name.
+
+    Prepared elsewhere and renamed on, rather than unlinked and rewritten. Both
+    files exist at once, so the replacement necessarily has its own identity -
+    on Linux an unlink frees the inode and the very next create takes it back,
+    which made the substitution invisible to a (st_dev, st_ino) comparison and
+    the test pass on Windows while proving nothing on the runner.
+
+    It is also what an attacker actually does: stage the file you want, then win
+    the name.
+    """
+    prepared = target.with_name(target.name + ".substitute")
+    prepared.write_bytes(payload)
+    os.replace(prepared, target)
+
+
 def _staged(root: Path, payload: bytes = b"the-real-download"):
     """A parent handle plus a staging directory holding one written file."""
     parent = handles.open_allowed_directory(root, [root])
@@ -86,11 +103,7 @@ def test_a_staged_source_replaced_after_verification_is_refused(tmp_path):
             staged_identity = fetched.identity
         assert staged_identity is not None, "nothing recorded which object passed"
 
-        # A different object under the same name. `unlink` then `write_bytes`
-        # rather than an overwrite: the point is a new inode / file index, which
-        # is what an attacker substituting a file produces.
-        (Path(staging.path) / "part.bin").unlink()
-        (Path(staging.path) / "part.bin").write_bytes(b"planted")
+        _substitute(Path(staging.path) / "part.bin")
 
         reserved = parent.reserve_free_name("out", ".bin")
         with pytest.raises(UnsafeTarget, match="no longer the object"):
@@ -123,8 +136,7 @@ def test_without_the_binding_the_replacement_is_published(tmp_path):
         with open_verified_file(staging, "part.bin") as fetched:
             assert fetched.size == len(b"the-real-download")
 
-        (Path(staging.path) / "part.bin").unlink()
-        (Path(staging.path) / "part.bin").write_bytes(b"planted")
+        _substitute(Path(staging.path) / "part.bin")
 
         reserved = parent.reserve_free_name("out", ".bin")
         parent.install(staging, "part.bin", reserved)
@@ -171,8 +183,7 @@ def test_cleanup_after_a_refused_install_leaves_the_stranger_alone(tmp_path):
         with open_verified_file(staging, "part.bin") as fetched:
             staged_identity = fetched.identity
 
-        (Path(staging.path) / "part.bin").unlink()
-        (Path(staging.path) / "part.bin").write_bytes(b"planted")
+        _substitute(Path(staging.path) / "part.bin")
 
         with pytest.raises(UnsafeTarget):
             parent.install(staging, "part.bin", "precious.bin", expect_source=staged_identity)
