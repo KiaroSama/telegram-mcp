@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **169** |
+| MCP tools registered | **170** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -73,7 +73,7 @@ can see. Treat a TL-verb grep as a starting point, never as the answer.
 |---|---|
 | Dialog folders / chat lists | `messages.GetDialogFilters`, `UpdateDialogFilter` |
 | Drafts | `messages.SaveDraft`, `GetAllDrafts` |
-| Forum topics (create / list / edit) | `channels.CreateForumTopic`, `GetForumTopics` |
+| Forum topics (create / list) | `channels.CreateForumTopic`, `GetForumTopics` |
 | Message search, in-chat and global | `search_messages` / `search_global`, through Telethon's `get_messages(search=…)` — no raw call, which is exactly why a raw-only count misses it |
 | Read receipts — *who* read a message | `get_message_read_by` → `messages.GetMessageReadParticipants` |
 | Reading who reacted | `messages.GetMessageReactionsList` |
@@ -102,12 +102,20 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-Added since, 165 → **168**, ported from the original project rather than merged (a
+Added since, 165 → **170**, ported from the original project rather than merged (a
 history rewrite here left the two with no merge base):
 
 | Capability | Tools | Module |
 |---|---|---|
 | Peer photos | `list_photos`, `open_photo`, `get_photo_sheet` | `tools/photos.py` |
+| Copying a message whole | `copy_message` | `tools/messages.py` |
+| Saying why the file tools are off | `get_file_roots_status` | `tools/diagnostics.py` |
+
+`copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
+copy. That is the only way premium emoji and media survive: rebuilding a message from
+its text and entities loses the custom-emoji documents, and the offsets are Telegram's
+raw UTF-16 ones, which do not index the string a viewer sees. It can schedule the copy
+too, so it replaces the reason `schedule_message` grew an entity argument.
 
 `photos.GetUserPhotos` was already used by `get_user_photos`, so the photos.* row
 above is unchanged: what is new is that a group or channel now has an avatar history
@@ -219,6 +227,7 @@ The settings an operator actually reaches for are all missing:
 | Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
 | Moderation | `ToggleAntiSpam`, `ReportAntiSpamFalsePositive`, `SetBoostsToUnblockRestrictions` |
 | Appearance | `UpdateColor`, `UpdateEmojiStatus`, `SetStickers`, `SetEmojiStickers` |
+| Forum topics | `EditForumTopic`, `UpdatePinnedForumTopic` |
 | Structural | `ConvertToGigagroup`, `EditLocation`, `DeleteChannel`, `UpdatePaidMessagesPrice`, `ToggleAutotranslation` |
 
 Self-contained, no new dependency, and every one is a single request. `DeleteChannel`
@@ -255,8 +264,12 @@ what the chat actually is instead of guessing.
 roots are configured** — which is why saving a disappearing message needed its own
 path. The work is not new TL, it is making the existing gate usable:
 
-1. A tool that reports the current roots status and says exactly what to configure,
-   so an agent hitting the gate can explain the fix instead of failing.
+1. ~~A tool that reports the current roots status and says exactly what to configure,
+   so an agent hitting the gate can explain the fix instead of failing.~~ **done.**
+   Shipped as `get_file_roots_status`. It reports the status, the effective roots,
+   which mechanism supplied them, and the one concrete thing that changes it - and
+   a test asserts every status the resolver can return has advice written for it,
+   because a status with no advice reproduces the original problem one level up.
 2. Bulk chat export: iterate a chat's history and write messages plus media to a
    directory under the roots. No TL beyond what is already used.
 3. History **import** is genuinely absent — `messages.InitHistoryImport`,
