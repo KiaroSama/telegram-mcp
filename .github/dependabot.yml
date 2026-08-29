@@ -1,19 +1,20 @@
-# Nothing was watching this project's dependencies. There was no file here at all,
-# so Dependabot had no version updates to run - and a fork starts with Dependabot
-# ALERTS switched off by default, which is why no security PR ever appeared either.
-# The alerts toggle is repository state, not config; it lives in Settings ->
-# Advanced Security and had to be turned on separately from this file.
+# Nothing was watching this project's dependencies. There was no file here at
+# all, so Dependabot had no version updates to run - and a FORK starts with
+# Dependabot switched off regardless of this file, which is the other half of
+# why no pull request ever appeared. That half is repository state, not config:
+# Settings -> Code security -> Dependabot, and click enable.
 version: 2
 
 updates:
-  # uv, not pip: uv.lock is the source of truth here and `uv` updates it together
-  # with pyproject.toml. A `pip` entry would report the same dependencies a second
-  # time from requirements.txt and open competing pull requests for one bump.
+  # `pip`, not `uv`. The uv changelog announced version-update support, but the
+  # supported-ecosystems table still lists only `pip` for Python, and an
+  # unrecognised package-ecosystem does not fail loudly - it can invalidate the
+  # whole file, which looks exactly like Dependabot not running. `pip` reads
+  # pyproject.toml (this project is PEP 621) and requirements.txt together, so
+  # the two stay in step and the packaging test that compares them keeps passing.
   #
-  # requirements.txt is left to the test that already guards it: every dependency
-  # is declared as a `>=` floor, so a lock refresh does not move the declared
-  # constraints, and tests/test_packaging.py fails loudly if the two ever diverge.
-  - package-ecosystem: "uv"
+  # uv.lock is NOT refreshed by this. Run `uv lock` after merging a bump.
+  - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "daily"
