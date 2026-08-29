@@ -362,6 +362,42 @@ def format_message_line(msg) -> str:
     return " | ".join(parts) + f" | Message: {safe_text}"
 
 
+async def _album_batch(cl, entity, message_id, expand: bool):
+    """``(ids, expanded)`` for one message id, widened to its album when asked.
+
+    Telegram allocates an album's ids contiguously, so a small window around the
+    anchor captures the siblings. Shared by forward and copy: an album that
+    forwards whole and copies as one detached photo is the same surprise twice.
+    """
+    if not expand or not isinstance(message_id, int):
+        return message_id, False
+    anchor = await cl.get_messages(entity, ids=message_id)
+    grouped_id = getattr(anchor, "grouped_id", None) if anchor else None
+    if grouped_id is None:
+        return message_id, False
+    window = list(range(message_id - 9, message_id + 10))
+    neighbors = await cl.get_messages(entity, ids=window)
+    sibling_ids = sorted(
+        {m.id for m in neighbors if m is not None and getattr(m, "grouped_id", None) == grouped_id}
+    )
+    if len(sibling_ids) > 1:
+        return sibling_ids, True
+    return message_id, False
+
+
+def _as_utc(value: Union[str, int]) -> datetime:
+    """A schedule time from an ISO-8601 string or a Unix timestamp, as UTC.
+
+    Lives here rather than beside the scheduling tools because two modules need
+    it and this one is the base the siblings import from; the reverse direction
+    is what the module docstring above forbids.
+    """
+    if isinstance(value, (int, float)):
+        return datetime.fromtimestamp(int(value), tz=timezone.utc)
+    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
+
+
 async def _send_rich(cl, entity, text: str, parse_mode: str, reply_to: Optional[int] = None):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
     import random
@@ -497,26 +533,9 @@ async def forward_message(
         from_entity = await resolve_entity(from_chat_id, cl)
         to_entity = await resolve_entity(to_chat_id, cl)
 
-        ids_to_forward = message_id
-        expanded_from_album = False
-        if expand_album and isinstance(message_id, int):
-            anchor = await cl.get_messages(from_entity, ids=message_id)
-            grouped_id = getattr(anchor, "grouped_id", None) if anchor else None
-            if grouped_id is not None:
-                # Album ids are allocated contiguously by Telegram; a small
-                # window around the anchor reliably captures all siblings.
-                window = list(range(message_id - 9, message_id + 10))
-                neighbors = await cl.get_messages(from_entity, ids=window)
-                sibling_ids = sorted(
-                    {
-                        m.id
-                        for m in neighbors
-                        if m is not None and getattr(m, "grouped_id", None) == grouped_id
-                    }
-                )
-                if len(sibling_ids) > 1:
-                    ids_to_forward = sibling_ids
-                    expanded_from_album = True
+        ids_to_forward, expanded_from_album = await _album_batch(
+            cl, from_entity, message_id, expand_album
+        )
 
         await cl.forward_messages(to_entity, ids_to_forward, from_entity)
         count = len(ids_to_forward) if isinstance(ids_to_forward, list) else 1
@@ -531,6 +550,98 @@ async def forward_message(
     except Exception as e:
         return log_and_format_error(
             "forward_message",
+            e,
+            from_chat_id=from_chat_id,
+            message_id=message_id,
+            to_chat_id=to_chat_id,
+        )
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Copy Message", openWorldHint=True, destructiveHint=True)
+)
+@with_account(readonly=False)
+@validate_id("from_chat_id", "to_chat_id")
+async def copy_message(
+    from_chat_id: Union[int, str],
+    message_id: Union[int, List[int]],
+    to_chat_id: Union[int, str],
+    when: Union[str, int] = None,
+    expand_album: bool = True,
+    drop_captions: bool = False,
+    account: str = None,
+) -> str:
+    """
+    Send a copy of a message, with no "Forwarded from" header.
+
+    This is Telegram's own copy and the SERVER makes it, so custom (premium)
+    emoji, every other entity, and any attached media arrive exactly as they
+    were. Rebuilding the text on this side cannot match that: a premium emoji is
+    a document id pinned to a UTF-16 offset, so anything that re-derives the text
+    moves the offsets out from under it and the emoji lands on the wrong
+    character. Copy with this; use `schedule_message(entities=...)` only to
+    compose something new.
+
+    Args:
+        from_chat_id: Source chat (id or @username).
+        message_id: A single message id, or a list of ids.
+        to_chat_id: Destination chat (id or @username).
+        when: Omit to send now. An ISO-8601 string ("2026-09-01T14:30:00Z") or a
+            Unix timestamp schedules the copy instead; a naive datetime is UTC.
+        expand_album: When a single id belongs to an album, copy the whole album
+            rather than one detached item. No effect on a list.
+        drop_captions: Copy the media without its caption.
+    """
+    try:
+        target = None
+        if when is not None:
+            target = _as_utc(when)
+            if target <= datetime.now(timezone.utc):
+                return (
+                    f"when must be in the future - got {target.isoformat()}, now "
+                    f"{datetime.now(timezone.utc).isoformat()}."
+                )
+
+        cl = get_client(account)
+        await ensure_connected(cl)
+        from_entity = await resolve_entity(from_chat_id, cl)
+        to_entity = await resolve_entity(to_chat_id, cl)
+
+        ids, expanded = await _album_batch(cl, from_entity, message_id, expand_album)
+        await cl.forward_messages(
+            to_entity,
+            ids,
+            from_entity,
+            drop_author=True,
+            drop_media_captions=drop_captions,
+            schedule=target,
+        )
+
+        count = len(ids) if isinstance(ids, list) else 1
+        record = {
+            "copied": count,
+            "from_chat": from_chat_id,
+            "to_chat": to_chat_id,
+            "attribution": "dropped",
+        }
+        if expanded:
+            record["expanded_from_album"] = message_id
+        if target is not None:
+            record["scheduled_for"] = target.isoformat()
+        if drop_captions:
+            record["captions"] = "dropped"
+        return format_tool_result(record)
+    except telethon.errors.rpcerrorlist.ChatForwardsRestrictedError:
+        # Content protection. Worth naming, because the obvious next move -
+        # reading the text and sending it again - is exactly what loses the
+        # premium emoji, and it is also what the source chat forbade.
+        return (
+            f"Chat {from_chat_id} has content protection on, so Telegram refuses to "
+            f"copy or forward from it."
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "copy_message",
             e,
             from_chat_id=from_chat_id,
             message_id=message_id,
@@ -866,6 +977,7 @@ async def reply_to_message(
 
 __all__ = [
     "send_message",
+    "copy_message",
     "forward_message",
     "forward_messages",
     "edit_message",

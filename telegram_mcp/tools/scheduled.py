@@ -18,9 +18,19 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Union
 
 from telegram_mcp.runtime import *
-from telegram_mcp.message_view import describe_media_label, display_text
+from telegram_mcp.message_view import (
+    describe_media_label,
+    display_text,
+    entity_kind_from_name,
+)
 
-from telethon import errors, functions
+# The base module of the message family, per its own docstring: siblings import
+# from it and it imports from none of them. `_as_utc` lives there because
+# `copy_message` needs the same parser and duplicating it is how two tools start
+# reading the same argument differently.
+from telegram_mcp.tools.messages import _as_utc
+
+from telethon import errors, functions, types
 
 # Verified against the live server, not inferred from the field name.
 REPEAT_PERIODS = {"daily": 86400, "weekly": 604800}
@@ -30,17 +40,6 @@ _PREMIUM_NOTE = (
     "accepted, but a non-Premium account gets PREMIUM_ACCOUNT_REQUIRED. Schedule it without "
     "repeat, or use a Premium account."
 )
-
-
-def _as_utc(value: Union[str, int]) -> datetime:
-    """A schedule time from an ISO-8601 string or a Unix timestamp, as UTC.
-
-    Mirrors upstream ``send_scheduled_message`` so both tools read the same input.
-    """
-    if isinstance(value, (int, float)):
-        return datetime.fromtimestamp(int(value), tz=timezone.utc)
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed
 
 
 def _repeat_seconds(repeat: Optional[str]) -> Union[int, None, str]:
@@ -55,6 +54,101 @@ def _repeat_seconds(repeat: Optional[str]) -> Union[int, None, str]:
             "SCHEDULE_REPEAT_PERIOD_INVALID."
         )
     return period
+
+
+# The dict keys `describe_entities` publishes, mapped to the constructor
+# arguments Telethon's entity classes take.
+_ENTITY_FIELDS = {
+    "custom_emoji_id": "document_id",
+    "url": "url",
+    "user_id": "user_id",
+    "language": "language",
+    "collapsed": "collapsed",
+}
+
+
+def _entity_classes() -> dict:
+    """Every entity kind Telethon knows, keyed as `describe_entities` names them.
+
+    Derived from Telethon's own type list rather than hand-written. A table of
+    three kinds refused the WHOLE message the moment a fourth appeared, so text
+    carrying a premium emoji beside one bold word could not be sent at all - and
+    a table also stops covering whatever Telegram adds next, silently.
+    """
+    classes = {}
+    for name in dir(types):
+        if not name.startswith("MessageEntity"):
+            continue
+        candidate = getattr(types, name)
+        if isinstance(candidate, type):
+            classes[entity_kind_from_name(name)] = candidate
+    return classes
+
+
+def _rebuild_entities(items: Optional[List[dict]], text: str):
+    """Telethon entities from `inspect_message`-shaped dicts, or an error string.
+
+    **Offsets are UTF-16 code units into `text`**, and that is not a detail a
+    caller can get away with skimming. `describe_entities` rebases Telegram's raw
+    offsets onto the `text_fidelity` string it returns, so `text` here has to be
+    that same value. Hand it the generically sanitized `text` field instead and
+    every offset is quietly off by however much the sanitizer removed - a premium
+    emoji lands on the wrong character and nothing reports a problem.
+
+    Refuses rather than guesses. An entity that cannot be rebuilt faithfully -
+    out of range, marked `offset_is_raw`, or carrying a value the viewer already
+    altered - fails the whole call, because a message sent with silently dropped
+    formatting looks like it worked.
+    """
+    if not items:
+        return None
+
+    classes = _entity_classes()
+    units = len(text.encode("utf-16-le")) // 2
+    built, problems = [], []
+
+    for item in items:
+        kind = item.get("type")
+        entity_class = classes.get(kind)
+        if entity_class is None:
+            problems.append(f"{kind!r} is not an entity kind this Telethon knows")
+            continue
+
+        offset, length = item.get("offset"), item.get("length")
+        if not isinstance(offset, int) or not isinstance(length, int):
+            problems.append(f"{kind} has no usable offset/length")
+            continue
+        # `offset_is_raw` marks an offset the viewer could NOT rebase onto the text
+        # it returned. It indexes Telegram's original string, so using it here
+        # would place the entity somewhere else entirely.
+        if item.get("offset_is_raw"):
+            problems.append(f"{kind} at {offset} is a raw Telegram offset, not one into this text")
+            continue
+        if offset < 0 or length < 0 or offset + length > units:
+            problems.append(
+                f"{kind} spans {offset}..{offset + length} but the text is {units} UTF-16 units"
+            )
+            continue
+        # The viewer cleans a sender-supplied url or language tag and says so. The
+        # cleaned form is safe to SHOW and wrong to SEND: it is not what the
+        # original message carried.
+        altered = [k for k in ("url_altered", "language_altered") if item.get(k)]
+        if altered:
+            problems.append(f"{kind} carries {altered[0]}, so its value is not the original")
+            continue
+
+        fields = {"offset": offset, "length": length}
+        for source, target in _ENTITY_FIELDS.items():
+            if source in item:
+                fields[target] = item[source]
+        try:
+            built.append(entity_class(**fields))
+        except TypeError as error:
+            problems.append(f"{kind} could not be built: {error}")
+
+    if problems:
+        return "Refused: " + "; ".join(problems) + "."
+    return built
 
 
 def _describe(msg) -> dict[str, Any]:
@@ -134,6 +228,7 @@ async def schedule_message(
     message: str,
     when: Union[str, int],
     repeat: str = None,
+    entities: List[dict] = None,
     account: str = None,
 ) -> str:
     """
@@ -145,11 +240,24 @@ async def schedule_message(
 
     Args:
         chat_id: The chat ID or username.
-        message: The text to send.
+        message: The text to send. When `entities` is given, the text's
+            offsets are UTF-16 code units as Telegram reports them.
         when: The first send time — an ISO-8601 string ("2026-09-01T14:30:00Z")
             or a Unix timestamp. A naive datetime is read as UTC.
         repeat: "daily", "weekly", or omitted for a single send. Telegram
             validates the period server-side and requires Premium for it.
+        entities: Optional formatting list in the same shape `inspect_message`
+            returns (type/offset/length plus each kind's own fields), used to
+            place custom emoji and other formatting exactly. Every entity kind
+            this Telethon knows is rebuilt.
+
+            **`message` must be the `text_fidelity` value the entities came
+            with**, because their offsets index that exact string. Anything
+            out of range, marked `offset_is_raw`, or already altered by the
+            viewer is refused rather than placed approximately.
+
+            To copy an existing message unchanged, prefer `copy_message`: it
+            never takes the text apart, so nothing can be rebased wrongly.
 
     Note: this queues a real message that Telegram will deliver on its own.
     """
@@ -164,6 +272,10 @@ async def schedule_message(
                 f"{datetime.now(timezone.utc).isoformat()}."
             )
 
+        built_entities = _rebuild_entities(entities, message)
+        if isinstance(built_entities, str):
+            return built_entities
+
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
@@ -173,6 +285,7 @@ async def schedule_message(
             random_id=int.from_bytes(os.urandom(8), "big", signed=True),
             schedule_date=target,
             schedule_repeat_period=period,
+            entities=built_entities,
         )
         result = await cl(request)
         message_id = None

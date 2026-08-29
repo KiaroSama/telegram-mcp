@@ -52,9 +52,14 @@ _DOWNLOADABLE_KINDS = {
 }
 
 
-def _entity_kind(entity: Any) -> str:
-    """``MessageEntityBoldItalic`` -> ``bold_italic``."""
-    name = type(entity).__name__
+def entity_kind_from_name(name: str) -> str:
+    """``MessageEntityBoldItalic`` -> ``bold_italic``.
+
+    Public because the rebuild direction needs the SAME rule. A second copy of
+    this conversion is a second thing to get wrong, and the two would only
+    disagree for whichever entity kind Telegram adds next - which is exactly the
+    kind nobody has a test for.
+    """
     if name.startswith("MessageEntity"):
         name = name[len("MessageEntity") :]
     out = []
@@ -63,6 +68,11 @@ def _entity_kind(entity: Any) -> str:
             out.append("_")
         out.append(char.lower())
     return "".join(out) or "unknown"
+
+
+def _entity_kind(entity: Any) -> str:
+    """The reported kind of one entity instance."""
+    return entity_kind_from_name(type(entity).__name__)
 
 
 def describe_entities(
