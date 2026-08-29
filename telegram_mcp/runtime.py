@@ -332,6 +332,16 @@ def log_and_format_error(
     if isinstance(error, AliasNeedsUser):
         return error.payload
 
+    # Same reasoning: an account that cannot see a peer is an ANSWER, not a
+    # failure of this server. Under the read-only fan-out it is the ordinary
+    # outcome for every account that is not in the chat, and an error code there
+    # tells the operator nothing they can act on.
+    if isinstance(error, PeerNotFound):
+        return (
+            "This account cannot see that chat, user or channel. Check the id or "
+            "username, or use an account that is a member."
+        )
+
     # Generate a consistent error code
     if isinstance(prefix, str) and prefix == "VALIDATION-001":
         # Special case for validation errors
@@ -584,6 +594,20 @@ async def _warm_dialogs_once(client) -> bool:
     return True
 
 
+class PeerNotFound(ValueError):
+    """This account cannot see that chat, user or channel.
+
+    Normal control flow, not a failure of this server: under the read-only
+    fan-out it is the ordinary answer for every account that is not in the chat.
+    Rendered as an error CODE it told the operator nothing and looked like a bug -
+    `list_topics` came back as GEN-ERR-911 for one account while `list_chats`
+    answered the same situation in a sentence.
+
+    Subclasses ValueError so every existing `except ValueError` around the
+    resolver keeps working.
+    """
+
+
 async def _resolve_with_retries(
     getter: str, identifier: Union[int, str], client, label: str, try_marked: bool = True
 ):
@@ -627,7 +651,7 @@ async def _resolve_with_retries(
             except ValueError as error:
                 last_error = error
 
-    raise ValueError(
+    raise PeerNotFound(
         f"Could not resolve {label} for {identifier!r}, "
         f"including marked variants {_marked_id_candidates(identifier)}"
     ) from last_error
