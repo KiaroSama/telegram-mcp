@@ -40,17 +40,38 @@ def _module(name):
 
 def test_the_split_partitions_the_original_seventeen_tools():
     """Every tool chats.py used to own still exists, in exactly one of the three
-    modules. 9 + 3 + 5 == 17, and the three sets are disjoint."""
+    modules. 9 + 3 + 5 == 17, and the three sets are disjoint.
+
+    Each module's `__all__` must CONTAIN its share, not equal it: these modules
+    are allowed to grow. `edit_forum_topic` was the first addition, and pinning
+    equality would have made every later tool look like a partition violation -
+    which teaches the next person to loosen the guard rather than read it.
+
+    What still fails here is what the split could actually get wrong: a tool that
+    went missing, stopped being callable, or drifted into a second module.
+    """
     homes = {"chats": CHATS, "topics": TOPICS, "chat_state": CHAT_STATE}
+    seen: dict[str, str] = {}
 
     for name, expected in homes.items():
         module = _module(name)
-        assert set(module.__all__) == expected, (
-            f"telegram_mcp.tools.{name}.__all__ is {sorted(module.__all__)}, "
-            f"expected {sorted(expected)}"
+        exported = set(module.__all__)
+
+        missing = expected - exported
+        assert not missing, (
+            f"telegram_mcp.tools.{name} no longer exports {sorted(missing)}; "
+            "a tool the split was responsible for has gone missing"
         )
         for tool in expected:
             assert callable(getattr(module, tool)), f"{name}.{tool} is not callable"
+
+        # Any tool, original or added later, must live in exactly one of the three.
+        for tool in exported:
+            assert tool not in seen, (
+                f"{tool} is exported by both {seen[tool]} and {name}; the star "
+                "import binds one name, so one of the two is unreachable"
+            )
+            seen[tool] = name
 
     assert len(CHATS | TOPICS | CHAT_STATE) == 17
     assert not (CHATS & TOPICS), CHATS & TOPICS

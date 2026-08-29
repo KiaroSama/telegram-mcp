@@ -170,6 +170,110 @@ class CreateForumTopicRequest(TLRequest):
         )
 
 
+# Telegram's `Bool` is a boxed type: it goes on the wire as a constructor id, not
+# as a byte. Only the three optional Bool/int fields below need them.
+_BOOL_TRUE = 0x997275B5
+_BOOL_FALSE = 0xBC799737
+
+
+class EditForumTopicRequest(TLRequest):
+    """Raw request for channels.editForumTopic, which Telethon 1.44 does not ship.
+
+    The constructor id is not copied from documentation and hoped for: it is
+    CRC32 over the normalised schema line, and that derivation was validated by
+    reproducing `GetForumTopicsRequest`'s own id (0x0DE560D1) from its schema
+    before being trusted here. Because the CRC covers the WHOLE definition, a
+    matching id also confirms the field order and flag numbering below - get
+    either wrong and the id would not match.
+
+        channels.editForumTopic#f4dfa185 flags:# channel:InputChannel
+            topic_id:int title:flags.0?string icon_emoji_id:flags.1?long
+            closed:flags.2?Bool hidden:flags.3?Bool = Updates
+
+    Every field is optional and omitted fields are left untouched, so this is an
+    edit and not a replace: renaming a topic does not clear its icon.
+    """
+
+    CONSTRUCTOR_ID = 0xF4DFA185
+    SUBCLASS_OF_ID = 0x0
+
+    def __init__(
+        self, channel, topic_id, title=None, icon_emoji_id=None, closed=None, hidden=None
+    ):
+        self.channel = channel
+        self.topic_id = topic_id
+        self.title = title
+        self.icon_emoji_id = icon_emoji_id
+        self.closed = closed
+        self.hidden = hidden
+
+    async def resolve(self, client, utils):
+        self.channel = utils.get_input_channel(await client.get_input_entity(self.channel))
+
+    def to_dict(self):
+        return {
+            "_": "EditForumTopicRequest",
+            "channel": (
+                self.channel.to_dict() if isinstance(self.channel, TLObject) else self.channel
+            ),
+            "topic_id": self.topic_id,
+            "title": self.title,
+            "icon_emoji_id": self.icon_emoji_id,
+            "closed": self.closed,
+            "hidden": self.hidden,
+        }
+
+    def _bytes(self):
+        flags = 0
+        if self.title is not None:
+            flags |= 1 << 0
+        if self.icon_emoji_id is not None:
+            flags |= 1 << 1
+        if self.closed is not None:
+            flags |= 1 << 2
+        if self.hidden is not None:
+            flags |= 1 << 3
+
+        return b"".join(
+            (
+                struct.pack("<I", self.CONSTRUCTOR_ID),
+                struct.pack("<I", flags),
+                self.channel._bytes(),
+                struct.pack("<i", self.topic_id),
+                b"" if self.title is None else self.serialize_bytes(self.title),
+                b"" if self.icon_emoji_id is None else struct.pack("<q", self.icon_emoji_id),
+                (
+                    b""
+                    if self.closed is None
+                    else struct.pack("<I", _BOOL_TRUE if self.closed else _BOOL_FALSE)
+                ),
+                (
+                    b""
+                    if self.hidden is None
+                    else struct.pack("<I", _BOOL_TRUE if self.hidden else _BOOL_FALSE)
+                ),
+            )
+        )
+
+    @classmethod
+    def from_reader(cls, reader):
+        flags = reader.read_int()
+        channel = reader.tgread_object()
+        topic_id = reader.read_int()
+        title = reader.tgread_string() if flags & (1 << 0) else None
+        icon_emoji_id = reader.read_long() if flags & (1 << 1) else None
+        closed = reader.tgread_bool() if flags & (1 << 2) else None
+        hidden = reader.tgread_bool() if flags & (1 << 3) else None
+        return cls(
+            channel=channel,
+            topic_id=topic_id,
+            title=title,
+            icon_emoji_id=icon_emoji_id,
+            closed=closed,
+            hidden=hidden,
+        )
+
+
 @mcp.tool(annotations=ToolAnnotations(title="List Topics", openWorldHint=True, readOnlyHint=True))
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -412,8 +516,94 @@ def _extract_created_topic_id(result) -> Optional[int]:
     return None
 
 
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Edit Forum Topic", openWorldHint=True, destructiveHint=False, idempotentHint=True
+    )
+)
+@with_account(readonly=False)
+@validate_id("chat_id")
+async def edit_forum_topic(
+    chat_id: Union[int, str],
+    topic_id: int,
+    title: str = None,
+    icon_emoji_id: int = None,
+    closed: bool = None,
+    hidden: bool = None,
+    account: str = None,
+) -> str:
+    """
+    Rename a forum topic, change its icon, close it, or hide it.
+
+    Every argument is optional and an omitted one is left ALONE - this is an
+    edit, not a replace, so renaming a topic does not clear its icon. Passing
+    none of them changes nothing and is refused rather than sent.
+
+    All four are reversible: call again with the opposite value.
+
+    Args:
+        chat_id: The forum supergroup ID or username.
+        topic_id: The topic to edit, from `list_topics`.
+        title: New title.
+        icon_emoji_id: Custom-emoji document ID for the icon, from
+            `get_custom_emoji`. Telegram requires Premium in the group for this.
+        closed: True stops new messages in the topic; False reopens it.
+        hidden: True hides the topic from the list. Telegram permits this only
+            for the General topic (id 1) and refuses it for the others.
+
+    `create_forum_topic` and `list_topics` existed with nothing that could change
+    a topic afterwards - a topic could be made and then only ever be lived with.
+    """
+    try:
+        if title is None and icon_emoji_id is None and closed is None and hidden is None:
+            return (
+                "Nothing to change: give at least one of title, icon_emoji_id, closed "
+                "or hidden. Omitted fields are deliberately left as they are."
+            )
+
+        cl = get_client(account)
+        await ensure_connected(cl)
+        entity = await resolve_entity(chat_id, cl)
+
+        if not isinstance(entity, Channel) or not getattr(entity, "megagroup", False):
+            return "The specified chat is not a supergroup."
+        if not getattr(entity, "forum", False):
+            return "The specified supergroup does not have forum topics enabled."
+
+        await cl(
+            EditForumTopicRequest(
+                channel=entity,
+                topic_id=int(topic_id),
+                title=title,
+                icon_emoji_id=icon_emoji_id,
+                closed=closed,
+                hidden=hidden,
+            )
+        )
+
+        changed = {
+            name: value
+            for name, value in (
+                ("title", sanitize_user_content(title, max_length=256) if title else None),
+                ("icon_emoji_id", icon_emoji_id),
+                ("closed", closed),
+                ("hidden", hidden),
+            )
+            if value is not None
+        }
+        return format_tool_result(
+            [{"topic_id": int(topic_id), "changed": changed}],
+            {"chat_id": str(chat_id), "left_untouched": "every field not listed"},
+        )
+    except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
+        return "Cannot edit this topic: admin privileges are required."
+    except Exception as e:
+        return log_and_format_error("edit_forum_topic", e, chat_id=chat_id, topic_id=topic_id)
+
+
 __all__ = [
     "list_topics",
     "enable_forum_topics",
     "create_forum_topic",
+    "edit_forum_topic",
 ]
