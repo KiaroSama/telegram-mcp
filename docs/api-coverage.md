@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **176** |
+| MCP tools registered | **179** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -102,7 +102,7 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-Added since, 165 → **176**, ported from the original project rather than merged (a
+Added since, 165 → **179**, ported from the original project rather than merged (a
 history rewrite here left the two with no merge base):
 
 | Capability | Tools | Module |
@@ -111,6 +111,7 @@ history rewrite here left the two with no merge base):
 | Copying a message whole | `copy_message` | `tools/messages.py` |
 | Saying why the file tools are off | `get_file_roots_status` | `tools/diagnostics.py` |
 | Reversible channel settings | `set_join_to_send`, `set_join_request`, `set_prehistory_hidden`, `set_participants_hidden`, `set_signatures`, `set_view_forum_as_messages` | `tools/channel_settings.py` |
+| Closing the one-way pairs | `delete_story`, `close_poll`, `get_bot_commands` | `tools/stories.py`, `tools/polls.py`, `tools/profile.py` |
 
 `copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
 copy. That is the only way premium emoji and media survive: rebuilding a message from
@@ -244,7 +245,7 @@ The settings an operator actually reaches for are all missing:
 | Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
 | Moderation | `ToggleAntiSpam`, `ReportAntiSpamFalsePositive`, `SetBoostsToUnblockRestrictions` |
 | Appearance | `UpdateColor`, `UpdateEmojiStatus`, `SetStickers`, `SetEmojiStickers` |
-| Forum topics | `EditForumTopic`, `UpdatePinnedForumTopic` |
+| Forum topics | `UpdatePinnedForumTopic`. **`EditForumTopic` is not reachable at all**: it does not exist in Telethon 1.44, which offers only `ToggleForum` and `ToggleViewForumAsMessages`. Editing a topic needs a raw TL call this library cannot send. |
 | Structural | `ConvertToGigagroup`, `EditLocation`, `DeleteChannel`, `UpdatePaidMessagesPrice`, `ToggleAutotranslation` |
 
 Self-contained, no new dependency, and every one is a single request. `DeleteChannel`
