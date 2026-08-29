@@ -17,6 +17,7 @@ from telegram_mcp.tools.profile import *
 from telegram_mcp.tools.photos import *
 from telegram_mcp.tools.folders import *
 from telegram_mcp.tools.events import *
+from telegram_mcp.tools.diagnostics import *
 
 # Visual and deep structured access. Kept last because these layer on top of the
 # modules above; the grouping is historic (they were once the only fork-authored
