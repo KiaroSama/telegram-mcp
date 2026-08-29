@@ -168,6 +168,17 @@ def _windows_job_types():
             ("TotalTerminatedProcesses", wintypes.DWORD),
         ]
 
+    class THREADENTRY32(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ThreadID", wintypes.DWORD),
+            ("th32OwnerProcessID", wintypes.DWORD),
+            ("tpBasePri", ctypes.c_long),
+            ("tpDeltaPri", ctypes.c_long),
+            ("dwFlags", wintypes.DWORD),
+        ]
+
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
@@ -217,16 +228,44 @@ def _windows_job_types():
     kernel32.Process32Next.restype = wintypes.BOOL
     kernel32.Process32Next.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
 
+    # Threads, for the one thing Popen cannot do: it closes the thread handle
+    # CreateProcess returned before handing the object back, so a child started
+    # CREATE_SUSPENDED has nothing left to resume it with. Toolhelp finds it again.
+    kernel32.Thread32First.restype = wintypes.BOOL
+    kernel32.Thread32First.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+
+    kernel32.Thread32Next.restype = wintypes.BOOL
+    kernel32.Thread32Next.argtypes = [wintypes.HANDLE, wintypes.LPVOID]
+
+    kernel32.OpenThread.restype = wintypes.HANDLE
+    kernel32.OpenThread.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+
+    # DWORD, and -1 means failure - so the return has to be compared against
+    # 0xFFFFFFFF rather than against -1.
+    kernel32.ResumeThread.restype = wintypes.DWORD
+    kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
+
     _WINDOWS_JOB_API = (
         ctypes,
         kernel32,
         EXTENDED_LIMIT_INFORMATION,
         BASIC_ACCOUNTING_INFORMATION,
+        THREADENTRY32,
     )
     return _WINDOWS_JOB_API
 
 
 _TH32CS_SNAPPROCESS = 0x00000002
+_TH32CS_SNAPTHREAD = 0x00000004
+# `subprocess` exposes CREATE_NEW_PROCESS_GROUP but not this one, so it is
+# spelled out. From the CreateProcess documentation.
+_CREATE_SUSPENDED = 0x00000004
+_THREAD_SUSPEND_RESUME = 0x0002
+_RESUME_FAILED = 0xFFFFFFFF
+
+# Containment could not be established, so nothing ran. Distinct from a test
+# failure and from a timeout: the suite has said nothing at all.
+CONTAINMENT_EXIT_CODE = 125
 _PROCESS_TERMINATE = 0x0001
 _PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 _SYNCHRONIZE = 0x00100000
@@ -261,7 +300,7 @@ class _WindowsTree:
     def sample(self) -> None:
         """Take a handle on any descendant not seen before. Cheap; call each poll."""
         try:
-            ctypes, kernel32, _, _ = _windows_job_types()
+            ctypes, kernel32, _, _, _ = _windows_job_types()
         except (OSError, AttributeError, ValueError):
             return
         for pid in _descendant_pids(self.root_pid):
@@ -278,7 +317,7 @@ class _WindowsTree:
     def alive(self) -> bool:
         """Whether any process from this run is still running."""
         try:
-            ctypes, kernel32, _, _ = _windows_job_types()
+            ctypes, kernel32, _, _, _ = _windows_job_types()
         except (OSError, AttributeError, ValueError):
             return False
         for pid, handle in list(self._handles.items()):
@@ -298,7 +337,7 @@ class _WindowsTree:
         which is exactly why they still name the right processes now.
         """
         try:
-            _, kernel32, _, _ = _windows_job_types()
+            _, kernel32, _, _, _ = _windows_job_types()
         except (OSError, AttributeError, ValueError):
             return
         for handle in self._handles.values():
@@ -306,7 +345,7 @@ class _WindowsTree:
 
     def close(self) -> None:
         try:
-            _, kernel32, _, _ = _windows_job_types()
+            _, kernel32, _, _, _ = _windows_job_types()
         except (OSError, AttributeError, ValueError):
             return
         for handle in self._handles.values():
@@ -324,7 +363,7 @@ def _descendant_pids(root_pid: int) -> list:
     console tool four times a second to answer it would cost more than the tests.
     """
     try:
-        ctypes, kernel32, _, _ = _windows_job_types()
+        ctypes, kernel32, _, _, _ = _windows_job_types()
         from ctypes import wintypes
 
         class PROCESSENTRY32(ctypes.Structure):
@@ -368,7 +407,92 @@ def _descendant_pids(root_pid: int) -> list:
         return []
 
 
-def _open_tree(process: subprocess.Popen) -> Optional[Any]:
+class ContainmentFailed(RuntimeError):
+    """The child could not be contained before it was allowed to run."""
+
+
+def _contain_windows(process: subprocess.Popen) -> int:
+    """Put the SUSPENDED child in a kill-on-close job. Returns the job handle.
+
+    Order is the point. The previous version created the job after Popen had
+    already started the child, so anything the child spawned in that window was
+    never in the job and outlived a TerminateJobObject. It also discarded
+    SetInformationJobObject's result, which made a job that failed to configure
+    look exactly like one that had - the handle existed either way, and only the
+    kill-on-close flag it was missing decided whether the tree died with the
+    runner.
+
+    Every return is checked, and a failure raises rather than degrading. A
+    warning would leave the run going with containment nobody established.
+    """
+    ctypes, kernel32, extended_type, _, _ = _windows_job_types()
+    handle = getattr(process, "_handle", None)
+    if handle is None:
+        raise ContainmentFailed("this Python exposed no process handle to contain")
+
+    job = kernel32.CreateJobObjectW(None, None)
+    if not job:
+        raise ContainmentFailed(f"CreateJobObject failed ({ctypes.get_last_error()})")
+
+    limits = extended_type()
+    limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+    if not kernel32.SetInformationJobObject(
+        job, _JOB_OBJECT_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)
+    ):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ContainmentFailed(f"SetInformationJobObject failed ({error})")
+
+    if not kernel32.AssignProcessToJobObject(job, int(handle)):
+        error = ctypes.get_last_error()
+        kernel32.CloseHandle(job)
+        raise ContainmentFailed(f"AssignProcessToJobObject failed ({error})")
+    return job
+
+
+def _resume_windows(process: subprocess.Popen) -> None:
+    """Let the contained child start.
+
+    ``subprocess.Popen`` closes the thread handle CreateProcess returned before
+    handing the object back, so a child started CREATE_SUSPENDED has nothing left
+    to resume it with. A process suspended at creation has exactly one thread;
+    toolhelp finds it by owner PID.
+
+    A failure here is fatal by construction: the caller kills a child it could
+    not start, because a suspended process nobody resumes is a hang.
+    """
+    ctypes, kernel32, _, _, thread_entry = _windows_job_types()
+
+    snapshot = kernel32.CreateToolhelp32Snapshot(_TH32CS_SNAPTHREAD, 0)
+    if snapshot in (None, -1):
+        raise ContainmentFailed("could not enumerate threads to resume the child")
+    try:
+        entry = thread_entry()
+        entry.dwSize = ctypes.sizeof(thread_entry)
+        thread_id = None
+        more = kernel32.Thread32First(snapshot, ctypes.byref(entry))
+        while more:
+            if entry.th32OwnerProcessID == process.pid:
+                thread_id = entry.th32ThreadID
+                break
+            more = kernel32.Thread32Next(snapshot, ctypes.byref(entry))
+    finally:
+        kernel32.CloseHandle(snapshot)
+
+    if thread_id is None:
+        raise ContainmentFailed(f"no thread found for pid {process.pid}")
+
+    thread = kernel32.OpenThread(_THREAD_SUSPEND_RESUME, False, thread_id)
+    if not thread:
+        raise ContainmentFailed(f"OpenThread failed ({ctypes.get_last_error()})")
+    try:
+        if kernel32.ResumeThread(thread) == _RESUME_FAILED:
+            raise ContainmentFailed(f"ResumeThread failed ({ctypes.get_last_error()})")
+    finally:
+        kernel32.CloseHandle(thread)
+
+
+def _open_tree(process: subprocess.Popen, job: Optional[int] = None) -> Optional[Any]:
     """A handle on everything this run spawned, or None if the platform gave none.
 
     Read once, now, while the child is certainly alive. `os.getpgid` raises
@@ -382,38 +506,12 @@ def _open_tree(process: subprocess.Popen) -> Optional[Any]:
         except (ProcessLookupError, PermissionError):
             return None
 
-    handle = getattr(process, "_handle", None)
-    if handle is None:
-        return None
     try:
-        ctypes, kernel32, extended_type, _ = _windows_job_types()
-        job = kernel32.CreateJobObjectW(None, None)
-        if not job:
-            return None
-
-        # If this runner is killed, the whole job goes with it. Without this the
-        # tree survives its own watchdog, which is the failure being prevented.
-        limits = extended_type()
-        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        kernel32.SetInformationJobObject(
-            job, _JOB_OBJECT_EXTENDED_LIMIT, ctypes.byref(limits), ctypes.sizeof(limits)
-        )
-
-        # The job is kept for TERMINATION, where one call ends everything in it.
-        # It is deliberately not used to answer "is anything alive" - see
-        # _WindowsTree for the measurement that ruled that out.
-        if not kernel32.AssignProcessToJobObject(job, int(handle)):
-            # Detection does not depend on the job - that is what the per-descendant
-            # handles are for - and termination falls back to killing each held
-            # handle. But a silent downgrade is how a weaker guarantee gets mistaken
-            # for the full one, so it says so.
-            print(
-                "GUARDED RUNNER: no job object for this run; the process tree will be "
-                "ended handle by handle instead of in one call.",
-                file=sys.stderr,
-            )
-            kernel32.CloseHandle(job)
-            job = None
+        # The job was already created, configured and assigned before the child
+        # was allowed to run - see `_contain_windows`. All that is left is the
+        # per-descendant handle set, which is what answers 'is anything alive'.
+        # The job is kept for TERMINATION, where one call ends everything in it;
+        # it is deliberately not used for detection - see _WindowsTree.
         tree = _WindowsTree(process.pid, job)
         tree.sample()
         return tree
@@ -523,7 +621,10 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
 
     popen_extras: dict = {}
     if os.name == "nt":
-        popen_extras["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        # CREATE_SUSPENDED so the job can be built and assigned BEFORE a single
+        # instruction runs. Started first and contained afterwards, anything the
+        # child spawned in that window was outside the job and outlived the kill.
+        popen_extras["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | _CREATE_SUSPENDED
     else:
         popen_extras["start_new_session"] = True
 
@@ -548,7 +649,28 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
         **popen_extras,
     )
 
-    tree = _open_tree(process)
+    job = None
+    if os.name == "nt":
+        try:
+            job = _contain_windows(process)
+            _resume_windows(process)
+        except ContainmentFailed as failure:
+            # Nothing ran, and nothing is left running. A suspended child nobody
+            # resumed is a hang, and a resumed child nobody contained is the
+            # orphan this script exists to prevent - so neither is allowed to
+            # stand, and the run reports that it never happened.
+            try:
+                process.kill()
+                process.wait(timeout=GRACE_SECONDS)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+            print(
+                f"GUARDED RUNNER: refusing to run uncontained - {failure}.",
+                file=sys.stderr,
+            )
+            return CONTAINMENT_EXIT_CODE
+
+    tree = _open_tree(process, job)
     if tree is None:
         # Say so rather than degrading quietly: without a tree handle the run
         # ends on the parent alone, which is exactly the blind spot this

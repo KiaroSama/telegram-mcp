@@ -44,6 +44,15 @@ WALL_BUDGET = 6.0
 # far below CHILD_SLEEP_SECONDS, so startup can never be the binding constraint.
 ORPHAN_WALL_BUDGET = 60.0
 IDLE_BUDGET = 4.0
+
+# The newline-free case is squeezed from BOTH sides and 4s left no room for
+# either. The budget has to exceed pytest's cold start - which is seconds on a
+# loaded machine - or a correct pump is called idle before the child writes
+# anything; and it has to stay UNDER the newline-free stretch, or the old
+# line-based pump finishes without timing out and the test stops proving
+# anything. Widening the stretch is what buys room on both edges.
+NEWLINE_FREE_SECONDS = 12.0
+NEWLINE_FREE_IDLE = 6.0
 HARNESS_TIMEOUT = 90
 
 
@@ -363,7 +372,7 @@ def test_output_without_a_newline_still_counts_as_progress(tmp_path):
         tmp_path,
         "import sys, time\n" "\n" "def test_writes_without_newlines():\n"
         # Comfortably past IDLE_BUDGET, in small writes with no line break at all.
-        "    for _ in range(12):\n"
+        f"    for _ in range({int(NEWLINE_FREE_SECONDS / 0.5)}):\n"
         "        sys.stdout.write('.')\n"
         "        sys.stdout.flush()\n"
         "        time.sleep(0.5)\n",
@@ -380,7 +389,7 @@ def test_output_without_a_newline_still_counts_as_progress(tmp_path):
             "--wall-seconds",
             str(ORPHAN_WALL_BUDGET),
             "--idle-seconds",
-            str(IDLE_BUDGET),
+            str(NEWLINE_FREE_IDLE),
             "--",
             "-q",
             "-s",
@@ -398,3 +407,96 @@ def test_output_without_a_newline_still_counts_as_progress(tmp_path):
         "a child writing steadily was called idle:\n" f"{result.stdout}\n{result.stderr}"
     )
     assert "idle timeout" not in result.stderr, result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
+def test_a_grandchild_orphaned_before_the_first_sample_is_still_killed(tmp_path):
+    """The case the other orphan test cannot reach.
+
+    That one has the child sleep a second after spawning, which is four polling
+    intervals - long enough for the runner to take a handle on the grandchild
+    before anyone dies. This one spawns and returns, so pytest is gone before the
+    first sample and the per-descendant handle set never sees the grandchild at
+    all.
+
+    What has to catch it is the JOB, and only if the job existed BEFORE the child
+    ran. Created afterwards - as it used to be - the grandchild was spawned in the
+    window between start and assignment, was never in the job, and outlived a
+    TerminateJobObject that had nothing to terminate.
+    """
+    marker = tmp_path / "grandchild-finished.marker"
+    pid_file = tmp_path / "grandchild.pid"
+    stubborn = tmp_path / "stubborn.py"
+    stubborn.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        f"time.sleep({CHILD_SLEEP_SECONDS})\n"
+        f"Path({str(marker)!r}).write_text('finished', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    _write_case(
+        tmp_path,
+        "import subprocess, sys\n"
+        "from pathlib import Path\n"
+        "\n"
+        "def test_spawns_and_leaves_at_once():\n"
+        f"    p = subprocess.Popen([sys.executable, {str(stubborn)!r}])\n"
+        f"    Path({str(pid_file)!r}).write_text(str(p.pid), encoding='utf-8')\n",
+        # No sleep. pytest returns immediately, so the parent is reaped inside one
+        # polling interval and the grandchild is an orphan before anything sampled.
+    )
+
+    result = _run_guarded(tmp_path, "--wall-seconds", str(ORPHAN_WALL_BUDGET))
+
+    assert pid_file.exists(), (
+        "the test body never ran, so this proved nothing about orphans:"
+        f"{chr(10)}{result.stdout}{chr(10)}{result.stderr}"
+    )
+    pid = int(pid_file.read_text(encoding="utf-8"))
+    assert not _process_alive(pid), f"grandchild {pid} outlived the run"
+    assert not marker.exists(), "the grandchild ran to completion"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
+def test_a_child_that_cannot_be_contained_is_never_resumed():
+    """Containment failure is fatal, not a warning.
+
+    Every one of CreateJobObject, SetInformationJobObject and
+    AssignProcessToJobObject used to be able to fail without stopping the run -
+    the middle one's result was discarded entirely, so a job missing its
+    kill-on-close flag was indistinguishable from a configured one.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("guarded", RUNNER)
+    guarded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guarded)
+
+    class _NoHandle:
+        pid = 0
+
+    with pytest.raises(guarded.ContainmentFailed):
+        guarded._contain_windows(_NoHandle())
+
+
+def test_the_job_is_assigned_before_the_child_is_allowed_to_run():
+    """Order, read off the function rather than asserted about behaviour.
+
+    The window this closes is milliseconds wide and cannot be provoked on demand,
+    so what is pinned is the sequence: create suspended, contain, only then
+    resume."""
+    import inspect
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("guarded", RUNNER)
+    guarded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(guarded)
+
+    body = inspect.getsource(guarded.run)
+    suspended = body.index("_CREATE_SUSPENDED")
+    contained = body.index("_contain_windows(process)")
+    resumed = body.index("_resume_windows(process)")
+
+    assert (
+        suspended < contained < resumed
+    ), "the child is started, or resumed, before the job holds it"
