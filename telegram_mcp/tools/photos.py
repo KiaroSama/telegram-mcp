@@ -4,7 +4,7 @@ from mcp.server.fastmcp import Image
 
 from telegram_mcp.contact_sheet import ContactSheetError, MAXIMUM_TILES, compose_contact_sheet
 from telegram_mcp.media_preview import _encode_one
-from telegram_mcp.media_transfer import MAX_FRAME_SOURCE_BYTES
+from telegram_mcp.media_transfer import MAX_FRAME_SOURCE_BYTES, batch_width
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.photo_source import (
     AVATAR_SOURCE,
@@ -194,12 +194,36 @@ async def get_photo_sheet(
         if not references:
             return [f"This peer has no '{source}' photos to compose."]
 
+        # There is no ordering between the FETCHES - only between the tiles once
+        # they are placed - so a sheet of 24 used to pay 24 sequential round trips
+        # for the one tool whose whole purpose is seeing them all at once.
+        # get_custom_emoji made this same change and measured the serial version
+        # at "ten round trips end to end for work with no ordering between the
+        # items". The width comes from the byte budget so that concurrency cannot
+        # multiply peak memory past MAX_BATCH_BYTES.
+        gate = asyncio.Semaphore(batch_width(len(references), SHEET_TILE_BYTES))
+
+        async def _fetch(reference):
+            async with gate:
+                return await download_photo_bytes(cl, reference, SHEET_TILE_BYTES, thumbnail=True)
+
+        fetched = await asyncio.gather(
+            *(_fetch(reference) for reference in references),
+            return_exceptions=True,
+        )
+
         tiles = []
         skipped = []
-        for reference in references:
-            raw, overflowed = await download_photo_bytes(
-                cl, reference, SHEET_TILE_BYTES, thumbnail=True
-            )
+        # Zipped against `references`, so placement order is the reference order
+        # however the downloads happened to finish.
+        for reference, outcome in zip(references, fetched):
+            if isinstance(outcome, asyncio.CancelledError):
+                # A real cancellation of this tool, not one tile failing.
+                raise outcome
+            if isinstance(outcome, BaseException):
+                skipped.append(reference.identifier)
+                continue
+            raw, overflowed = outcome
             if overflowed or not raw:
                 skipped.append(reference.identifier)
                 continue

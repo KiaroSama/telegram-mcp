@@ -8,6 +8,7 @@ import sqlite3
 import logging
 import mimetypes
 import unicodedata
+import weakref
 import zlib
 from contextlib import contextmanager
 from difflib import SequenceMatcher
@@ -551,6 +552,38 @@ def is_premium_rpc_error(error: Exception) -> bool:
     return "PREMIUM" in getattr(error, "message", str(error)).upper()
 
 
+# One dialog warm per burst, not one per miss.
+#
+# get_dialogs() downloads the ENTIRE dialog list, and it is the most expensive
+# call Telethon makes on a large account. Several tools resolve peers in a loop -
+# get_folder does it once per include_peer, exclude_peer and pinned_peer - so a
+# folder holding cold peers used to pay one full download PER PEER and still
+# render "Unknown" for each. create_group, invite_to_group and set_privacy_settings
+# have the same shape.
+#
+# A TTL rather than a boolean: a peer that appears AFTER the warm still has to
+# become resolvable, and "warmed once at startup" would make that never happen.
+# Short enough that a new chat is reachable within seconds; long enough that one
+# tool call's loop shares a single download.
+_DIALOG_WARM_SECONDS = 30.0
+_dialog_warmed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+
+async def _warm_dialogs_once(client) -> bool:
+    """Warm the entity cache at most once per _DIALOG_WARM_SECONDS per client.
+
+    Returns True when a warm actually happened, so a caller can skip the retry
+    that would otherwise ask the same question against an unchanged cache.
+    """
+    now = time.monotonic()
+    last = _dialog_warmed.get(client)
+    if last is not None and now - last < _DIALOG_WARM_SECONDS:
+        return False
+    _dialog_warmed[client] = now
+    await client.get_dialogs()
+    return True
+
+
 async def _resolve_with_retries(
     getter: str, identifier: Union[int, str], client, label: str, try_marked: bool = True
 ):
@@ -568,22 +601,24 @@ async def _resolve_with_retries(
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
-            try:
-                return await get(identifier)
-            except ValueError as error:
-                last_error = error
+            # A skipped warm means the cache is unchanged since the last one, so
+            # the retry below would ask the same question and get the same answer.
+            if await _warm_dialogs_once(client):
+                try:
+                    return await get(identifier)
+                except ValueError as error:
+                    last_error = error
     except ConnectionError:
         await ensure_connected(client)
         try:
             return await get(identifier)
         except ValueError as error:
             last_error = error
-            await client.get_dialogs()
-            try:
-                return await get(identifier)
-            except ValueError as error:
-                last_error = error
+            if await _warm_dialogs_once(client):
+                try:
+                    return await get(identifier)
+                except ValueError as error:
+                    last_error = error
 
     if try_marked:
         for candidate in _marked_id_candidates(identifier):
