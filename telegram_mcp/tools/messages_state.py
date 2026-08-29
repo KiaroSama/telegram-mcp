@@ -25,6 +25,10 @@ from telegram_mcp.runtime import *
 # path only a live call reaches.
 from telegram_mcp.message_view import display_text
 
+# The identity `get_client` actually resolves to, so the cache and the client it
+# caches for cannot drift apart.
+from telegram_mcp.effect_catalog import account_key
+
 # Telegram's own limits for a poll. Checked here so an over-long question comes
 # back as an argument error rather than an RPC refusal after the round trip.
 _POLL_QUESTION_LIMIT = 255
@@ -105,7 +109,7 @@ async def _poll_answers_max(cl, account) -> int:
     failure -- including the timeout that bounds the request -- falls back to the
     documented current value rather than to no limit or to a hang.
     """
-    label = (account or "default").lower()
+    label = account_key(account)
     cached = _poll_answers_max_cache.get(label)
     if cached is not None:
         return cached

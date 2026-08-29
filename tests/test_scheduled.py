@@ -182,6 +182,32 @@ async def test_editing_keeps_the_existing_time_when_none_is_given(_wire):
 
 
 @pytest.mark.asyncio
+async def test_editing_to_a_past_time_is_refused_rather_than_sending_the_message(_wire):
+    """Telegram reads a past `schedule_date` as "send now", so an edit meant to
+    postpone a message delivers it instead — silently and unrecoverably."""
+    client = _wire(_Client(queued=[_queued(7, "old")]))
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+
+    result = await edit_scheduled_message(1, 7, when=past, account="a")
+
+    assert "must be in the future" in result
+    assert client.sent("EditMessageRequest") is None, "the message was sent instead of postponed"
+
+
+@pytest.mark.asyncio
+async def test_editing_a_message_already_due_keeps_its_past_date(_wire):
+    """The guard belongs only on the branch where the caller supplied `when`: a
+    message due imminently, or overdue and not yet delivered, legitimately
+    carries a past date that the keep-existing path must resend."""
+    overdue = datetime.now(timezone.utc) - timedelta(minutes=5)
+    client = _wire(_Client(queued=[_queued(7, "old", when=overdue)]))
+
+    await edit_scheduled_message(1, 7, message="new", account="a")
+
+    assert client.sent("EditMessageRequest").schedule_date == overdue
+
+
+@pytest.mark.asyncio
 async def test_editing_keeps_the_existing_text_when_none_is_given(_wire):
     client = _wire(_Client(queued=[_queued(7, "keep me")]))
 

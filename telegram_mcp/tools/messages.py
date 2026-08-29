@@ -22,6 +22,11 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 from telegram_mcp.runtime import *
 from telegram_mcp.text_fidelity import display_name
 
+# The one place that knows the `/c/` permalink id shape, so the two builders
+# cannot drift. message_view imports nothing from here at module level -- its
+# single edge back is deferred (see message_view.describe_media_label).
+from telegram_mcp.message_view import channel_link_id
+
 # A URL is a machine value: bounded so a hostile link cannot flood the context,
 # but far above display_name's prose default, which cuts real Mini App links in
 # half. The convention originates in telegram_mcp/button_view.py; it is repeated
@@ -268,7 +273,7 @@ def message_to_dict(msg) -> dict:
                 finfo["post_link"] = f"https://{LINK_DOMAIN}/{finfo['from_username']}/{post_id}"
             elif finfo.get("from_chat_id") is not None:
                 finfo["post_link"] = (
-                    f"https://{LINK_DOMAIN}/c/{abs(finfo['from_chat_id']) % 10**10}/{post_id}"
+                    f"https://{LINK_DOMAIN}/c/{channel_link_id(finfo['from_chat_id'])}/{post_id}"
                 )
 
         d["forwarded"] = finfo or True

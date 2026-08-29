@@ -71,20 +71,29 @@ async def list_saved_dialogs(limit: int = 50, account: str = None) -> str:
         if not dialogs:
             return "Saved Messages has no per-sender buckets - nothing has been forwarded into it."
 
+        # Telegram's user, chat and channel id spaces overlap, so a bare id is not
+        # a key: `chats` was iterated second and a channel sharing a number with a
+        # user overwrote the person, labelling their bucket with the channel's title.
         known = {}
         for collection in ("users", "chats"):
             for item in getattr(result, collection, None) or []:
-                known[getattr(item, "id", None)] = item
+                known[(collection, getattr(item, "id", None))] = item
 
         records = []
         for dialog in dialogs:
             peer = getattr(dialog, "peer", None)
-            peer_id = (
-                getattr(peer, "user_id", None)
-                or getattr(peer, "channel_id", None)
-                or getattr(peer, "chat_id", None)
-            )
-            entity = known.get(peer_id)
+            user_id = getattr(peer, "user_id", None)
+            if user_id is not None:
+                key = ("users", user_id)
+            else:
+                key = (
+                    "chats",
+                    getattr(peer, "channel_id", None) or getattr(peer, "chat_id", None),
+                )
+            entity = known.get(key)
+            # Marked, so the id names which space it came from and can be handed
+            # straight back to get_saved_history instead of being guessed at.
+            peer_id = get_marked_id(entity) if entity is not None else key[1]
             name = getattr(entity, "title", None) or " ".join(
                 part
                 for part in (
