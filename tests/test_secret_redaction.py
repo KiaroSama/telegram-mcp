@@ -18,7 +18,12 @@ import sys
 
 import pytest
 
-from telegram_mcp import aliases, connection, runtime, safe_log
+# The logging machinery moved out of `connection` into `log_setup`: writing a
+# log file and reaching Telegram are different jobs, and one file was carrying
+# both. Patch and call the module that OWNS these names - `connection` still
+# re-exports them for callers, but a patch applied there is a second name the
+# handler never reads.
+from telegram_mcp import aliases, connection, log_setup, runtime, safe_log
 
 CANARY = "canary-9Yb3Qw-do-not-log"
 SESSION_CANARY = "1" + "A" * 48  # shaped like a Telethon StringSession
@@ -36,7 +41,7 @@ posix_modes_only = pytest.mark.skipif(
 def logged(tmp_path, monkeypatch):
     """A real handler over a throwaway file, wired in place of the global one."""
     path = tmp_path / "mcp_errors.log"
-    handler = connection._make_file_handler(str(path))
+    handler = log_setup._make_file_handler(str(path))
     test_logger = logging.getLogger("telegram_mcp.test-redaction")
     test_logger.setLevel(logging.ERROR)
     test_logger.propagate = False
@@ -92,7 +97,7 @@ def test_the_shape_scrubber_still_marks_what_it_catches(monkeypatch):
     record - the console handler, and anything logged without going through it."""
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK", SESSION_CANARY)
 
-    cleaned = connection.redact(f"session {SESSION_CANARY} via t.me/+SecretInviteHash")
+    cleaned = log_setup.redact(f"session {SESSION_CANARY} via t.me/+SecretInviteHash")
 
     assert SESSION_CANARY not in cleaned
     assert "SecretInviteHash" not in cleaned
@@ -172,7 +177,7 @@ def test_the_production_logger_is_bounded_and_redacting():
         assert getattr(handler, "maxBytes", 0) > 0
     for handler in connection.logger.handlers:
         assert any(
-            isinstance(f, connection.RedactingFilter) for f in handler.filters
+            isinstance(f, log_setup.RedactingFilter) for f in handler.filters
         ), f"{handler!r} can emit unredacted text"
 
 

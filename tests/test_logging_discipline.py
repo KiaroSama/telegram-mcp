@@ -28,7 +28,12 @@ import pathlib
 
 import pytest
 
-from telegram_mcp import connection, runtime, safe_log
+# The logging machinery moved out of `connection` into `log_setup`: writing a
+# log file and reaching Telegram are different jobs, and one file was carrying
+# both. Patch and call the module that OWNS these names - `connection` still
+# re-exports them for callers, but a patch applied there is a second name the
+# handler never reads.
+from telegram_mcp import log_setup, runtime, safe_log
 
 CANARY = "canary-7Kq2Vz-must-not-be-logged"
 
@@ -93,7 +98,7 @@ def test_no_module_passes_exc_info_to_a_log_call():
 def logged(tmp_path, monkeypatch):
     """The real handler over a throwaway file, wired in place of the global one."""
     path = tmp_path / "mcp_errors.log"
-    handler = connection._make_file_handler(str(path))
+    handler = log_setup._make_file_handler(str(path))
     test_logger = logging.getLogger("telegram_mcp.test-discipline")
     test_logger.setLevel(logging.DEBUG)
     test_logger.propagate = False
@@ -176,8 +181,8 @@ def test_the_log_lives_in_the_state_directory_not_beside_the_installation():
     wherever the install is read-only."""
     from telegram_mcp import settings
 
-    assert pathlib.Path(connection.log_file_path).parent == settings.state_dir()
-    assert pathlib.Path(connection.log_file_path).name == "mcp_errors.log"
+    assert pathlib.Path(log_setup.log_file_path).parent == settings.state_dir()
+    assert pathlib.Path(log_setup.log_file_path).name == "mcp_errors.log"
 
 
 def test_every_log_file_is_restricted_on_creation_and_on_rotation(tmp_path, monkeypatch):
@@ -187,10 +192,10 @@ def test_every_log_file_is_restricted_on_creation_and_on_rotation(tmp_path, monk
     the POSIX-only test passed. Rotation matters as much as creation: a log
     created after a rollover is exactly as sensitive as the first one."""
     restricted = []
-    monkeypatch.setattr(connection, "restrict_to_owner", lambda path: restricted.append(str(path)))
+    monkeypatch.setattr(log_setup, "restrict_to_owner", lambda path: restricted.append(str(path)))
 
     path = tmp_path / "mcp_errors.log"
-    handler = connection._make_file_handler(str(path))
+    handler = log_setup._make_file_handler(str(path))
     try:
         handler.maxBytes = 64
         record = logging.LogRecord(
