@@ -1,7 +1,7 @@
 # Should `TELEGRAM_EXPOSED_TOOLS` be able to name a group?
 
-A design spike, not a proposal to build. Measured against commit `6311c1d`,
-2026-08-30, when the server registered **179** tools.
+A design spike, not a proposal to build. Measured against commit `2f143e6`,
+2026-08-30, when the server registered **180** tools.
 
 `TELEGRAM_EXPOSED_TOOLS` is the only lever an operator has for narrowing what an
 agent can do with their Telegram account. Its grammar is
@@ -21,7 +21,7 @@ hand:
 |---|---|---|
 | Read-only plus the ability to send a message | `read-only+send_message` | **1** |
 | Read-only plus messaging generally | `read-only+send_message,reply_to_message,forward_message,copy_message,edit_message,delete_message,send_file,send_album,send_voice,send_sticker,send_gif,save_draft,clear_draft,send_reaction,remove_reaction` | **15** |
-| Everything except anything destructive | every non-destructive tool named individually | **106** |
+| Everything except anything destructive | every non-destructive tool named individually | **107** |
 
 That is the argument, and it is weaker than it first looks. The common case —
 read-only plus one or two specific writes — costs one or two names, which nobody
@@ -41,7 +41,7 @@ assumed. Scanning every `@mcp.tool` decorator:
 
 | | Count |
 |---|---|
-| Tools | 179 |
+| Tools | 180 |
 | `readOnlyHint=True` | 83 |
 | `destructiveHint=True` | 73 |
 | **Neither hint set** | **4** |
@@ -54,8 +54,8 @@ two booleans cannot express, and an annotation-keyed design would silently place
 all four on whichever side its default chose.
 
 **That is the finding.** The annotations are accurate where they are set, and
-83 + 73 = 156 of 179 carry one. But `readOnlyHint=False` and
-`destructiveHint=False` do not mean the same thing, and 23 tools sit in the gap
+83 + 73 = 156 of 180 carry one. But `readOnlyHint=False` and
+`destructiveHint=False` do not mean the same thing, and 24 tools sit in the gap
 between them.
 
 ## The candidate designs
@@ -67,7 +67,7 @@ existing token means. This project split `tools/messages.py` and
 `telegram_mcp/connection.py` within one week; that is not hypothetical.
 
 **By annotation** — `+read-only`, `+non-destructive`. Follows intent rather than
-layout, survives refactoring, and reads well. Its problem is the 23-tool gap
+layout, survives refactoring, and reads well. Its problem is the 24-tool gap
 above: `+non-destructive` would have to decide about `enable_incoming_feed`
 without being told, and whichever way it decided would be invisible.
 
@@ -89,9 +89,9 @@ the outside, which is the worst property a security lever can have.
 
 The friction this would solve is real only for the "everything except
 destructive" posture, and that is exactly the posture an annotation-keyed token
-cannot express correctly today, because 23 tools sit in a gap the two booleans
+cannot express correctly today, because 24 tools sit in a gap the two booleans
 do not cover. Building the resolver first would ship a lever that is confidently
-wrong about a fifth of the surface.
+wrong about an eighth of the surface.
 
 The ordered work, if this is wanted:
 
@@ -107,7 +107,7 @@ The ordered work, if this is wanted:
    project moves it.
 
 What would change this recommendation: if step 1 revealed the gap were two or
-three tools rather than 23, the annotation design would be safe immediately and
+three tools rather than 24, the annotation design would be safe immediately and
 worth building in the same change.
 
 ## Scope note
