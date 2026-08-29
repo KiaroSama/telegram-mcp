@@ -33,7 +33,7 @@ import time
 from pathlib import Path
 from typing import IO, Optional
 
-from telegram_mcp.paging import TIMING_BOUNDS, bounded_number
+from telegram_mcp.paging import bounded_number
 
 if os.name == "nt":
     import msvcrt

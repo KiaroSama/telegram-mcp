@@ -38,7 +38,7 @@ from pathlib import Path
 import pytest
 
 from telegram_mcp import handles
-from telegram_mcp.handles import DirHandle, SystemCalls, UnsafeTarget
+from telegram_mcp.handles import SystemCalls, UnsafeTarget
 
 
 class _RacingCalls(SystemCalls):

@@ -41,7 +41,6 @@ object.
 
 import os
 import stat
-import subprocess
 from pathlib import Path
 
 import pytest

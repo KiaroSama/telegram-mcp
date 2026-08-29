@@ -10,12 +10,8 @@ import pytest
 from helpers_unicode import FAMILY, FLAG, PERSIAN
 from sanitize import sanitize_name
 from telegram_mcp.text_fidelity import (
-    _bounded,
-    _is_valid_tag_sequence,
     _sequence_starts,
     display_name,
-    display_text,
-    display_text_status,
     fidelity_text,
 )
 

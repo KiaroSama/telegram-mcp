@@ -17,8 +17,6 @@ spelled.
 """
 
 import logging
-import os
-from pathlib import Path
 from typing import Optional
 
 from telegram_mcp.safe_log import log_event

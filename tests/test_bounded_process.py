@@ -10,7 +10,6 @@ been allocated. A helper that writes half a gigabyte inside its time limit passe
 every check up to the moment the parent was holding half a gigabyte.
 """
 
-import subprocess
 import sys
 import threading
 import time

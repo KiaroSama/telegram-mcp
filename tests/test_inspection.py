@@ -525,7 +525,6 @@ def test_max_bytes_is_clamped_before_the_effect_branch():
 
 @pytest.mark.asyncio
 async def test_custom_emoji_refuses_a_document_over_the_cap(monkeypatch):
-    from telegram_mcp.tools import inspection
     from telegram_mcp.tools.inspection import _custom_emoji_preview
 
     monkeypatch.setattr(

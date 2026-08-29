@@ -7,11 +7,9 @@ declares. A photo id here comes from the caller, so every transfer goes through 
 capped path instead.
 """
 
-import io
 from types import SimpleNamespace
 
 import pytest
-from PIL import Image
 
 from telegram_mcp import photo_source
 from telegram_mcp.photo_source import (

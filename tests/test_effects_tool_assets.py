@@ -10,7 +10,6 @@ import pytest
 
 from telegram_mcp import media_preview
 
-import telegram_mcp.tools.effects as effects_tool
 from helpers_effects import _Doc, _Effect, _ToolClient, _call, _payload, _use
 
 # An autouse fixture is active in whichever module holds the name, so the import

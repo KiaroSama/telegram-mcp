@@ -4,12 +4,35 @@
 # against a 99-column black codebase, and no exclude, so it walks .venv too.
 max-line-length = 99
 exclude = .git,__pycache__,.venv,build,dist,docs/source/conf.py
-# E203/E501/W503: black owns line length and slice/operator whitespace.
-# F401/F403/F405: the tool modules deliberately open with
-#   `from telegram_mcp.runtime import *`, and runtime.py's own import block is its
-#   public surface. Silencing these is the price of that architecture, not an
-#   oversight - see telegram_mcp/tools/__init__.py.
-extend-ignore = E203,E501,W503,F401,F403,F405
+# black owns line length and slice/operator whitespace.
+extend-ignore = E203,E501,W503
+# F401/F403/F405 are silenced HERE, per file, and not repository-wide.
+#
+# They have to be silenced somewhere: the tool modules deliberately open with
+# `from telegram_mcp.runtime import *`, and runtime.py's own import block is
+# their public surface, so flake8 cannot tell which of those names get used.
+# That is the price of the architecture, not an oversight - see
+# telegram_mcp/tools/__init__.py.
+#
+# Silencing it EVERYWHERE was a different thing, and it cost. With the check off
+# across the whole tree, `import subprocess` sat dead in aliases.py for months
+# after the icacls call it belonged to was deleted, together with the timeout
+# constant that bounded that subprocess. Thirteen more like it had accumulated.
+# Nothing was ever going to report them.
+#
+# The list below is hand-maintained, and that is safe in the one direction that
+# matters: add a star-importing file and forget to list it, and lint fails
+# loudly on the next run. The failure mode is noise, not silence.
+per-file-ignores =
+    main.py:F401,F403,F405
+    telegram_mcp/media_preview.py:F401,F403,F405
+    telegram_mcp/runner.py:F401,F403,F405
+    telegram_mcp/runtime.py:F401,F403,F405
+    telegram_mcp/tools/*.py:F401,F403,F405
+    tests/test_chats_split.py:F401,F403,F405
+    tests/test_groups_split.py:F401,F403,F405
+    tests/test_message_view.py:F401,F403,F405
+    tests/test_tool_registry.py:F401,F403,F405
 # max-complexity is deliberately absent. Setting a limit that is already breached, or
 # raising the limit until it fits, would both be theatre. Reducing complexity is
 # separate, deliberate work.
