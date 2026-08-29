@@ -12,6 +12,7 @@ a poll interval that could be zero, which is a busy-spin dressed up as a wait.
 """
 
 import asyncio
+import base64
 import json
 import math
 import os
@@ -317,10 +318,17 @@ def test_the_watch_command_is_usable_in_this_shell():
 
 
 def test_the_one_chat_watch_command_filters_in_the_same_shell():
-    command = events.incoming_feed_state()["watch_command_for_one_chat"]
+    state = events.incoming_feed_state()
+    command = state["watch_command_for_one_chat"]
     if sys.platform == "win32":
         assert "grep" not in command
-        assert "chat_id" in command
+        # The filter lives inside -EncodedCommand now, so the readable form is
+        # what carries it - and the encoded one has to decode back to exactly
+        # that, or the two have drifted and users are shown one and run another.
+        script = state["watch_script_for_one_chat"]
+        assert "chat_id" in script
+        encoded = command.split()[-1]
+        assert base64.b64decode(encoded).decode("utf-16-le") == script
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the PowerShell watcher is the Windows one")
@@ -337,12 +345,16 @@ def test_the_powershell_watcher_survives_a_rotation(monkeypatch, tmp_path):
     monkeypatch.setenv("TELEGRAM_EVENT_FEED_FILE", str(path))
     path.write_text('{"before": 1}\n', encoding="utf-8")
 
+    # The EXACT command the state reports, not a reconstruction of it. Running
+    # `_watch_script` directly is what let the quoting defect live: the string
+    # handed to users wrapped the script in double quotes, so the shell they
+    # pasted it into expanded $p and $o before the child ever saw them.
+    #
+    # `.split()` is exact here because -EncodedCommand is base64: four bare
+    # tokens, no quotes, nothing for a shell or for this test to re-interpret.
     command = events.incoming_feed_state()["watch_command"]
-    # Strip the shell wrapper the state reports and run the script body directly,
-    # so this exercises the watcher itself rather than quoting.
-    script = events._watch_script(path)
     process = subprocess.Popen(
-        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        command.split(),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
@@ -352,6 +364,7 @@ def test_the_powershell_watcher_survives_a_rotation(monkeypatch, tmp_path):
     lines: "queue.Queue[str]" = queue.Queue()
     reader = threading.Thread(target=_pump_lines, args=(process.stdout, lines), daemon=True)
     reader.start()
+    assert "$" not in command, "the command still carries something a shell can expand"
 
     def _await_line(marker: str, seconds: float = 30.0) -> None:
         """Wait for one specific line, bounded, instead of sleeping and hoping."""

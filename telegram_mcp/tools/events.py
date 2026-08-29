@@ -7,6 +7,7 @@ debouncing a burst (several messages typed in a row) into a single settled event
 """
 
 import asyncio
+import base64
 import json
 import math
 import os
@@ -813,16 +814,25 @@ _WATCH_POLL_MS = 500
 def _watch_script(path, contains: Optional[str] = None) -> str:
     """A rotation-aware PowerShell tail for ``path``, optionally filtered.
 
-    Rotation is detected by the file getting SHORTER than the offset already
-    read: `os.replace` puts a brand-new empty file at the name, so the next poll
-    sees a length below the mark and starts again from zero. Opened with
-    FileShare.ReadWrite so watching never blocks the feed from writing or from
-    replacing the file underneath.
+    Rotation is detected by CONTINUITY, not by length. Reading the length alone
+    only caught a replacement shorter than the offset already read: a fresh
+    generation that grew back past that mark inside one poll interval was seeked
+    into, and everything it had written first was never emitted.
+
+    So the first 64 bytes are read on every poll and compared with what they were
+    last time; a change means a different file and the offset goes back to zero,
+    whatever the new length is. The creation stamp cannot do this job on Windows:
+    NTFS tunneling gives a name recreated within about fifteen seconds the OLD
+    stamp, and fifteen seconds is far longer than a rotation takes. The bytes
+    themselves have no such memory.
+
+    Opened with FileShare.ReadWrite so watching never blocks the feed from
+    writing or from replacing the file underneath.
     """
     quoted = str(path).replace("'", "''")
     emit = "$line" if contains is None else f"if($line -like '*{contains}*'){{$line}}"
     return (
-        f"$p='{quoted}';$o=[long]0;"
+        f"$p='{quoted}';$o=[long]0;$head='';"
         "while($true){"
         "if(Test-Path -LiteralPath $p){"
         "$len=(Get-Item -LiteralPath $p).Length;"
@@ -830,7 +840,15 @@ def _watch_script(path, contains: Optional[str] = None) -> str:
         "if($len -gt $o){"
         "$f=[IO.File]::Open($p,[IO.FileMode]::Open,[IO.FileAccess]::Read,"
         "[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete);"
-        "try{[void]$f.Seek($o,[IO.SeekOrigin]::Begin);"
+        "try{"
+        # Continuity, checked against the file's own first bytes. Creation time
+        # cannot do this on Windows: NTFS tunneling hands a name recreated within
+        # about fifteen seconds the OLD creation stamp, which is exactly the
+        # interval a rotation happens in.
+        "$b=New-Object byte[] 64;$n=$f.Read($b,0,64);"
+        "$h=[Convert]::ToBase64String($b,0,$n);"
+        "if($h -ne $head){$head=$h;$o=[long]0};"
+        "[void]$f.Seek($o,[IO.SeekOrigin]::Begin);"
         "$r=New-Object IO.StreamReader($f,[Text.Encoding]::UTF8);"
         "while($null -ne ($line=$r.ReadLine())){" + emit + "};"
         "$o=$f.Position}finally{$f.Dispose()}}}"
@@ -843,11 +861,21 @@ def _watch_command(path, contains: Optional[str] = None) -> str:
 
     `tail -F` and `grep --line-buffered` are not commands on a Windows host, so
     reporting them there described a monitor nobody could start.
+
+    On Windows the script goes in as `-EncodedCommand`, base64 of UTF-16LE.
+    Wrapping it in outer double quotes did not survive being pasted into
+    PowerShell: `$p`, `$o` and the rest were expanded by THE SHELL THE USER RAN
+    IT FROM before the child ever parsed them, so the watcher started with empty
+    variables - or with whatever those names happened to hold in that session.
+    Encoded, no shell has anything left to substitute. The readable form is
+    published beside it as `watch_script`, because a command nobody can read is
+    a command nobody should be asked to trust.
     """
     if os.name == "nt":
-        return (
-            "powershell -NoProfile -NonInteractive -Command " f'"{_watch_script(path, contains)}"'
+        encoded = base64.b64encode(_watch_script(path, contains).encode("utf-16-le")).decode(
+            "ascii"
         )
+        return f"powershell -NoProfile -NonInteractive -EncodedCommand {encoded}"
     # -F survives rotation/truncation and waits for a not-yet-created file.
     follow = f"tail -n 0 -F {shlex.quote(str(path))}"
     if contains is None:
@@ -877,7 +905,9 @@ def incoming_feed_state() -> Dict[str, Any]:
         "pending_chats": len(_pending_msgs),
         **overflow_state(),
         "watch_command": _watch_command(path),
+        "watch_script": _watch_script(path),
         "watch_command_for_one_chat": _watch_command(path, '"chat_id": <ID>'),
+        "watch_script_for_one_chat": _watch_script(path, '"chat_id": <ID>'),
         "watch_shell": "powershell" if os.name == "nt" else "sh",
         "autostart_pending": (
             not _feed_autostart_done
