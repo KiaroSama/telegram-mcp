@@ -393,8 +393,16 @@ async def react_to_story(
             [
                 {
                     "story_id": int(story_id),
-                    "reaction": chosen or None,
-                    "removed": not chosen,
+                    # Derived from what was actually SENT, not from `emoji`
+                    # alone: a custom-emoji reaction went out and this record
+                    # reported "reaction: null, removed: true" - the tool
+                    # claiming it had taken back a reaction it had just placed.
+                    "reaction": (
+                        chosen
+                        if chosen
+                        else (f"custom:{custom_emoji_id}" if custom_emoji_id is not None else None)
+                    ),
+                    "removed": not chosen and custom_emoji_id is None,
                     "confirmed_reaction": confirmed,
                 }
             ],

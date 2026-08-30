@@ -568,8 +568,23 @@ async def send_reaction(
         if emoji is not None:
             reactions.append(ReactionEmoji(emoticon=emoji))
         if custom_emoji_id is not None:
-            ids = [custom_emoji_id] if isinstance(custom_emoji_id, int) else list(custom_emoji_id)
-            reactions.extend(ReactionCustomEmoji(document_id=int(one)) for one in ids)
+            raw = (
+                [custom_emoji_id]
+                if isinstance(custom_emoji_id, (int, str))
+                else list(custom_emoji_id)
+            )
+            try:
+                # `get_message_reactions` reports these as the STRING
+                # "custom:<id>", and this tool's own docstring sends callers to
+                # that value - so accept it beside the bare id, rather than
+                # raising on the exact thing it told them to use.
+                ids = [int(str(one).removeprefix("custom:")) for one in raw]
+            except (TypeError, ValueError):
+                return (
+                    "custom_emoji_id must be a document id, or the 'custom:<id>' "
+                    f"form get_message_reactions reports. Got {custom_emoji_id!r}."
+                )
+            reactions.extend(ReactionCustomEmoji(document_id=one) for one in ids)
 
         cl = get_client(account)
         peer = await resolve_input_entity(chat_id, cl)

@@ -129,6 +129,20 @@ async def _read_poll(chat_id, message_id: int, account: Optional[str]):
     return cl, entity, msg, poll, results
 
 
+def _correct_answers(poll, results):
+    """The winning option(s) of a quiz, as Telegram wants them back.
+
+    Only a quiz has them, and `PollAnswerVoters.correct` is where they live -
+    which Telegram strips from a `min` result, so `_read_poll` refetches the full
+    form before this is read.
+    """
+    if not getattr(poll, "quiz", False):
+        return None
+    voters = getattr(results, "results", None) or []
+    correct = [v.option for v in voters if getattr(v, "correct", False)]
+    return correct or None
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Poll Results", openWorldHint=True, readOnlyHint=True)
 )
@@ -418,7 +432,7 @@ async def close_poll(
             can edit - Telegram refuses otherwise.
     """
     try:
-        cl, entity, msg, poll, _results = await _read_poll(chat_id, message_id, account)
+        cl, entity, msg, poll, results = await _read_poll(chat_id, message_id, account)
         if not msg:
             return f"Message {message_id} was not found in chat {chat_id}."
         if poll is None:
@@ -435,6 +449,15 @@ async def close_poll(
                 peer=entity,
                 id=getattr(msg, "id", message_id),
                 media=types.InputMediaPoll(
+                    # A QUIZ carries its answer and explanation on the MEDIA, not
+                    # on the poll: `InputMediaPoll` takes `correct_answers` and
+                    # `solution`, and Telegram refuses a quiz edit that omits the
+                    # answers (QUIZ_CORRECT_ANSWERS_EMPTY). Sending only `poll=`
+                    # closed an ordinary poll fine and could not close a quiz at
+                    # all - and would have dropped the explanation if it had.
+                    correct_answers=_correct_answers(poll, results),
+                    solution=getattr(results, "solution", None),
+                    solution_entities=getattr(results, "solution_entities", None) or None,
                     poll=types.Poll(
                         id=poll.id,
                         question=poll.question,
@@ -443,10 +466,18 @@ async def close_poll(
                         # invented: it is Telegram's own handle on this poll.
                         hash=getattr(poll, "hash", 0) or 0,
                         closed=True,
+                        # Carried for the same reason as question and answers:
+                        # this edit REPLACES the poll, so anything omitted is
+                        # cleared rather than kept.
+                        close_date=getattr(poll, "close_date", None),
+                        close_period=getattr(poll, "close_period", None),
+                        shuffle_answers=getattr(poll, "shuffle_answers", None),
+                        revoting_disabled=getattr(poll, "revoting_disabled", None),
+                        hide_results_until_close=getattr(poll, "hide_results_until_close", None),
                         public_voters=getattr(poll, "public_voters", None),
                         multiple_choice=getattr(poll, "multiple_choice", None),
                         quiz=getattr(poll, "quiz", None),
-                    )
+                    ),
                 ),
             )
         )
