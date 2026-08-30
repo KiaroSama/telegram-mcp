@@ -27,10 +27,10 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
 
@@ -39,7 +39,7 @@ jobs:
       # two platforms. Keyed on uv.lock, so a dependency change still gets a cold
       # resolve rather than a stale environment.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -59,7 +59,7 @@ jobs:
           --cov --cov-report=term-missing --cov-fail-under=0
 
       - name: Upload this leg's coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Must be unique per matrix leg: upload-artifact@v4 refuses a second
           # upload to the same name, so a static name fails the 3.13 job.
@@ -89,15 +89,15 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -126,7 +126,7 @@ jobs:
           -q --cov --cov-report= --cov-fail-under=0
 
       - name: Upload this leg's coverage data
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-data-lottie-${{ matrix.os }}
           path: .coverage.lottie-${{ matrix.os }}
@@ -143,12 +143,12 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # test_launchers.ps1 exercises the launcher's Python tee wrapper, and falls
       # back to `python` on PATH when .venv is absent - which it is, on a runner.
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.11'
 
@@ -193,15 +193,15 @@ jobs:
       # `coverage report` reads the source to say which lines were missed, so
       # the checkout is load-bearing here, not habit.
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -216,7 +216,7 @@ jobs:
       # .coverage.linux-py3.11, .coverage.linux-py3.13, .coverage.lottie-ubuntu-latest,
       # .coverage.lottie-windows-latest. Do not collapse those to a constant name.
       - name: Collect every leg's coverage data
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: coverage-data-*
           path: coverage-data
@@ -230,7 +230,7 @@ jobs:
 
       - name: Upload the combined report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-xml-combined
           path: coverage.xml

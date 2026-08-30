@@ -17,14 +17,14 @@ jobs:
 
     steps:
       - name: Check out repository code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # black and flake8 versions come from uv.lock, the same source every other
       # job uses. `.pre-commit-config.yaml` still carries its own `rev:` - that
       # one is pre-commit's own mechanism and only `pre-commit autoupdate` moves
       # it, so it has to be kept in step by hand.
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v10
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"

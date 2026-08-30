@@ -3,6 +3,13 @@
 # Dependabot switched off regardless of this file, which is the other half of
 # why no pull request ever appeared. That half is repository state, not config:
 # Settings -> Code security -> Dependabot, and click enable.
+#
+# Both halves are done as of 2026-08-31: version updates are enabled on the
+# repository, and the first run opened a pull request within minutes. The
+# evidence that the toggle had still been off until then is that every action
+# below sat three majors behind while this file asked for daily updates.
+# There is no REST endpoint for that toggle - it is UI-only - so it cannot be
+# asserted in CI; if Dependabot ever goes quiet for weeks, check it first.
 version: 2
 
 updates:
