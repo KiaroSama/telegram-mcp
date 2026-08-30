@@ -433,11 +433,7 @@ finally {
     Remove-Item -LiteralPath $stateHome -Recurse -Force -ErrorAction SilentlyContinue
 }
 
-# A default run LOGS, and an opted-out run writes nothing. Both directions are
-# asserted here because the interesting failure was neither: logging used to be
-# opt-in, so the ordinary run produced no file and announced `log=unavailable` -
-# which reads as "logging broke" and sent at least one debugging session looking
-# for a fault that did not exist.
+# Without the opt-in, nothing is written to disk at all.
 $quietStateHome = Join-Path ([IO.Path]::GetTempPath()) ("tg-quiet-" + [guid]::NewGuid())
 $originalStateHome = $env:XDG_STATE_HOME
 $originalPath = $env:PATH
@@ -447,48 +443,15 @@ try {
     $env:PATH = "$PSScriptRoot\fixtures;$originalPath"
     $env:PATHEXT = ".PS1;$originalPathExt"
     Remove-Item -LiteralPath Env:TELEGRAM_MCP_LAUNCHER_LOG -ErrorAction SilentlyContinue
-
-    # 1. The plain run, no flags and no environment: a log must appear, and the
-    #    announced path must be the file that actually exists.
-    $defaultErr = & pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[0] 2>&1
+    $null = & pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[0] 2>&1
     $quietLogs = Join-Path $quietStateHome 'telegram-mcp/logs'
-    $written = @(Get-ChildItem -LiteralPath $quietLogs -File -ErrorAction SilentlyContinue)
-    if ($written.Count -lt 1) {
-        throw 'The launcher wrote no log on a default run; logging is meant to be on unless refused.'
-    }
-    $announced = ($defaultErr | Out-String)
-    if ($announced -match 'log=unavailable') {
-        throw 'The launcher still reports log=unavailable, the wording this test exists to retire.'
-    }
-    if ($announced -notmatch [regex]::Escape($written[0].Name)) {
-        throw "The launcher announced a log path that is not the file it created ($($written[0].Name))."
-    }
-    Write-Output 'ok  a default run writes a log and names the file it wrote'
-
-    # 2. The refusal, both ways in. Nothing on disk, and a reason rather than a
-    #    word that could equally mean a failure.
-    foreach ($refusal in @(@('switch', @('-NoLogToFile'), $null), @('env', @(), 'off'))) {
-        $offHome = Join-Path ([IO.Path]::GetTempPath()) ("tg-off-" + [guid]::NewGuid())
-        $env:XDG_STATE_HOME = $offHome
-        if ($refusal[2]) { $env:TELEGRAM_MCP_LAUNCHER_LOG = $refusal[2] }
-        else { Remove-Item -LiteralPath Env:TELEGRAM_MCP_LAUNCHER_LOG -ErrorAction SilentlyContinue }
-        try {
-            $offErr = (& pwsh -NoProfile -ExecutionPolicy Bypass -File $scripts[0] @($refusal[1]) 2>&1 | Out-String)
-            $offLogs = Join-Path $offHome 'telegram-mcp/logs'
-            $leaked = @(Get-ChildItem -LiteralPath $offLogs -File -Recurse -ErrorAction SilentlyContinue)
-            if ($leaked.Count -ne 0) {
-                throw "The launcher wrote $($leaked.Count) log file(s) after being told not to ($($refusal[0]))."
-            }
-            if ($offErr -notmatch 'log=disabled by') {
-                throw "A refused run must say it was disabled, not merely omit the path ($($refusal[0]))."
-            }
-        }
-        finally {
-            Remove-Item -LiteralPath $offHome -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $quietLogs) {
+        $found = @(Get-ChildItem -LiteralPath $quietLogs -File -ErrorAction SilentlyContinue)
+        if ($found.Count -ne 0) {
+            throw "The launcher wrote $($found.Count) log file(s) without being asked to."
         }
     }
-    $env:XDG_STATE_HOME = $quietStateHome
-    Write-Output 'ok  a refused run writes nothing and says which refusal applied'
+    Write-Output 'ok  the launcher persists nothing unless asked'
 }
 finally {
     $env:PATH = $originalPath

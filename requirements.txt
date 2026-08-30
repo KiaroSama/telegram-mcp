@@ -1,7 +1,7 @@
 mcp[cli]>=1.8.0,<2
 pillow>=11.0
-python-dotenv>=1.1.0
+python-dotenv>=1.2.3
 regex>=2024.0.0
-python-json-logger>=3.3.0
+python-json-logger>=4.2.0
 qrcode>=8.2
 telethon>=1.44.0

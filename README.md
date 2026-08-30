@@ -389,7 +389,7 @@ to their own location, so they work from any directory and from a shortcut.
 
 | Script | What it does |
 |---|---|
-| `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Keeps a timestamped log per run by default, in `logs/` inside the private state directory - never beside the source - recording only this server's own diagnostics. Pass `-NoLogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG=off`) for a run that leaves nothing on disk. |
+| `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Pass `-LogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG`) to also keep a timestamped log; it goes to `logs/` inside the private state directory, never beside the source, and records only this server's own diagnostics. |
 | `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. |
 
 `Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of
@@ -839,11 +839,8 @@ Telegram messages, display names, chat titles, and button labels are untrusted c
   created readable by you alone and holds bounded metadata only: the failing tool, an error
   code, numeric ids and an exception type with a stable digest. Message text, names, titles,
   paths and queries are deliberately not in it, so quote the error code when reporting a bug.
-- **The server's diagnostics are on disk by default:** every `./start-mcp.ps1` run writes
-  `logs/start-mcp_<UTC timestamp>.log` under the private state directory, and the launcher's
-  first line names the exact file. For a run that leaves nothing behind, pass `-NoLogToFile`
-  or set `TELEGRAM_MCP_LAUNCHER_LOG=off`; the same first line then says which refusal applied
-  rather than going quiet. Stdout is the MCP protocol channel and carries whole
+- **Want the server's diagnostics on disk:** run `./start-mcp.ps1 -LogToFile` (or set
+  `TELEGRAM_MCP_LAUNCHER_LOG=1`). Stdout is the MCP protocol channel and carries whole
   tool results, so it is never persisted. Of stderr, only this server's OWN log lines are
   written down: they come through a redacting filter that replaces every value with a
   shape and a digest before it reaches the stream. Anything else on stderr - a library

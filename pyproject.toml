@@ -28,19 +28,18 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14"
+    "Programming Language :: Python :: 3.13"
 ]
 requires-python = ">=3.11"
 dependencies = [
     "mcp[cli]>=1.8.0,<2",
     # Image encoding/scaling for the visual capture and media preview tools.
     "pillow>=11.0",
-    "python-dotenv>=1.1.0",
+    "python-dotenv>=1.2.3",
     # UAX #29 grapheme clusters (\X) so truncation never splits a compound
     # character; a hand-rolled scan kept missing categories.
     "regex>=2024.0.0",
-    "python-json-logger>=3.3.0",
+    "python-json-logger>=4.2.0",
     "qrcode>=8.2",
     "telethon>=1.44.0",
 ]
@@ -84,7 +83,7 @@ dev = [
     "black>=25.9.0",
     # tests/test_packaging.py builds a real wheel and imports the installed copy;
     # without these it skips, and a broken package list ships unnoticed.
-    "build>=1.2",
+    "build>=1.6.0",
     "flake8>=7.3.0",
     "pre-commit>=4.6.0",
     "pytest>=9.0.2",
