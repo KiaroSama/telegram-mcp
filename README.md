@@ -47,7 +47,7 @@ Message sent successfully:
 
 ## What It Can Do
 
-The server registers **169 MCP tools**. That count is measured, not estimated — see
+The server registers **181 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 

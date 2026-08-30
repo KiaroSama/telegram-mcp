@@ -340,6 +340,11 @@ Telegram's message effects are separate from a premium sticker's own effect, and
 carry both. `inspect_message` reports the former under `message_effect` with its `effect_id`;
 **`get_message_effect`** turns that ID into the real assets.
 
+An `effect_id` used to be obtainable only that way — off a message that already carried one, so an
+effect could be copied and never chosen. **`list_message_effects`** pages the same hour-cached
+catalogue described below (filterable by `emoticon` or `premium_only`), and the `id` it returns is
+what `send_message`/`reply_to_message` take as `effect_id`.
+
 Telegram resolves effects only in bulk, through `messages.GetAvailableEffects`, which returns the
 whole catalogue — 697 effects and 894 documents on a live account. There are three levels of
 refresh, and keeping them apart is the whole design:
