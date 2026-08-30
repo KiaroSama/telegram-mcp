@@ -1,151 +1,40 @@
-"""A topic could be created and then only ever lived with.
+"""Editing a forum topic, and the wrong turn taken on the way there.
 
 `create_forum_topic` and `list_topics` existed with nothing that could change a
-topic afterwards — no rename, no close, no reopen. It was reported as
-unbuildable because `channels.EditForumTopic` is absent from Telethon 1.44. That
-was the wrong conclusion: `GetForumTopics` and `CreateForumTopic` are absent too,
-and this module has hand-written wire encoders for both. The request was
-writable; only the constructor id had to be established rather than guessed.
+topic afterwards — no rename, no close, no reopen.
 
-These tests pin the two things a hand-rolled TL request can get silently wrong:
-the constructor id, and the flag layout. Both are checked against the schema
-itself rather than against a copied constant — CRC32 covers the WHOLE definition
-line, so an id that matches also proves the field order and flag numbers.
+It was first reported unbuildable because `functions.channels` has no
+`EditForumTopicRequest`. Then it was built as a hand-written wire encoder, its
+constructor id derived by CRC32 from the `channels.editForumTopic` schema line —
+a derivation that validated cleanly against `channels.getForumTopics`, which this
+module was also hand-rolling.
+
+Both were wrong the same way. Telethon 1.44 ships all of these under
+**`functions.messages`**, and the `channels.*` forms are RETIRED:
+
+    channels.getForumTopics  0x0DE560D1  channel:InputChannel   (retired)
+    messages.getForumTopics  0x3BA47BFF  peer:InputPeer         (live)
+    channels.editForumTopic  0xF4DFA185  channel:InputChannel   (retired)
+    messages.editForumTopic  0xCECC1134  peer:InputPeer         (live)
+
+Telegram still served the retired ids, so nothing looked broken. A CRC32
+derivation proves the id matches the schema line it was handed — never that the
+line is the one still in service. These tests pin the live requests so the module
+cannot drift back onto a hand-rolled encoder.
 """
 
-import struct
-import zlib
+import inspect
 
 import pytest
-from telethon.tl.types import InputChannel
+from telethon.tl import functions
+from telethon.tl.types import Channel
 
 from telegram_mcp.tools import topics as topics_mod
-from telegram_mcp.tools.topics import EditForumTopicRequest
-
-# The layer-227 schema line, normalised the way Telegram computes ids.
-SCHEMA = (
-    "channels.editForumTopic flags:# channel:InputChannel topic_id:int "
-    "title:flags.0?string icon_emoji_id:flags.1?long closed:flags.2?Bool "
-    "hidden:flags.3?Bool = Updates"
-)
-
-CHANNEL = InputChannel(channel_id=555, access_hash=7)
-
-
-def _flags(request) -> int:
-    """The flags word: right after the constructor id in the encoded request."""
-    return struct.unpack_from("<I", request._bytes(), 4)[0]
-
-
-def test_the_constructor_id_is_derived_from_the_schema_not_copied():
-    """A wrong id is not a soft failure: Telegram answers a request it does not
-    recognise with an error that names nothing useful."""
-    assert EditForumTopicRequest.CONSTRUCTOR_ID == zlib.crc32(SCHEMA.encode()) & 0xFFFFFFFF
-
-
-def test_the_derivation_reproduces_a_request_this_project_already_sends():
-    """Guard the guard. If the normalisation above were wrong, the test before
-    this one would pass against an equally wrong id. `GetForumTopics` is a
-    request whose id was established independently and is in daily use."""
-    known = (
-        "channels.getForumTopics flags:# channel:InputChannel q:flags.0?string "
-        "offset_date:int offset_id:int offset_topic:int limit:int = messages.ForumTopics"
-    )
-
-    assert (
-        zlib.crc32(known.encode()) & 0xFFFFFFFF == topics_mod.GetForumTopicsRequest.CONSTRUCTOR_ID
-    )
-
-
-def test_every_field_sets_its_own_flag():
-    assert _flags(EditForumTopicRequest(CHANNEL, 4, title="Renamed")) == 1 << 0
-    assert _flags(EditForumTopicRequest(CHANNEL, 4, icon_emoji_id=99)) == 1 << 1
-    assert _flags(EditForumTopicRequest(CHANNEL, 4, closed=True)) == 1 << 2
-    assert _flags(EditForumTopicRequest(CHANNEL, 4, hidden=True)) == 1 << 3
-
-
-def test_an_omitted_field_sets_no_flag_and_writes_no_bytes():
-    """This is what makes it an edit and not a replace: renaming a topic must not
-    clear its icon."""
-    only_title = EditForumTopicRequest(CHANNEL, 4, title="Renamed")
-    everything = EditForumTopicRequest(
-        CHANNEL, 4, title="Renamed", icon_emoji_id=99, closed=False, hidden=False
-    )
-
-    assert _flags(only_title) == 1 << 0
-    assert _flags(everything) == (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3)
-    assert len(only_title._bytes()) < len(everything._bytes())
-
-
-def test_false_is_sent_and_is_not_the_same_as_omitted():
-    """`closed=False` REOPENS a topic. Treating it as "not given" would make the
-    tool unable to undo its own close - the bug a falsy check would introduce."""
-    reopen = EditForumTopicRequest(CHANNEL, 4, closed=False)
-
-    assert _flags(reopen) == 1 << 2
-    # boolFalse on the wire, not an absent field.
-    assert struct.pack("<I", 0xBC799737) in reopen._bytes()
-
-
-def test_true_and_false_serialise_to_different_constructors():
-    closed = EditForumTopicRequest(CHANNEL, 4, closed=True)._bytes()
-    opened = EditForumTopicRequest(CHANNEL, 4, closed=False)._bytes()
-
-    assert struct.pack("<I", 0x997275B5) in closed
-    assert struct.pack("<I", 0xBC799737) in opened
-    assert closed != opened
-
-
-def test_the_encoding_round_trips():
-    """`from_reader` is the inverse of `_bytes`; if the flag numbering disagreed
-    between them this would not survive."""
-    from telethon.extensions import BinaryReader
-
-    original = EditForumTopicRequest(
-        CHANNEL, 42, title="Planning", icon_emoji_id=7, closed=True, hidden=False
-    )
-    reader = BinaryReader(original._bytes()[4:])
-    restored = EditForumTopicRequest.from_reader(reader)
-
-    assert restored.topic_id == 42
-    assert restored.title == "Planning"
-    assert restored.icon_emoji_id == 7
-    assert restored.closed is True
-    assert restored.hidden is False
-
-
-# --- the tool around it -----------------------------------------------------
-
-
-class Recorder:
-    def __init__(self):
-        self.sent = []
-
-    async def __call__(self, request):
-        self.sent.append(request)
-        return None
-
-
-def _wire(monkeypatch, entity):
-    client = Recorder()
-
-    async def _resolve(chat_id, cl=None, account=None):
-        return entity
-
-    async def _connected(cl=None):
-        return None
-
-    monkeypatch.setattr(topics_mod, "get_client", lambda account=None: client)
-    monkeypatch.setattr(topics_mod, "resolve_entity", _resolve)
-    monkeypatch.setattr(topics_mod, "ensure_connected", _connected)
-    return client
 
 
 def _forum(forum=True):
     """A real Channel: the tool selects its branch with isinstance, so a stand-in
     class is refused before the forum check is ever reached."""
-    from telethon.tl.types import Channel
-
     return Channel(
         id=555,
         title="A Forum",
@@ -167,6 +56,74 @@ def _forum(forum=True):
     )
 
 
+class Recorder:
+    def __init__(self, answer=None):
+        self.sent = []
+        self.answer = answer
+
+    async def __call__(self, request):
+        self.sent.append(request)
+        return self.answer
+
+
+def _wire(monkeypatch, entity, answer=None):
+    client = Recorder(answer=answer)
+
+    async def _resolve(chat_id, cl=None, account=None):
+        return entity
+
+    async def _connected(cl=None):
+        return None
+
+    monkeypatch.setattr(topics_mod, "get_client", lambda account=None: client)
+    monkeypatch.setattr(topics_mod, "resolve_entity", _resolve)
+    monkeypatch.setattr(topics_mod, "ensure_connected", _connected)
+    return client
+
+
+# --- the live requests, not a hand-rolled copy ------------------------------
+
+
+def test_the_module_no_longer_hand_rolls_any_request():
+    """249 lines of wire encoding lived here, two of them addressing retired
+    constructors. Telethon ships all three; a re-introduced encoder would be a
+    silent return to that."""
+    source = inspect.getsource(topics_mod)
+
+    assert "TLRequest" not in source, "a hand-rolled request is back"
+    assert "CONSTRUCTOR_ID" not in source
+    assert "def _bytes" not in source
+
+
+@pytest.mark.parametrize(
+    "attr,expected_id",
+    [
+        ("GetForumTopicsRequest", 0x3BA47BFF),
+        ("CreateForumTopicRequest", 0x2F98C3D5),
+        ("EditForumTopicRequest", 0xCECC1134),
+    ],
+)
+def test_the_live_requests_are_the_ones_telethon_ships(attr, expected_id):
+    """Pinned by id: if a future Telethon moves these, it fails here rather than
+    as an unexplained RPC error against a real forum."""
+    assert getattr(functions.messages, attr).CONSTRUCTOR_ID == expected_id
+
+
+@pytest.mark.parametrize(
+    "attr", ["GetForumTopicsRequest", "CreateForumTopicRequest", "EditForumTopicRequest"]
+)
+def test_every_forum_request_addresses_a_peer_not_a_channel(attr):
+    """The retired `channels.*` forms took an InputChannel. Handing one of those
+    to the live request is the exact mistake this file records."""
+    params = inspect.signature(getattr(functions.messages, attr).__init__).parameters
+
+    assert "peer" in params
+    assert "channel" not in params
+
+
+# --- the tool ---------------------------------------------------------------
+
+
 @pytest.mark.asyncio
 async def test_changing_nothing_is_refused_before_anything_is_sent(monkeypatch):
     client = _wire(monkeypatch, _forum())
@@ -178,16 +135,29 @@ async def test_changing_nothing_is_refused_before_anything_is_sent(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_a_rename_reaches_the_wire(monkeypatch):
+async def test_a_rename_reaches_the_live_request(monkeypatch):
     client = _wire(monkeypatch, _forum())
 
     await topics_mod.edit_forum_topic(-100555, 4, title="Planning")
 
     request = client.sent[-1]
-    assert isinstance(request, EditForumTopicRequest)
+    assert isinstance(request, functions.messages.EditForumTopicRequest)
     assert request.topic_id == 4
     assert request.title == "Planning"
     assert request.closed is None, "an untouched field must stay untouched"
+
+
+@pytest.mark.asyncio
+async def test_false_is_sent_and_is_not_the_same_as_omitted(monkeypatch):
+    """`closed=False` REOPENS a topic. Treating it as "not given" would leave the
+    tool unable to undo its own close."""
+    client = _wire(monkeypatch, _forum())
+
+    await topics_mod.edit_forum_topic(-100555, 4, closed=False)
+
+    request = client.sent[-1]
+    assert request.closed is False
+    assert request.title is None
 
 
 @pytest.mark.asyncio

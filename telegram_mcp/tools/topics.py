@@ -1,11 +1,18 @@
 """Forum topics - the threaded sub-chats inside a forum-enabled supergroup.
 
-Telethon 1.42-1.43 ships no binding for channels.getForumTopics or
-messages.createForumTopic, so the two raw TLRequest subclasses below are
-hand-written wire encoders. They live here rather than in a shared helper module
-because nothing outside this subsystem sends either request, and their
-constructor IDs and flag layouts have to be re-checked together with the tools
-that use them whenever the installed Telethon schema moves.
+Telethon 1.42-1.43 shipped no binding for these, so this module carried
+hand-written wire encoders for `getForumTopics` and `createForumTopic`. Telethon
+1.44 ships all of them - under `functions.messages`, not `functions.channels`,
+which is where looking for them fails.
+
+Those encoders are gone, and the lesson is worth keeping: two of the three were
+addressing the RETIRED `channels.*` forms. `channels.getForumTopics`
+(0x0DE560D1) and `channels.editForumTopic` (0xF4DFA185) both take an
+InputChannel; the live requests are `messages.getForumTopics` (0x3BA47BFF) and
+`messages.editForumTopic` (0xCECC1134), and both take an InputPeer. Telegram
+still served the retired ids, so nothing looked broken. Deriving a constructor id
+by CRC32 proves only that the id matches the schema line you fed it - not that
+the schema line is the one still in service.
 
 The reader and the two writers stay together because the writers are only
 reachable through the same preconditions the reader enforces - megagroup first,
@@ -17,261 +24,10 @@ this module and chat_state.
 """
 
 import secrets
-import struct
 
-from telethon.tl.tlobject import TLObject, TLRequest
 
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
-
-
-class GetForumTopicsRequest(TLRequest):
-    """Raw request for channels.getForumTopics missing in Telethon 1.42-1.43."""
-
-    CONSTRUCTOR_ID = 0x0DE560D1
-    SUBCLASS_OF_ID = 0x0
-
-    def __init__(self, channel, offset_date, offset_id, offset_topic, limit, q=None):
-        self.channel = channel
-        self.q = q
-        self.offset_date = offset_date
-        self.offset_id = offset_id
-        self.offset_topic = offset_topic
-        self.limit = limit
-
-    async def resolve(self, client, utils):
-        self.channel = utils.get_input_channel(await client.get_input_entity(self.channel))
-
-    def to_dict(self):
-        return {
-            "_": "GetForumTopicsRequest",
-            "channel": (
-                self.channel.to_dict() if isinstance(self.channel, TLObject) else self.channel
-            ),
-            "q": self.q,
-            "offset_date": self.offset_date,
-            "offset_id": self.offset_id,
-            "offset_topic": self.offset_topic,
-            "limit": self.limit,
-        }
-
-    def _bytes(self):
-        flags = 0 if self.q is None or self.q is False else 1
-        return b"".join(
-            (
-                struct.pack("<I", self.CONSTRUCTOR_ID),
-                struct.pack("<I", flags),
-                self.channel._bytes(),
-                b"" if self.q is None or self.q is False else self.serialize_bytes(self.q),
-                struct.pack("<i", self.offset_date),
-                struct.pack("<i", self.offset_id),
-                struct.pack("<i", self.offset_topic),
-                struct.pack("<i", self.limit),
-            )
-        )
-
-    @classmethod
-    def from_reader(cls, reader):
-        flags = reader.read_int()
-        channel = reader.tgread_object()
-        q = reader.tgread_string() if flags & 1 else None
-        offset_date = reader.read_int()
-        offset_id = reader.read_int()
-        offset_topic = reader.read_int()
-        limit = reader.read_int()
-        return cls(
-            channel=channel,
-            offset_date=offset_date,
-            offset_id=offset_id,
-            offset_topic=offset_topic,
-            limit=limit,
-            q=q,
-        )
-
-
-class CreateForumTopicRequest(TLRequest):
-    """Raw request for messages.createForumTopic missing in Telethon 1.42."""
-
-    CONSTRUCTOR_ID = 0x2F98C3D5
-    SUBCLASS_OF_ID = 0x0
-
-    def __init__(
-        self,
-        peer,
-        title,
-        random_id,
-        icon_color=None,
-        icon_emoji_id=None,
-        send_as=None,
-    ):
-        self.peer = peer
-        self.title = title
-        self.icon_color = icon_color
-        self.icon_emoji_id = icon_emoji_id
-        self.random_id = random_id
-        self.send_as = send_as
-
-    async def resolve(self, client, utils):
-        self.peer = utils.get_input_peer(await client.get_input_entity(self.peer))
-        if self.send_as is not None:
-            self.send_as = utils.get_input_peer(await client.get_input_entity(self.send_as))
-
-    def to_dict(self):
-        return {
-            "_": "CreateForumTopicRequest",
-            "peer": self.peer.to_dict() if isinstance(self.peer, TLObject) else self.peer,
-            "title": self.title,
-            "icon_color": self.icon_color,
-            "icon_emoji_id": self.icon_emoji_id,
-            "random_id": self.random_id,
-            "send_as": (
-                self.send_as.to_dict() if isinstance(self.send_as, TLObject) else self.send_as
-            ),
-        }
-
-    def _bytes(self):
-        flags = 0
-        if self.icon_color is not None:
-            flags |= 1 << 0
-        if self.send_as is not None:
-            flags |= 1 << 2
-        if self.icon_emoji_id is not None:
-            flags |= 1 << 3
-
-        return b"".join(
-            (
-                struct.pack("<I", self.CONSTRUCTOR_ID),
-                struct.pack("<I", flags),
-                self.peer._bytes(),
-                self.serialize_bytes(self.title),
-                b"" if self.icon_color is None else struct.pack("<i", self.icon_color),
-                b"" if self.icon_emoji_id is None else struct.pack("<q", self.icon_emoji_id),
-                struct.pack("<q", self.random_id),
-                b"" if self.send_as is None else self.send_as._bytes(),
-            )
-        )
-
-    @classmethod
-    def from_reader(cls, reader):
-        flags = reader.read_int()
-        peer = reader.tgread_object()
-        title = reader.tgread_string()
-        icon_color = reader.read_int() if flags & (1 << 0) else None
-        icon_emoji_id = reader.read_long() if flags & (1 << 3) else None
-        random_id = reader.read_long()
-        send_as = reader.tgread_object() if flags & (1 << 2) else None
-        return cls(
-            peer=peer,
-            title=title,
-            random_id=random_id,
-            icon_color=icon_color,
-            icon_emoji_id=icon_emoji_id,
-            send_as=send_as,
-        )
-
-
-# Telegram's `Bool` is a boxed type: it goes on the wire as a constructor id, not
-# as a byte. Only the three optional Bool/int fields below need them.
-_BOOL_TRUE = 0x997275B5
-_BOOL_FALSE = 0xBC799737
-
-
-class EditForumTopicRequest(TLRequest):
-    """Raw request for channels.editForumTopic, which Telethon 1.44 does not ship.
-
-    The constructor id is not copied from documentation and hoped for: it is
-    CRC32 over the normalised schema line, and that derivation was validated by
-    reproducing `GetForumTopicsRequest`'s own id (0x0DE560D1) from its schema
-    before being trusted here. Because the CRC covers the WHOLE definition, a
-    matching id also confirms the field order and flag numbering below - get
-    either wrong and the id would not match.
-
-        channels.editForumTopic#f4dfa185 flags:# channel:InputChannel
-            topic_id:int title:flags.0?string icon_emoji_id:flags.1?long
-            closed:flags.2?Bool hidden:flags.3?Bool = Updates
-
-    Every field is optional and omitted fields are left untouched, so this is an
-    edit and not a replace: renaming a topic does not clear its icon.
-    """
-
-    CONSTRUCTOR_ID = 0xF4DFA185
-    SUBCLASS_OF_ID = 0x0
-
-    def __init__(
-        self, channel, topic_id, title=None, icon_emoji_id=None, closed=None, hidden=None
-    ):
-        self.channel = channel
-        self.topic_id = topic_id
-        self.title = title
-        self.icon_emoji_id = icon_emoji_id
-        self.closed = closed
-        self.hidden = hidden
-
-    async def resolve(self, client, utils):
-        self.channel = utils.get_input_channel(await client.get_input_entity(self.channel))
-
-    def to_dict(self):
-        return {
-            "_": "EditForumTopicRequest",
-            "channel": (
-                self.channel.to_dict() if isinstance(self.channel, TLObject) else self.channel
-            ),
-            "topic_id": self.topic_id,
-            "title": self.title,
-            "icon_emoji_id": self.icon_emoji_id,
-            "closed": self.closed,
-            "hidden": self.hidden,
-        }
-
-    def _bytes(self):
-        flags = 0
-        if self.title is not None:
-            flags |= 1 << 0
-        if self.icon_emoji_id is not None:
-            flags |= 1 << 1
-        if self.closed is not None:
-            flags |= 1 << 2
-        if self.hidden is not None:
-            flags |= 1 << 3
-
-        return b"".join(
-            (
-                struct.pack("<I", self.CONSTRUCTOR_ID),
-                struct.pack("<I", flags),
-                self.channel._bytes(),
-                struct.pack("<i", self.topic_id),
-                b"" if self.title is None else self.serialize_bytes(self.title),
-                b"" if self.icon_emoji_id is None else struct.pack("<q", self.icon_emoji_id),
-                (
-                    b""
-                    if self.closed is None
-                    else struct.pack("<I", _BOOL_TRUE if self.closed else _BOOL_FALSE)
-                ),
-                (
-                    b""
-                    if self.hidden is None
-                    else struct.pack("<I", _BOOL_TRUE if self.hidden else _BOOL_FALSE)
-                ),
-            )
-        )
-
-    @classmethod
-    def from_reader(cls, reader):
-        flags = reader.read_int()
-        channel = reader.tgread_object()
-        topic_id = reader.read_int()
-        title = reader.tgread_string() if flags & (1 << 0) else None
-        icon_emoji_id = reader.read_long() if flags & (1 << 1) else None
-        closed = reader.tgread_bool() if flags & (1 << 2) else None
-        hidden = reader.tgread_bool() if flags & (1 << 3) else None
-        return cls(
-            channel=channel,
-            topic_id=topic_id,
-            title=title,
-            icon_emoji_id=icon_emoji_id,
-            closed=closed,
-            hidden=hidden,
-        )
 
 
 @mcp.tool(annotations=ToolAnnotations(title="List Topics", openWorldHint=True, readOnlyHint=True))
@@ -319,8 +75,8 @@ async def list_topics(
             return "The specified supergroup does not have forum topics enabled."
 
         result = await cl(
-            GetForumTopicsRequest(
-                channel=entity,
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
                 offset_date=0,
                 offset_id=0,
                 offset_topic=offset_topic,
@@ -466,7 +222,7 @@ async def create_forum_topic(
 
         clean_title = sanitize_user_content(title, max_length=128)
         result = await cl(
-            CreateForumTopicRequest(
+            functions.messages.CreateForumTopicRequest(
                 peer=entity,
                 title=clean_title,
                 random_id=secrets.randbits(63),
@@ -571,8 +327,8 @@ async def edit_forum_topic(
             return "The specified supergroup does not have forum topics enabled."
 
         await cl(
-            EditForumTopicRequest(
-                channel=entity,
+            functions.messages.EditForumTopicRequest(
+                peer=entity,
                 topic_id=int(topic_id),
                 title=title,
                 icon_emoji_id=icon_emoji_id,
