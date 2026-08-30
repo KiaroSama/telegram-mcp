@@ -39,7 +39,15 @@ class _Client:
     # Spelled out, including reply_to: send_message can address a forum topic
     # now, and a fake that swallowed the argument would accept a call the real
     # client models differently.
-    async def send_message(self, entity, message, parse_mode=None, reply_to=None):
+    async def send_message(
+        self,
+        entity,
+        message,
+        parse_mode=None,
+        reply_to=None,
+        formatting_entities=None,
+        message_effect_id=None,
+    ):
         self.sent.append((entity, message))
         return SimpleNamespace(id=1)
 

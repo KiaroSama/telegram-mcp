@@ -26,7 +26,13 @@ from telegram_mcp.text_fidelity import fidelity_text
 from telegram_mcp.tools import chats as chats_mod
 from telegram_mcp.tools import messages as messages_mod
 from telegram_mcp.tools.messages import copy_message
-from telegram_mcp.tools.scheduled import _entity_classes, _rebuild_entities
+
+# The rebuilder moved out of `scheduled.py` into `telegram_mcp.entities`, the
+# write-side inverse of message_view.describe_entities: send_message,
+# reply_to_message and edit_message all needed it and could not reach it
+# there. Import from the module that OWNS it.
+from telegram_mcp.entities import entity_classes as _entity_classes
+from telegram_mcp.entities import rebuild_entities as _rebuild_entities
 
 PARTY = chr(0x1F389)
 EMOJI_ID = 5312345678901234567

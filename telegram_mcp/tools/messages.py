@@ -20,6 +20,7 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 """
 
 from telegram_mcp.runtime import *
+from telegram_mcp.entities import rebuild_entities
 from telegram_mcp.forum import reply_target_of, topic_reply_to, topic_reply_to_request
 from telegram_mcp.text_fidelity import display_name
 
@@ -327,9 +328,7 @@ def format_message_line(msg) -> str:
     """Single-line human-readable message representation with ALL key flags."""
     parts = [f"ID: {msg.id}", get_sender_info(msg), f"Date: {msg.date}"]
 
-    reply_to_id = (
-        getattr(msg.reply_to, "reply_to_msg_id", None) if getattr(msg, "reply_to", None) else None
-    )
+    reply_to_id = reply_target_of(msg)[1]
     if reply_to_id:
         parts.append(f"reply to {reply_to_id}")
     reply_quote = get_reply_quote(msg)
@@ -474,6 +473,8 @@ async def send_message(
     chat_id: Union[int, str],
     message: str,
     parse_mode: Optional[str] = None,
+    entities: List[dict] = None,
+    effect_id: int = None,
     topic_id: Optional[int] = None,
     reply_to_message_id: Optional[int] = None,
     account: str = None,
@@ -483,6 +484,18 @@ async def send_message(
     Args:
         chat_id: The ID or username of the chat.
         message: The message content to send.
+        entities: Formatting list in the shape `inspect_message` returns
+            (type/offset/length plus each kind's own fields). This is the ONLY
+            way to place a premium/custom emoji: `parse_mode` has no syntax for
+            one. `schedule_message` has always accepted this, so a message with
+            custom emoji could be queued for later and not sent now.
+
+            **`message` must be the `text_fidelity` value the entities came
+            with**: the offsets are UTF-16 units into exactly that string.
+            Anything that cannot be rebuilt faithfully refuses the whole call
+            rather than sending text with formatting silently dropped.
+        effect_id: A premium message effect, from `get_message_effect`. Telegram
+            requires Premium and refuses it otherwise.
         topic_id: Forum topic ID from `list_topics`. In a forum supergroup a
             message sent without this lands in General, not in the topic the
             conversation is in. Pass 1 for General explicitly.
@@ -500,6 +513,16 @@ async def send_message(
             (it can expire or be bought at any time).
     """
     try:
+        built_entities = rebuild_entities(entities, message)
+        if isinstance(built_entities, str):
+            return built_entities
+        if built_entities and parse_mode:
+            return (
+                "Give `entities` or `parse_mode`, not both: they are two ways to "
+                "describe the same formatting and Telegram applies only one. "
+                "Nothing was sent."
+            )
+
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
@@ -510,6 +533,8 @@ async def send_message(
             entity,
             message,
             parse_mode=parse_mode,
+            formatting_entities=built_entities,
+            message_effect_id=effect_id,
             reply_to=topic_reply_to(topic_id, reply_to_message_id),
         )
         # The id, because everything a caller might do next needs it: edit, react,
@@ -747,6 +772,7 @@ async def edit_message(
     message_id: int,
     new_text: str,
     parse_mode: Optional[str] = None,
+    entities: List[dict] = None,
     account: str = None,
 ) -> str:
     """
@@ -755,6 +781,11 @@ async def edit_message(
         chat_id: The ID or username of the chat.
         message_id: The ID of the message to edit.
         new_text: The replacement text.
+        entities: Formatting list in the shape `inspect_message` returns - the
+            only way to put a premium/custom emoji into an edit, since
+            `parse_mode` has no syntax for one. `new_text` must be the
+            `text_fidelity` value the entities came with; the offsets are UTF-16
+            units into exactly that string.
         parse_mode: Optional formatting mode — same values as send_message: 'md'/'markdown',
             'html', or 'rich'/'rich_markdown'/'rich_html' for full server-side formatting
             (tables, headings, formulas; REQUIRES Telegram Premium — without it nothing is
@@ -763,6 +794,16 @@ async def edit_message(
             default (Markdown), so **bold** in existing edits still renders.
     """
     try:
+        built_entities = rebuild_entities(entities, new_text)
+        if isinstance(built_entities, str):
+            return built_entities
+        if built_entities and parse_mode:
+            return (
+                "Give `entities` or `parse_mode`, not both: they are two ways to "
+                "describe the same formatting and Telegram applies only one. "
+                "Nothing was changed."
+            )
+
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
@@ -772,6 +813,10 @@ async def edit_message(
         # parser. Passing None unconditionally would turn previously formatted
         # edits into literal text.
         extra = {"parse_mode": parse_mode} if parse_mode is not None else {}
+        if built_entities:
+            # An explicit entity list IS the formatting; leaving the default
+            # parser on would have it re-read the text and fight them.
+            extra = {"parse_mode": None, "formatting_entities": built_entities}
         await cl.edit_message(entity, message_id, new_text, **extra)
         return f"Message {message_id} edited."
     except Exception as e:
@@ -988,6 +1033,8 @@ async def reply_to_message(
     message_id: int,
     text: str,
     parse_mode: Optional[str] = None,
+    entities: List[dict] = None,
+    effect_id: int = None,
     topic_id: Optional[int] = None,
     account: str = None,
 ) -> str:
@@ -997,6 +1044,10 @@ async def reply_to_message(
         chat_id: The chat ID or username.
         message_id: The message ID to reply to.
         text: The reply text.
+        entities: Formatting list in the shape `inspect_message` returns - the
+            only way to put a premium/custom emoji in a reply. `text` must be the
+            `text_fidelity` value the entities came with.
+        effect_id: A premium message effect, from `get_message_effect`.
         topic_id: The forum topic the message you are replying to lives in, from
             `list_topics`. Without it a reply to a message inside a topic is
             posted against the topic root instead, which puts it in the wrong
@@ -1011,6 +1062,16 @@ async def reply_to_message(
             sent and a structured telegram_premium_required result is returned).
     """
     try:
+        built_entities = rebuild_entities(entities, text)
+        if isinstance(built_entities, str):
+            return built_entities
+        if built_entities and parse_mode:
+            return (
+                "Give `entities` or `parse_mode`, not both: they are two ways to "
+                "describe the same formatting and Telegram applies only one. "
+                "Nothing was sent."
+            )
+
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
@@ -1020,6 +1081,8 @@ async def reply_to_message(
             text,
             reply_to=topic_reply_to(topic_id, message_id),
             parse_mode=parse_mode,
+            formatting_entities=built_entities,
+            message_effect_id=effect_id,
         )
         return f"Replied to message {message_id} in chat {chat_id}."
     except Exception as e:

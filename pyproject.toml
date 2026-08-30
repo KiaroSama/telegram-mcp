@@ -133,6 +133,7 @@ source = [
     "telegram_mcp.contact_sheet",
     "telegram_mcp.effect_catalog",
     "telegram_mcp.file_roots",
+    "telegram_mcp.entities",
     "telegram_mcp.forum",
     "telegram_mcp.log_setup",
     "telegram_mcp.handles",

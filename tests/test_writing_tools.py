@@ -56,7 +56,15 @@ class Recorder:
     async def send_read_acknowledge(self, entity):
         self.calls.append(("send_read_acknowledge", entity))
 
-    async def send_message(self, entity, text, reply_to=None, parse_mode=None):
+    async def send_message(
+        self,
+        entity,
+        text,
+        reply_to=None,
+        parse_mode=None,
+        formatting_entities=None,
+        message_effect_id=None,
+    ):
         self.calls.append(("send_message", entity, text, reply_to))
 
     async def forward_messages(self, to_entity, ids, from_entity):
