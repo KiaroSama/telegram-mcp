@@ -16,6 +16,7 @@ The rendering helpers these tools share — ``format_message_line``,
 and a helper cannot live in two places at once.
 """
 
+from telegram_mcp.forum import reply_target_of
 from telegram_mcp.paging import LIMITS, bounded, bounded_page, page_metadata
 from telegram_mcp.runtime import *
 from telegram_mcp.tools.messages import (
@@ -197,7 +198,9 @@ async def list_messages(
             grouped_id = getattr(msg, "grouped_id", None)
             if grouped_id is not None:
                 record["grouped_id"] = grouped_id
-            reply_to_id = getattr(msg.reply_to, "reply_to_msg_id", None) if msg.reply_to else None
+            # A topic post carries the topic ROOT in reply_to_msg_id, so reading
+            # that alone calls it a reply to a message nobody replied to.
+            topic_id, reply_to_id = reply_target_of(msg)
             if reply_to_id:
                 record["reply_to"] = reply_to_id
             reply_quote = get_reply_quote(msg)
@@ -283,10 +286,15 @@ async def get_message_context(
             reply_quote = get_reply_quote(msg)
             if reply_quote:
                 record["reply_quote"] = reply_quote
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
-                record["reply_to"] = msg.reply_to.reply_to_msg_id
+            topic_id, reply_to_id = reply_target_of(msg)
+            if topic_id:
+                record["topic_id"] = topic_id
+            if reply_to_id:
+                record["reply_to"] = reply_to_id
                 try:
-                    replied_msg = await cl.get_messages(chat, ids=msg.reply_to.reply_to_msg_id)
+                    # Fetching reply_to_msg_id raw fetched the TOPIC ROOT for a
+                    # topic post, and presented it as the message replied to.
+                    replied_msg = await cl.get_messages(chat, ids=reply_to_id)
                     if replied_msg:
                         replied_record = {
                             "sender": get_sender_name(replied_msg),
@@ -374,8 +382,11 @@ async def search_messages(
                 "date": msg.date,
                 "text": sanitize_user_content(msg.message),
             }
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
-                record["reply_to"] = msg.reply_to.reply_to_msg_id
+            topic_id, reply_to_id = reply_target_of(msg)
+            if topic_id:
+                record["topic_id"] = topic_id
+            if reply_to_id:
+                record["reply_to"] = reply_to_id
             reply_quote = get_reply_quote(msg)
             if reply_quote:
                 record["reply_quote"] = reply_quote
@@ -515,8 +526,11 @@ async def get_pinned_messages(chat_id: Union[int, str], account: str = None) -> 
                 "date": msg.date,
                 "text": sanitize_user_content(msg.message),
             }
-            if msg.reply_to and msg.reply_to.reply_to_msg_id:
-                record["reply_to"] = msg.reply_to.reply_to_msg_id
+            topic_id, reply_to_id = reply_target_of(msg)
+            if topic_id:
+                record["topic_id"] = topic_id
+            if reply_to_id:
+                record["reply_to"] = reply_to_id
             reply_quote = get_reply_quote(msg)
             if reply_quote:
                 record["reply_quote"] = reply_quote

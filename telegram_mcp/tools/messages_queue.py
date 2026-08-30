@@ -13,7 +13,7 @@ these dedicated per-queue calls.
 """
 
 from telegram_mcp.runtime import *
-from telegram_mcp.forum import topic_reply_to_request
+from telegram_mcp.forum import reply_target_of, topic_reply_to_request
 from telegram_mcp.tools.scheduled import (
     cancel_scheduled_message,
     list_scheduled_messages,
@@ -196,11 +196,12 @@ async def get_drafts(account: str = None) -> str:
                             else None
                         ),
                         "no_webpage": getattr(draft, "no_webpage", False),
-                        "reply_to_msg_id": (
-                            draft.reply_to.reply_to_msg_id
-                            if hasattr(draft, "reply_to") and draft.reply_to
-                            else None
-                        ),
+                        # Telegram keeps ONE draft per topic, and a draft in a
+                        # topic carries the topic root here - so this reported
+                        # every topic draft as a reply, and never said which
+                        # topic it was in.
+                        "topic_id": reply_target_of(draft)[0],
+                        "reply_to_msg_id": reply_target_of(draft)[1],
                     }
                     drafts_info.append(draft_data)
 
@@ -221,12 +222,18 @@ async def get_drafts(account: str = None) -> str:
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
-async def clear_draft(chat_id: Union[int, str], account: str = None) -> str:
+async def clear_draft(
+    chat_id: Union[int, str], topic_id: Optional[int] = None, account: str = None
+) -> str:
     """
-    Clear/delete a draft from a specific chat.
+    Clear/delete a draft from a specific chat, or from one forum topic.
 
     Args:
         chat_id: The chat ID or username to clear the draft from
+        topic_id: The forum topic whose draft to clear, from `list_topics`.
+            Telegram keeps ONE draft per topic: without this, a draft written
+            into a topic by `save_draft(topic_id=...)` could not be cleared at
+            all, because the call only ever reached General.
     """
     try:
         cl = get_client(account)
@@ -237,12 +244,14 @@ async def clear_draft(chat_id: Union[int, str], account: str = None) -> str:
             functions.messages.SaveDraftRequest(
                 peer=peer,
                 message="",
+                reply_to=topic_reply_to_request(topic_id),
             )
         )
 
-        return f"Draft cleared from chat {chat_id}."
+        where = f"chat {chat_id}" if topic_id is None else f"topic {topic_id} of chat {chat_id}"
+        return f"Draft cleared from {where}."
     except Exception as e:
-        return log_and_format_error("clear_draft", e, chat_id=chat_id)
+        return log_and_format_error("clear_draft", e, chat_id=chat_id, topic_id=topic_id)
 
 
 __all__ = [

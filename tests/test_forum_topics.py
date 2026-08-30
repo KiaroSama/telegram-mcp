@@ -173,3 +173,47 @@ def test_no_tool_builds_its_own_reply_to():
     ]
 
     assert offenders == [], f"{offenders} bypass telegram_mcp.forum"
+
+
+# --- the readers the first pass missed --------------------------------------
+
+
+def test_every_message_reader_separates_the_topic_from_the_reply():
+    """The first fix reached `message_to_dict` and `deep_message_dict` and left
+    six siblings reading `reply_to.reply_to_msg_id` raw - so `list_messages`,
+    `search_messages`, `get_pinned_messages`, `get_message_context`,
+    `format_message_line` and `get_drafts` all still called a topic post a reply
+    to a message nobody replied to.
+
+    `get_message_context` was the worst of them: it FETCHED that id, so the
+    "message replied to" it showed was the topic root.
+    """
+    import inspect
+
+    from telegram_mcp.tools import messages as messages_mod
+    from telegram_mcp.tools import messages_queue as queue_mod
+    from telegram_mcp.tools import messages_read as read_mod
+
+    for module in (read_mod, messages_mod, queue_mod):
+        source = inspect.getsource(module)
+        raw = [
+            line.strip()
+            for line in source.splitlines()
+            if ".reply_to.reply_to_msg_id" in line or 'reply_to, "reply_to_msg_id"' in line
+        ]
+        assert raw == [], f"{module.__name__} still reads reply_to_msg_id raw: {raw}"
+        assert "reply_target_of" in source, f"{module.__name__} does not use the shared rule"
+
+
+@pytest.mark.parametrize("tool_name", ["save_draft", "clear_draft"])
+def test_a_draft_can_be_written_and_cleared_in_the_same_topic(tool_name):
+    """Telegram keeps ONE draft per topic. `save_draft` could write into a topic
+    and `clear_draft` could only ever clear General, so a topic draft was
+    unreachable once written."""
+    import inspect
+
+    from telegram_mcp.tools import messages_queue as queue_mod
+
+    params = inspect.signature(getattr(queue_mod, tool_name)).parameters
+
+    assert "topic_id" in params, f"{tool_name} cannot address a forum topic"
