@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **180** |
+| MCP tools registered | **181** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -102,7 +102,7 @@ predicted.
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
-Added since, 165 → **180**, ported from the original project rather than merged (a
+Added since, 165 → **181**, ported from the original project rather than merged (a
 history rewrite here left the two with no merge base):
 
 | Capability | Tools | Module |
@@ -115,6 +115,32 @@ history rewrite here left the two with no merge base):
 | Editing a forum topic | `edit_forum_topic` | `tools/topics.py` |
 | Premium (custom-emoji) reactions | `send_reaction` and `react_to_story` take a `custom_emoji_id`; a message may carry several reactions at once. The read side already reported `custom:<id>` - only sending was missing. | `tools/messages_state.py`, `tools/stories.py` |
 | Premium emoji and effects in TEXT | `send_message`, `reply_to_message` and `edit_message` take `entities` (and the first two an `effect_id`). Until now only the scheduled pair accepted an entity list, so a message with custom emoji could be QUEUED and not sent. The rebuilder is `telegram_mcp/entities.py`, the write-side inverse of `describe_entities`. | `tools/messages.py`, `telegram_mcp/entities.py` |
+| Choosing an effect rather than copying one | `list_message_effects` pages the hour-cached catalogue `get_message_effect` already loads. An effect id could previously only be lifted off a message that already used it. | `tools/effects.py` |
+
+## The reads that could not be written back
+
+Seven surfaces where the server reported a fact and the tool that should act on
+it could not express that fact. Each is a *pair*, so each is listed by what the
+reader already said and what the writer gained:
+
+| The reader said | The writer could not | Now |
+|---|---|---|
+| `get_privacy_settings` reports twelve rule kinds | `set_privacy_settings` built three, and `account.setPrivacy` REPLACES — so the round trip its own docstring recommended silently deleted close-friends, premium, bot and chat rules | a `rules` list in exactly the reader's shape |
+| `inspect_sticker_set` / `get_sticker_sets` named a document | no `access_hash`, which `add_sticker_to_set` and its siblings require | both report it, as does `describe_media` |
+| five media senders confirmed a send | returned nothing addressable — no id to edit, react, pin or delete with | `telegram_mcp/sent.py`, which also reads the id out of the `Updates` a raw request answers with |
+| `channel_settings` writes six toggles | `get_full_chat` read none of them back | a `settings` block on `get_full_chat` |
+| `list_saved_tags` reports `custom_emoji_id` | `name_saved_tag` took an emoticon only, so a premium tag could not be named | a `custom_emoji_id` argument |
+| `describe_reply_quote` reports `reply_quote.text`/`.offset` | nothing could send a partial quote | `quote_text`/`quote_offset` on `reply_to_message` |
+| `get_message_effect` resolves an id | nothing listed the catalogue | `list_message_effects` |
+
+The quote work turned up a defect rather than only a gap. `forum.topic_reply_to`
+returns an `InputReplyToMessage` for the one case it exists to serve — *reply to
+message M inside topic T* — and both senders handed that to Telethon's friendly
+`send_message`, which runs `reply_to` through `utils.get_message_id`. That helper
+accepts an `int` or a `Message` and **raises `TypeError` on anything else**, so
+the combination the forum work was built for could not be sent at all. Anything
+richer than a bare message id now goes as a raw `SendMessageRequest`; a bare id
+still takes the friendly path.
 
 `copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
 copy. That is the only way premium emoji and media survive: rebuilding a message from

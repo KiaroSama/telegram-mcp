@@ -102,6 +102,12 @@ async def inspect_sticker_set(short_name: str, account: str = None) -> str:
             stickers.append(
                 {
                     "document_id": getattr(document, "id", None),
+                    # `add_sticker_to_set`, `remove_sticker_from_set` and
+                    # `move_sticker_in_set` all REQUIRE this beside the id, and
+                    # nothing in the package reported it - so all three were
+                    # uncallable, and this tool's docstring pointed at itself for
+                    # a value it did not publish.
+                    "access_hash": getattr(document, "access_hash", None),
                     "emoji": display_name(alt) if alt else None,
                     "mime_type": getattr(document, "mime_type", None),
                     "size_bytes": getattr(document, "size", None),

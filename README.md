@@ -896,7 +896,7 @@ below is read-only; the Actions row is not, and each entry there has a real effe
 | | Tools |
 |---|---|
 | Structured | `inspect_message`, `inspect_messages`, `get_media_details`, `inspect_buttons`, `list_scheduled_messages`, `list_disappearing_media` |
-| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect` |
+| Previews | `get_media_thumbnail`, `get_media_frames`, `get_custom_emoji`, `get_message_effect`, `list_message_effects` |
 | Visual (Windows) | `list_telegram_windows`, `get_telegram_screen`, `get_telegram_region`, `get_telegram_frames` |
 | Actions | `click_button`, `schedule_message`, `edit_scheduled_message`, `cancel_scheduled_message`, `send_disappearing_media`, `save_disappearing_media` |
 

@@ -21,6 +21,11 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 
 from telegram_mcp.runtime import *
 from telegram_mcp.entities import rebuild_entities
+import random
+
+from telethon import utils as telethon_utils
+from telethon.tl.types import InputReplyToMessage
+
 from telegram_mcp.forum import reply_target_of, topic_reply_to, topic_reply_to_request
 from telegram_mcp.text_fidelity import display_name
 
@@ -28,6 +33,7 @@ from telegram_mcp.text_fidelity import display_name
 # cannot drift. message_view imports nothing from here at module level -- its
 # single edge back is deferred (see message_view.describe_media_label).
 from telegram_mcp.message_view import channel_link_id
+from telegram_mcp.sent import sent_message_ids
 
 # A URL is a machine value: bounded so a hostile link cannot flood the context,
 # but far above display_name's prose default, which cuts real Mini App links in
@@ -416,12 +422,10 @@ async def _send_rich(
     reply_to_message_id: Optional[int] = None,
 ):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
-    import random
-
     if not await account_is_premium(cl):
         return premium_required_result("send_message")
     try:
-        await cl(
+        sent = await cl(
             functions.messages.SendMessageRequest(
                 peer=entity,
                 message=text,
@@ -439,7 +443,56 @@ async def _send_rich(
         if is_premium_rpc_error(e):
             return premium_required_result("send_message")
         raise
-    return json.dumps({"sent": True, "rich": True}, ensure_ascii=False)
+    # A raw request answers with Updates, not a Message, which is why this path
+    # alone still reported only "sent" while `send_message`'s plain path had
+    # carried the id for months.
+    ids = sent_message_ids(sent)
+    payload = {"sent": True, "rich": True}
+    if ids:
+        payload["message_id"] = ids[0]
+    return json.dumps(payload, ensure_ascii=False)
+
+
+async def _send_text(cl, entity, text, parse_mode, built_entities, effect_id, reply_target):
+    """Send plain/parsed text, routed by what the reply target needs.
+
+    Telethon's friendly `send_message` puts `reply_to` through
+    `utils.get_message_id`, which takes an int or a Message and raises
+    `TypeError: Invalid message type` on anything else. So an `InputReplyToMessage`
+    -- the only way to say "reply to message M *inside topic T*", and the only
+    way to quote a span -- cannot go through it at all. Those cases go as a raw
+    `SendMessageRequest`, which is what the field was designed for.
+
+    A bare id still takes the friendly path: it returns a `Message`, handles
+    parse modes server-side, and is the overwhelmingly common case.
+    """
+    if not isinstance(reply_target, InputReplyToMessage):
+        return await cl.send_message(
+            entity,
+            text,
+            parse_mode=parse_mode,
+            formatting_entities=built_entities,
+            message_effect_id=effect_id,
+            reply_to=reply_target,
+        )
+
+    # The raw request has no parse_mode: it takes entities only. Parsing here is
+    # what the friendly method would have done a moment later anyway.
+    if parse_mode and not built_entities:
+        parser = telethon_utils.sanitize_parse_mode(parse_mode)
+        if parser:
+            text, built_entities = parser.parse(text)
+
+    return await cl(
+        functions.messages.SendMessageRequest(
+            peer=entity,
+            message=text,
+            random_id=random.randint(0, 2**62),
+            reply_to=reply_target,
+            entities=built_entities or None,
+            effect=effect_id,
+        )
+    )
 
 
 async def _edit_rich(cl, entity, message_id: int, text: str, parse_mode: str):
@@ -529,22 +582,23 @@ async def send_message(
             return await _send_rich(
                 cl, entity, message, parse_mode.lower(), topic_id, reply_to_message_id
             )
-        sent = await cl.send_message(
+        sent = await _send_text(
+            cl,
             entity,
             message,
-            parse_mode=parse_mode,
-            formatting_entities=built_entities,
-            message_effect_id=effect_id,
-            reply_to=topic_reply_to(topic_id, reply_to_message_id),
+            parse_mode,
+            built_entities,
+            effect_id,
+            topic_reply_to(topic_id, reply_to_message_id),
         )
         # The id, because everything a caller might do next needs it: edit, react,
         # pin, forward, delete. Returning only "sent" leaves an agent holding a
         # message it cannot address.
-        message_id = getattr(sent, "id", None)
-        if message_id is None:
+        ids = sent_message_ids(sent)
+        if not ids:
             return "Message sent successfully."
         return format_tool_result(
-            [{"message_id": message_id, "chat_id": str(chat_id)}], {"sent": True}
+            [{"message_id": ids[0], "chat_id": str(chat_id)}], {"sent": True}
         )
     except Exception as e:
         return log_and_format_error("send_message", e, chat_id=chat_id, topic_id=topic_id)
@@ -1036,6 +1090,8 @@ async def reply_to_message(
     entities: List[dict] = None,
     effect_id: int = None,
     topic_id: Optional[int] = None,
+    quote_text: Optional[str] = None,
+    quote_offset: Optional[int] = None,
     account: str = None,
 ) -> str:
     """
@@ -1056,6 +1112,14 @@ async def reply_to_message(
             To post a NEW message in a topic rather than reply to one, use
             `send_message` with `topic_id` - passing a topic id here as the
             message id happens to work and is not what this argument means.
+        quote_text: Reply to a SPAN of the message rather than the whole of it -
+            the partial quote `inspect_message` reports as `reply_quote.text`.
+            Must be an exact substring of the replied-to message; Telegram
+            rejects a fragment it cannot find.
+        quote_offset: Where that span starts, as `reply_quote.offset` reports it
+            (a UTF-16 code-unit index into the replied-to message, not into
+            `text`). Needed when the fragment appears more than once; omit and
+            Telegram locates it itself.
         parse_mode: Optional formatting mode — same values as send_message: 'md'/'markdown',
             'html', or 'rich'/'rich_markdown'/'rich_html' for full server-side formatting
             (tables, headings, formulas; REQUIRES Telegram Premium — without it nothing is
@@ -1076,15 +1140,22 @@ async def reply_to_message(
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             return await _send_rich(cl, entity, text, parse_mode.lower(), topic_id, message_id)
-        await cl.send_message(
-            entity,
-            text,
-            reply_to=topic_reply_to(topic_id, message_id),
-            parse_mode=parse_mode,
-            formatting_entities=built_entities,
-            message_effect_id=effect_id,
+        # A quote needs the TL type even without a topic: it carries fields a bare
+        # message id has nowhere to put.
+        target = (
+            topic_reply_to_request(topic_id, message_id, quote_text, quote_offset)
+            if quote_text
+            else topic_reply_to(topic_id, message_id)
         )
-        return f"Replied to message {message_id} in chat {chat_id}."
+        sent = await _send_text(cl, entity, text, parse_mode, built_entities, effect_id, target)
+        ids = sent_message_ids(sent)
+        note = f"Replied to message {message_id} in chat {chat_id}."
+        if not ids:
+            return note
+        return format_tool_result(
+            [{"message_id": ids[0], "chat_id": str(chat_id)}],
+            {"sent": True, "replied_to": message_id, "detail": note},
+        )
     except Exception as e:
         return log_and_format_error(
             "reply_to_message", e, chat_id=chat_id, message_id=message_id, text=text

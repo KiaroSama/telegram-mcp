@@ -547,6 +547,12 @@ def describe_media(msg) -> Optional[dict[str, Any]]:
         document_id = getattr(document, "id", None)
         if document_id is not None:
             info["document_id"] = document_id
+            # A document id alone addresses nothing: `InputDocument` needs the
+            # access hash beside it, and the sticker write tools take both.
+            # `get_media_details`'s docstring already claimed to report this.
+            access_hash = getattr(document, "access_hash", None)
+            if access_hash is not None:
+                info["access_hash"] = access_hash
         set_name = _sticker_set_name(document)
         if set_name:
             info["sticker_set"] = set_name

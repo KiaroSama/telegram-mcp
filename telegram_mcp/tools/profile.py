@@ -160,6 +160,67 @@ _PRIVACY_RULE_NAMES = {
 }
 
 
+# The same table read backwards. Every kind `get_privacy_settings` can REPORT
+# has an InputPrivacyValue counterpart, so a full round trip is possible - and
+# without this it was not: the writer built only allow/disallow-users plus a base
+# policy, while `account.setPrivacy` REPLACES. Reading "Contacts, plus close
+# friends, except Bob" and passing back what the tool could express silently
+# deleted the close-friends rule, permanently and with no warning.
+_PRIVACY_INPUT_RULES = {
+    "everyone_allowed": "InputPrivacyValueAllowAll",
+    "contacts_allowed": "InputPrivacyValueAllowContacts",
+    "close_friends_allowed": "InputPrivacyValueAllowCloseFriends",
+    "premium_allowed": "InputPrivacyValueAllowPremium",
+    "everyone_disallowed": "InputPrivacyValueDisallowAll",
+    "contacts_disallowed": "InputPrivacyValueDisallowContacts",
+    "users_allowed": "InputPrivacyValueAllowUsers",
+    "users_disallowed": "InputPrivacyValueDisallowUsers",
+    "chats_allowed": "InputPrivacyValueAllowChatParticipants",
+    "chats_disallowed": "InputPrivacyValueDisallowChatParticipants",
+    "bots_allowed": "InputPrivacyValueAllowBots",
+    "bots_disallowed": "InputPrivacyValueDisallowBots",
+}
+
+
+async def _rules_from_described(described, cl, telethon_utils, tl_types):
+    """`(input_rules, error)` from what `get_privacy_settings` reported.
+
+    Order is preserved because Telegram applies the first matching rule: moving a
+    base policy ahead of its own exceptions makes it swallow them.
+    """
+    built = []
+    for index, entry in enumerate(described or []):
+        if not isinstance(entry, dict):
+            return None, f"Error: rules[{index}] is not an object; no privacy rule was changed."
+        name = entry.get("rule")
+        class_name = _PRIVACY_INPUT_RULES.get(name)
+        if class_name is None:
+            return None, (
+                f"Error: rules[{index}] names {name!r}, which is not a rule kind this "
+                f"account can be given. Valid kinds: {', '.join(sorted(_PRIVACY_INPUT_RULES))}."
+            )
+        rule_class = getattr(tl_types, class_name)
+        if name in ("users_allowed", "users_disallowed"):
+            resolved = []
+            for identifier in entry.get("users") or []:
+                try:
+                    entity = await resolve_entity(identifier, cl)
+                    resolved.append(telethon_utils.get_input_user(entity))
+                except Exception as error:
+                    return None, (
+                        f"Error: could not resolve {identifier!r} in rules[{index}] "
+                        f"({type(error).__name__}); no privacy rule was changed."
+                    )
+            built.append(rule_class(users=resolved))
+        elif name in ("chats_allowed", "chats_disallowed"):
+            built.append(rule_class(chats=[int(c) for c in entry.get("chats") or []]))
+        else:
+            built.append(rule_class())
+    if not built:
+        return None, "Error: rules was empty; account.setPrivacy would clear every rule."
+    return built, None
+
+
 def _describe_privacy_rule(rule) -> dict:
     """One answering rule as data, rather than as `str(TLObject)`."""
     name = type(rule).__name__
@@ -229,6 +290,7 @@ async def set_privacy_settings(
     allow_users: Optional[List[Union[int, str]]] = None,
     disallow_users: Optional[List[Union[int, str]]] = None,
     base_policy: Optional[str] = None,
+    rules: Optional[List[dict]] = None,
     account: str = None,
 ) -> str:
     """
@@ -248,8 +310,21 @@ async def set_privacy_settings(
         allow_users: Users allowed regardless of base_policy. Exceptions are sent
             ahead of the base rule, which is the order Telegram applies them in.
         disallow_users: Users denied regardless of base_policy.
-        base_policy: Required. 'everyone', 'contacts' or 'nobody' -- who the
-            setting is visible to before the exception lists are applied.
+        base_policy: Required unless `rules` is given. 'everyone', 'contacts' or
+            'nobody' -- who the setting is visible to before the exception lists
+            are applied.
+        rules: The complete rule list, in exactly the shape `get_privacy_settings`
+            returns it: `[{"rule": "close_friends_allowed"}, {"rule":
+            "users_disallowed", "users": [123]}, ...]`, in the order Telegram
+            applies them. Supplying this sends those rules verbatim and ignores
+            the three arguments above.
+
+            **This is the only way to adjust a setting without destroying part of
+            it.** `allow_users`/`disallow_users`/`base_policy` can express three
+            of the twelve rule kinds Telegram has; an account whose Last Seen is
+            "contacts, plus close friends, except Bob" could be READ in full and
+            not written back, so a round trip through this tool silently deleted
+            the close-friends, premium, bot and chat-participant rules.
     """
     try:
         cl = get_client(account)
@@ -263,15 +338,15 @@ async def set_privacy_settings(
                 f"Error: Unsupported privacy key '{key}'. Supported keys: "
                 f"{', '.join(_PRIVACY_KEYS)}."
             )
-        if base_policy is None:
+        if base_policy is None and not rules:
             return (
                 "Error: base_policy is required. account.setPrivacy replaces the whole "
                 f"rule set for '{key}', so leaving it out would silently pick one. Choose "
                 f"{', '.join(_PRIVACY_BASE_POLICIES)}, or read the current rules with "
                 "get_privacy_settings and pass them back explicitly."
             )
-        policy = str(base_policy).strip().lower()
-        if policy not in _PRIVACY_BASE_POLICIES:
+        policy = str(base_policy).strip().lower() if base_policy is not None else None
+        if policy is not None and policy not in _PRIVACY_BASE_POLICIES:
             return (
                 f"Error: Unknown base_policy '{base_policy}'. Valid values: "
                 f"{', '.join(_PRIVACY_BASE_POLICIES)}."
@@ -306,6 +381,20 @@ async def set_privacy_settings(
                         f"({type(error).__name__}); no privacy rule was changed."
                     )
             return resolved, None
+
+        if rules:
+            built, error = await _rules_from_described(rules, cl, telethon_utils, tl_types)
+            if error:
+                return error
+            await cl(
+                functions.account.SetPrivacyRequest(
+                    key=getattr(tl_types, _PRIVACY_KEYS[key])(), rules=built
+                )
+            )
+            return format_tool_result(
+                [{"key": key, "rules": [r.get("rule") for r in rules]}],
+                {"replaced": True, "round_tripped": True},
+            )
 
         rules = []
         if allow_list:

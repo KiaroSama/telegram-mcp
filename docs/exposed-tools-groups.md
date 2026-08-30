@@ -1,7 +1,9 @@
 # Should `TELEGRAM_EXPOSED_TOOLS` be able to name a group?
 
 A design spike, not a proposal to build. Measured against commit `2f143e6`,
-2026-08-30, when the server registered **180** tools.
+2026-08-30, when the server registered **180** tools. The surface has grown
+since; the counts below are a snapshot, and the scope note says how to
+re-derive them.
 
 `TELEGRAM_EXPOSED_TOOLS` is the only lever an operator has for narrowing what an
 agent can do with their Telegram account. Its grammar is

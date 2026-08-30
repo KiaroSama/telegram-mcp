@@ -65,6 +65,9 @@ LIMITS: dict[str, int] = {
     "get_photo_sheet": 24,
     "list_disappearing_media": 200,
     "get_gif_search": 50,
+    # Already in memory: the whole catalogue is cached for an hour, so the ceiling
+    # is what a caller can read, not what a fetch costs.
+    "list_message_effects": 200,
     # Pending incoming bursts held in memory, not fetched from Telegram.
     "wait_for_new_message": 100,
 }

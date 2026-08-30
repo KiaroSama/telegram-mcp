@@ -147,6 +147,7 @@ source = [
     "telegram_mcp.runner",
     "telegram_mcp.runtime",
     "telegram_mcp.safe_log",
+    "telegram_mcp.sent",
     "telegram_mcp.settings",
     "telegram_mcp.singleton",
     "telegram_mcp.text_fidelity",

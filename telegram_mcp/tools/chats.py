@@ -409,6 +409,13 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
     account is actually waiting out an interval. Neither key appears for a chat
     that cannot have slow mode.
 
+    For a channel or supergroup, `settings` reports the toggles the
+    `set_join_to_send`, `set_join_request`, `set_prehistory_hidden`,
+    `set_participants_hidden`, `set_signatures` and `set_view_forum_as_messages`
+    tools write -- so a setting can be checked before it is changed and confirmed
+    afterwards. The key is absent for a basic group, which has none of them;
+    `view_forum_as_messages` is absent unless the chat is a forum.
+
     Args:
         chat_id: The channel/group username (without @) or ID.
 
@@ -470,6 +477,34 @@ async def get_full_chat(chat_id: Union[int, str], account: str = None) -> str:
                 result["slowmode_next_send_date"] = (
                     next_send.isoformat() if hasattr(next_send, "isoformat") else next_send
                 )
+
+        # The six toggles in `channel_settings`, which could all be SET and none of
+        # which could be read. A caller could not check a setting before changing
+        # it, could not confirm a change took, and could not put one back the way
+        # it was. Three live on the Channel and three on the full object, which is
+        # part of why they were missed.
+        #
+        # Only for channels and supergroups: a basic group has neither object, and
+        # reporting `false` for a setting it cannot have would read as "off" rather
+        # than "not applicable". Within a channel the flags are `flags.N?true`, so
+        # Telethon gives None for absent - which here genuinely does mean off.
+        if isinstance(chat, Channel):
+            settings = {
+                "join_to_send": bool(getattr(chat, "join_to_send", None)),
+                "join_request": bool(getattr(chat, "join_request", None)),
+                "hidden_prehistory": bool(getattr(full_chat, "hidden_prehistory", None)),
+                "participants_hidden": bool(getattr(full_chat, "participants_hidden", None)),
+                "signatures": bool(getattr(chat, "signatures", None)),
+                "signature_profiles": bool(getattr(chat, "signature_profiles", None)),
+                "forum": bool(getattr(chat, "forum", None)),
+            }
+            # Meaningless off a forum, and `set_view_forum_as_messages` refuses
+            # there too - so its absence matches what can actually be set.
+            if settings["forum"]:
+                settings["view_forum_as_messages"] = bool(
+                    getattr(full_chat, "view_forum_as_messages", None)
+                )
+            result["settings"] = settings
 
         return json.dumps(result, ensure_ascii=False)
     except Exception as e:

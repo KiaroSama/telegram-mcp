@@ -60,19 +60,33 @@ def topic_reply_to(
 def topic_reply_to_request(
     topic_id: Optional[int] = None,
     reply_to_message_id: Optional[int] = None,
+    quote_text: Optional[str] = None,
+    quote_offset: Optional[int] = None,
 ) -> Optional[InputReplyToMessage]:
     """The same decision, as the TL type a raw request needs.
 
     `functions.messages.SendMessageRequest` and friends take `reply_to` as an
     `InputReplyTo`, never a bare int - passing one there raises inside Telethon's
     serializer rather than being cast.
+
+    `quote_text`/`quote_offset` select a SPAN of the replied-to message rather
+    than the whole of it - the partial quote `describe_reply_quote` has always
+    been able to read and nothing could write. The offset is Telegram's UTF-16
+    code-unit index of the fragment inside the message being replied to, which is
+    exactly what that reader reports as `offset`.
     """
     target = topic_reply_to(topic_id, reply_to_message_id)
     if target is None:
         return None
-    if isinstance(target, InputReplyToMessage):
-        return target
-    return InputReplyToMessage(reply_to_msg_id=target)
+    if not isinstance(target, InputReplyToMessage):
+        target = InputReplyToMessage(reply_to_msg_id=target)
+    if quote_text:
+        target.quote_text = quote_text
+        # 0 is a real offset (the quote starts at the beginning), so this is
+        # checked against None rather than for truth.
+        if quote_offset is not None:
+            target.quote_offset = quote_offset
+    return target
 
 
 def reply_target_of(msg) -> tuple:

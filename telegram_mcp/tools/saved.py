@@ -20,7 +20,7 @@ from telegram_mcp.runtime import *
 from telegram_mcp.message_view import describe_media_label, display_name, display_text
 
 from telethon import functions
-from telethon.tl.types import InputPeerSelf, ReactionEmoji
+from telethon.tl.types import InputPeerSelf, ReactionCustomEmoji, ReactionEmoji
 
 _UNTRUSTED = (
     "Saved content is user-generated: it is whatever was forwarded or written into this "
@@ -236,26 +236,58 @@ async def list_saved_tags(account: str = None) -> str:
     annotations=ToolAnnotations(title="Name Saved Tag", openWorldHint=True, readOnlyHint=False)
 )
 @with_account(readonly=False)
-async def name_saved_tag(emoji: str, title: str = None, account: str = None) -> str:
+async def name_saved_tag(
+    emoji: str = None,
+    title: str = None,
+    custom_emoji_id: Union[int, str] = None,
+    account: str = None,
+) -> str:
     """
     Give a Saved Messages reaction tag a name, or clear its name.
 
     Args:
-        emoji: The reaction the tag is built on, e.g. "thumbs up".
+        emoji: The standard reaction the tag is built on, e.g. "thumbs up".
         title: The name to give it. Omitted or empty clears the existing name.
+        custom_emoji_id: For a tag built on a premium (custom) emoji, the
+            document id `list_saved_tags` reports as `custom_emoji_id`. Give this
+            instead of `emoji` -- a custom-emoji tag has no emoticon to name it
+            by, so it could be LISTED and never named.
 
     Note: the title is stored on the account and shown wherever the tag appears.
     """
     try:
+        if emoji and custom_emoji_id is not None:
+            return (
+                "Error: give either emoji or custom_emoji_id, not both -- a tag is built "
+                "on one reaction and naming names exactly one tag."
+            )
+        if custom_emoji_id is not None:
+            try:
+                reaction = ReactionCustomEmoji(document_id=int(custom_emoji_id))
+            except (TypeError, ValueError):
+                return (
+                    f"Error: custom_emoji_id {custom_emoji_id!r} is not a document id. "
+                    "Use the value list_saved_tags reports as custom_emoji_id."
+                )
+            named = {"custom_emoji_id": int(custom_emoji_id)}
+        elif emoji:
+            reaction = ReactionEmoji(emoticon=str(emoji))
+            named = {"emoji": display_name(str(emoji))}
+        else:
+            return (
+                "Error: no tag named. Give emoji for a standard reaction, or "
+                "custom_emoji_id for a premium one."
+            )
+
         cl = get_client(account)
         await ensure_connected(cl)
         await cl(
             functions.messages.UpdateSavedReactionTagRequest(
-                reaction=ReactionEmoji(emoticon=str(emoji)), title=title or None
+                reaction=reaction, title=title or None
             )
         )
         return format_tool_result(
-            [{"emoji": display_name(str(emoji)), "title": title or None, "cleared": not title}],
+            [dict(named, title=title or None, cleared=not title)],
             {"updated": True},
         )
     except Exception as e:
