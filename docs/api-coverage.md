@@ -114,6 +114,7 @@ history rewrite here left the two with no merge base):
 | Closing the one-way pairs | `delete_story`, `close_poll`, `get_bot_commands` | `tools/stories.py`, `tools/polls.py`, `tools/profile.py` |
 | Editing a forum topic | `edit_forum_topic` | `tools/topics.py` |
 | Premium (custom-emoji) reactions | `send_reaction` and `react_to_story` take a `custom_emoji_id`; a message may carry several reactions at once. The read side already reported `custom:<id>` - only sending was missing. | `tools/messages_state.py`, `tools/stories.py` |
+| Premium emoji and effects in TEXT | `send_message`, `reply_to_message` and `edit_message` take `entities` (and the first two an `effect_id`). Until now only the scheduled pair accepted an entity list, so a message with custom emoji could be QUEUED and not sent. The rebuilder is `telegram_mcp/entities.py`, the write-side inverse of `describe_entities`. | `tools/messages.py`, `telegram_mcp/entities.py` |
 
 `copy_message` is a forward with `drop_author=True`, which means the SERVER makes the
 copy. That is the only way premium emoji and media survive: rebuilding a message from
@@ -247,7 +248,7 @@ The settings an operator actually reaches for are all missing:
 | Discussion linking | `SetDiscussionGroup`, `GetGroupsForDiscussion` |
 | Moderation | `ToggleAntiSpam`, `ReportAntiSpamFalsePositive`, `SetBoostsToUnblockRestrictions` |
 | Appearance | `UpdateColor`, `UpdateEmojiStatus`, `SetStickers`, `SetEmojiStickers` |
-| Forum topics | ~~`EditForumTopic`~~ **built**, as a hand-written wire encoder beside the ones this module already had for `GetForumTopics` and `CreateForumTopic` - Telethon 1.44 ships none of the three. Still open: `UpdatePinnedForumTopic`. |
+| Forum topics | ~~`EditForumTopic`~~ **built**, using Telethon's own request. It ships all three under `functions.messages` - looking in `functions.channels` is what made them seem absent, and the `channels.*` forms found there are RETIRED (they take an InputChannel; the live ones take an InputPeer). Telegram still serves the retired ids, so the hand-rolled encoders this module carried looked correct. Still open: `UpdatePinnedForumTopic`. |
 | Structural | `ConvertToGigagroup`, `EditLocation`, `DeleteChannel`, `UpdatePaidMessagesPrice`, `ToggleAutotranslation` |
 
 Self-contained, no new dependency, and every one is a single request. `DeleteChannel`
