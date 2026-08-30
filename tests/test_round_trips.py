@@ -205,6 +205,92 @@ def test_get_full_chat_reads_back_every_toggle_channel_settings_writes():
         assert f'"{key}"' in read_source, f"{key} is written but never read back"
 
 
+@pytest.mark.asyncio
+async def test_the_toggles_arrive_with_their_real_values(monkeypatch):
+    """The source check above proves the keys are mentioned. This proves the
+    values come from the right object - three live on the Channel and three on
+    the full object, which is part of why they were all missed at once."""
+    from telegram_mcp.tools import chats as chats_mod
+
+    channel = types.Channel(
+        id=555,
+        title="A Forum",
+        photo=None,
+        date=None,
+        megagroup=True,
+        forum=True,
+        join_to_send=True,
+        signatures=True,
+        signature_profiles=None,
+    )
+    full = SimpleNamespace(
+        chats=[channel],
+        full_chat=SimpleNamespace(
+            about="",
+            participants_count=3,
+            linked_chat_id=None,
+            hidden_prehistory=True,
+            participants_hidden=None,
+            view_forum_as_messages=True,
+        ),
+    )
+
+    async def _resolve(chat_id, cl=None, account=None):
+        return channel
+
+    async def _connected(cl=None):
+        return None
+
+    monkeypatch.setattr(chats_mod, "get_client", lambda account=None: Recorder(answer=full))
+    monkeypatch.setattr(chats_mod, "resolve_entity", _resolve)
+    monkeypatch.setattr(chats_mod, "ensure_connected", _connected)
+
+    import json
+
+    settings = json.loads(await chats_mod.get_full_chat(-100555))["settings"]
+
+    assert settings["join_to_send"] is True, "read off the Channel"
+    assert settings["hidden_prehistory"] is True, "read off the full object"
+    assert settings["signatures"] is True and settings["signature_profiles"] is False
+    # Telegram sends `flags.N?true`, so absent arrives as None and means off.
+    assert settings["participants_hidden"] is False
+    assert settings["view_forum_as_messages"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_basic_group_reports_no_settings_at_all(monkeypatch):
+    """Reporting `false` for a toggle a basic group cannot have would read as
+    "off" rather than "not applicable"."""
+    from telegram_mcp.tools import chats as chats_mod
+
+    chat = types.Chat(
+        id=77,
+        title="A Group",
+        photo=None,
+        participants_count=3,
+        date=None,
+        version=1,
+    )
+    full = SimpleNamespace(
+        chats=[chat],
+        full_chat=SimpleNamespace(about="", participants=None, linked_chat_id=None),
+    )
+
+    async def _resolve(chat_id, cl=None, account=None):
+        return chat
+
+    async def _connected(cl=None):
+        return None
+
+    monkeypatch.setattr(chats_mod, "get_client", lambda account=None: Recorder(answer=full))
+    monkeypatch.setattr(chats_mod, "resolve_entity", _resolve)
+    monkeypatch.setattr(chats_mod, "ensure_connected", _connected)
+
+    import json
+
+    assert "settings" not in json.loads(await chats_mod.get_full_chat(-77))
+
+
 # --- naming a premium tag ----------------------------------------------------
 
 

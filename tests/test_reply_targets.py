@@ -133,7 +133,9 @@ def test_a_zero_offset_is_kept():
 
 @pytest.mark.asyncio
 async def test_replying_to_a_span_sends_the_quote(wired):
-    await messages_mod.reply_to_message(-100, 55, "about that", quote_text="the bit", quote_offset=4)
+    await messages_mod.reply_to_message(
+        -100, 55, "about that", quote_text="the bit", quote_offset=4
+    )
 
     request = wired.raw[-1]
     assert request.reply_to.reply_to_msg_id == 55
