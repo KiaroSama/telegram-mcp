@@ -378,12 +378,31 @@ def test_win32_libraries_are_cached_singletons():
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
+def _window_with_a_client_area():
+    """A Telegram window that currently HAS a client area, or a skip.
+
+    `list_windows()` returning something is not the same as that something being
+    drawable. Telegram Desktop enumerates transient windows too - a notification
+    toast was the second entry when this was written - and a minimised or
+    mid-animation window reports a client area of 0x0. Both tests below took
+    `windows[0]` and asserted on it, so a toast arriving at the wrong moment
+    failed a suite that had passed minutes earlier on the same commit.
+
+    A precondition is checked, not asserted. These tests are about what
+    `_client_geometry` reports for a real window, not about whether one happened
+    to be drawable while they ran.
+    """
+    for window in capture.list_windows():
+        width, height, _rect = capture._client_geometry(window.hwnd)
+        if width > 0 and height > 0:
+            return window
+    pytest.skip("no Telegram Desktop window with a client area is open right now")
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_client_geometry_is_inside_the_window_rectangle():
     """client_only must report the client area, not the window rectangle."""
-    windows = capture.list_windows()
-    if not windows:
-        pytest.skip("no Telegram Desktop window is open")
-    window = windows[0]
+    window = _window_with_a_client_area()
 
     width, height, screen_rect = capture._client_geometry(window.hwnd)
     assert 0 < width <= window.width
@@ -397,8 +416,9 @@ def test_client_geometry_is_inside_the_window_rectangle():
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows-only")
 def test_client_only_capture_matches_the_client_rectangle():
-    if not capture.list_windows():
-        pytest.skip("no Telegram Desktop window is open")
+    # Same precondition: `capture_window` picks its own target, so this asserts
+    # the machine has a drawable one before asking for a picture of it.
+    _window_with_a_client_area()
 
     full, window, full_meta = capture.capture_window(client_only=False)
     client, _window, client_meta = capture.capture_window(client_only=True)
