@@ -488,11 +488,24 @@ function Read-Answer {
 # --- prompts -----------------------------------------------------------------
 
 function Read-Confirmation {
-    param([Parameter(Mandatory)] [string] $Question)
-    $default = Get-Painted -Text '[Y/n]' -ColorName 'Green'
+    <#
+      Enter means yes, which is right for the ordinary "carry on?" question.
+
+      -DefaultNo inverts that for a step with a cost the person may not have
+      read yet. Someone pressing Enter through a flow is saying "the usual
+      thing"; adding a second device to their Telegram account is not the usual
+      thing, so it has to be typed.
+    #>
+    param(
+        [Parameter(Mandatory)] [string] $Question,
+        [switch] $DefaultNo
+    )
+    $hint = if ($DefaultNo) { '[y/N]' } else { '[Y/n]' }
+    $default = Get-Painted -Text $hint -ColorName 'Green'
     $answer = (Read-Host "$(Get-Painted -Text $Question -ColorName 'Bold') $default").Trim()
     if ($answer -ieq 'exit') { $script:Quitting = $true; return $false }
-    return ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$')
+    if ([string]::IsNullOrWhiteSpace($answer)) { return -not $DefaultNo }
+    return ($answer -match '^(y|yes)$')
 }
 
 function ConvertTo-Label {
@@ -636,6 +649,73 @@ function Invoke-SessionGenerator {
     }
 }
 
+function Invoke-SecretChatLogin {
+    <#
+      The second sign-in, offered where the first one just happened.
+
+      Secret chats do not run on Telethon - it never implemented MTProto 2.0 -
+      so they run on TDLib, Telegram's own library. TDLib cannot read a Telethon
+      session and offers no way to import one, so this is genuinely a second
+      login rather than a step that could have been folded into the first. It
+      appears as another device in the account's session list.
+
+      Offered, never assumed: most accounts never open a secret chat, and the
+      device is a real cost. Declining loses nothing - the same script can be
+      run any time afterwards, and everything else about the account already
+      works.
+    #>
+    param([Parameter(Mandatory)] [string] $Label)
+
+    $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
+
+    # Ask the code which prerequisite is missing rather than guessing: the
+    # library is an optional extra, and "not installed" and "not signed in" are
+    # fixed in completely different places.
+    $probe = 'from telegram_mcp.tdlib import tdjson_status; print("yes" if tdjson_status()["available"] else "no")'
+    Push-Location -LiteralPath $PSScriptRoot
+    try { $available = (& $python -c $probe 2>$null | Select-Object -Last 1) }
+    catch { $available = 'no' }
+    finally { Pop-Location }
+
+    Write-Host ''
+    if ($available -ne 'yes') {
+        Write-Hint 'Secret chats also need Telegram''s own library, which is not installed here.'
+        Write-Hint '  Install:  uv pip install tdjson'
+        Write-Hint "  Sign in:  python scripts\secret_chat_login.py $Label"
+        return
+    }
+
+    Write-Host 'Secret chats need a SECOND sign-in for this account.' -ForegroundColor Yellow
+    Write-Hint 'They run on TDLib, which cannot read a Telethon session and has no way to'
+    Write-Hint 'import one - so this is another code, and another device on the account.'
+    Write-Hint "Skip it freely: run scripts\secret_chat_login.py $Label whenever you want it."
+    Write-Host ''
+    if (-not (Read-Confirmation 'Sign in for secret chats now?' -DefaultNo)) {
+        Write-Host "Skipped. '$Label' works for everything except secret chats."
+        return
+    }
+
+    $code = $null
+    Push-Location -LiteralPath $PSScriptRoot
+    try {
+        & $python (Join-Path 'scripts' 'secret_chat_login.py') $Label
+        $code = $LASTEXITCODE
+    }
+    finally { Pop-Location }
+
+    Write-Host ''
+    if ($code -eq 0) {
+        Write-Host "Secret chats are ready for '$Label'." -ForegroundColor Green
+        Write-Log "TDLib login completed for '$Label'"
+    }
+    else {
+        Write-Failure 'That sign-in did not finish, so secret chats are not available yet.'
+        Write-Hint "Nothing else was affected - '$Label' still works for every other tool."
+        Write-Hint "Run scripts\secret_chat_login.py $Label to try again."
+    }
+}
+
 function Test-SessionString {
     <#
       Ask Telethon whether this parses as a session, rather than guessing from its
@@ -740,6 +820,9 @@ function Add-Account {
         Write-Host 'You now have more than one account, so write tools will require' -ForegroundColor Yellow
         Write-Host "account=<label> from here on - for example account=$label." -ForegroundColor Yellow
     }
+
+    # Last, because the account is already usable without it.
+    Invoke-SecretChatLogin -Label $label
 }
 
 function Remove-Account {

@@ -400,7 +400,7 @@ to their own location, so they work from any directory and from a shortcut.
 | Script | What it does |
 |---|---|
 | `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Keeps a timestamped log per run by default, in `logs/` inside the private state directory - never beside the source - recording only this server's own diagnostics. Pass `-NoLogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG=off`) for a run that leaves nothing on disk. |
-| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. |
+| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. Adding one also offers the second sign-in secret chats need (see below). |
 
 `Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of
 `.env` byte-for-byte alone — comments, ordering and every key it does not recognise.
@@ -455,6 +455,25 @@ that is the value tools take as `account=`. The substitution is not cosmetic: th
 becomes part of an environment variable *name*, and python-dotenv refuses to parse a key
 containing a space — it warns and drops the line, so a literal space would save an
 account that then never loads.
+
+### Two logins, one flow
+
+Adding an account signs it in to Telethon, which is what all but nine of the tools use.
+Secret chats are the exception: Telethon never implemented MTProto 2.0, so they run on
+TDLib, and **TDLib cannot read a Telethon session or import one** — there is no way to
+make one login serve both. What the manager can do, and now does, is ask for the second
+one while you are already there, so it is one sitting rather than two.
+
+The prompt defaults to **no**, and that is deliberate: the second login is another device
+on your Telegram account, and most accounts never open a secret chat. Declining costs
+nothing — everything except the secret-chat tools already works, and you can run
+
+```bash
+python scripts/secret_chat_login.py <label>
+```
+
+at any time afterwards. If Telegram's library is not installed the manager says so and
+names the install command instead of asking a question you could not act on.
 
 ## Multi-Account Setup
 
