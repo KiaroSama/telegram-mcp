@@ -288,7 +288,7 @@ async def save_disappearing_media(
     max_dimension: int = 1568,
     ctx: Optional[Context] = None,
     account: str = None,
-) -> str:
+) -> list:
     """
     Write a self-destructing message's media to disk before it expires.
 

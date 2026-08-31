@@ -268,7 +268,7 @@ async def inspect_messages(
     limit: int = 10,
     offset_id: int = 0,
     account: str = None,
-) -> str:
+) -> list:
     """
     Full API view of the newest messages in a chat.
 

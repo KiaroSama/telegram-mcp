@@ -187,3 +187,47 @@ def test_a_destructive_tool_is_never_also_marked_read_only(registered_tools):
     ]
 
     assert contradictory == [], f"marked both read-only and destructive: {contradictory}"
+
+
+def test_no_tool_promises_a_string_and_can_return_a_list():
+    """The annotation is a contract the SDK enforces, not documentation.
+
+    `save_disappearing_media` was annotated `-> str` while one of its paths
+    returned a list of content blocks. Under the old SDK that mismatch was
+    invisible. Under mcp 2.x the annotation becomes an output schema and the
+    return is validated against it, so the call failed with a pydantic
+    `string_type` error -- AFTER the file had been written to disk. The save
+    succeeded and the caller was told it had failed, which is the worst shape a
+    bug can take in a tool whose whole job is keeping something before it
+    disappears.
+
+    Only a live call found it: every offline test asserted on the string paths.
+    So the guard is structural instead - if a body can return a list, the
+    annotation may not say `str`.
+
+    The asymmetry is why this is one-directional: a bare `-> list` produces no
+    structured schema and so accepts either shape, which is what the four
+    image-returning tools already rely on.
+    """
+    import ast
+
+    offenders = []
+    for module in (REPO / "telegram_mcp" / "tools").glob("*.py"):
+        tree = ast.parse(module.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.AsyncFunctionDef, ast.FunctionDef)):
+                continue
+            if not any("mcp.tool" in ast.unparse(d) for d in node.decorator_list):
+                continue
+            if node.returns is None or ast.unparse(node.returns) != "str":
+                continue
+            if any(
+                isinstance(inner, ast.Return) and isinstance(inner.value, (ast.List, ast.ListComp))
+                for inner in ast.walk(node)
+            ):
+                offenders.append(f"{module.name}:{node.lineno} {node.name}")
+
+    assert offenders == [], (
+        "these tools are annotated `-> str` but can return a list, which mcp 2.x "
+        f"rejects at the output-schema check after the work is already done: {offenders}"
+    )
