@@ -320,9 +320,10 @@ For `http` and `sse`, the server binds `MCP_HOST`:`MCP_PORT` (default
 `127.0.0.1:8765`); the streamable HTTP endpoint is `/mcp`, the SSE endpoint is
 `/sse`.
 
-DNS-rebinding protection is **on by default**, not off: FastMCP enables it during
-construction because the server binds `127.0.0.1`, with an allow-list of
-`127.0.0.1:*`, `localhost:*` and `[::1]:*`.
+DNS-rebinding protection is **on by default**, not off: the MCP SDK enables it
+because the server binds `127.0.0.1`, with an allow-list of `127.0.0.1:*`,
+`localhost:*` and `[::1]:*`. Setting `MCP_ALLOWED_HOSTS` replaces that default
+rather than adding to it; leaving it unset keeps the SDK's own protection.
 
 That default is why a domain needs configuring rather than merely permitting. If the
 server is reached through a reverse proxy or any name other than localhost, set
