@@ -364,3 +364,31 @@ async def test_telegram_declining_the_right_is_reported_rather_than_counted_as_d
 
     assert outcome["delivered"] == []
     assert "manage_welcome_messages" in outcome["failed"]
+
+
+@pytest.mark.asyncio
+async def test_a_username_is_refused_with_the_tool_that_resolves_it(wire):
+    """`@validate_id` accepts a username as a well-formed id, and these two tools
+    talk to TDLib, which has no username lookup on this path. So "@someone"
+    passed validation and then died on `int()` with "invalid literal for int()
+    with base 10" - an error about parsing that says nothing about what to do.
+
+    Hit live while reading back a promotion. A numeric STRING still works; only
+    a username is refused, and the refusal names where to get the number.
+    """
+    client = wire()
+
+    answer = await lr.get_admin_rights_via_tdlib(
+        chat_id=-1002046407246, user_id="@madiniosoei", account="acct"
+    )
+
+    assert "invalid literal" not in answer, "still the raw parse error"
+    assert "resolve_username" in answer, "no way to obtain the id was named"
+    assert "get_admins" in answer
+    assert client.requests == [], "a request went out for an id it could not build"
+
+    # A numeric string is still an id; only a username is refused.
+    numeric = await lr.get_admin_rights_via_tdlib(
+        chat_id="-1002046407246", user_id="5876481644", account="acct"
+    )
+    assert "resolve_username" not in numeric

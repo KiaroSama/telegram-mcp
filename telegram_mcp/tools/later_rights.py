@@ -56,6 +56,27 @@ _MTPROTO_ALIASES = {
 }
 
 
+def _numeric(value, name: str) -> int:
+    """A numeric id, or a refusal naming the tool that resolves one.
+
+    These two tools speak to TDLib, which has no username lookup on the path
+    they use, while `@validate_id` accepts a username as a well-formed id - so
+    "@someone" passed validation and then died on `int()` with "invalid literal
+    for int() with base 10", which says nothing about what to do instead.
+
+    The type hints say `Union[int, str]` and that stays true: a numeric STRING
+    is fine. A username is not, and this is where it is turned into a sentence.
+    """
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"{name}={value!r} is not a numeric id. This tool talks to TDLib, which needs "
+            f"the number; resolve_username({value!r}) returns it, and get_admins lists a "
+            "chat's administrators with their ids."
+        )
+
+
 def _member(user_id: int) -> dict:
     return {"@type": "messageSenderUser", "user_id": int(user_id)}
 
@@ -234,7 +255,9 @@ async def get_admin_rights_via_tdlib(
     try:
         label = account_label(account)
         client = await secret_client(label)
-        status = await _current_status(client, int(chat_id), int(user_id))
+        status = await _current_status(
+            client, _numeric(chat_id, "chat_id"), _numeric(user_id, "user_id")
+        )
         rights = {k: v for k, v in (status.get("rights") or {}).items() if k != "@type"}
         return format_tool_result(
             {
@@ -294,7 +317,13 @@ async def set_admin_right(
     """
     try:
         client = await secret_client(account_label(account))
-        record = await _apply_right(client, int(chat_id), int(user_id), right, bool(enabled))
+        record = await _apply_right(
+            client,
+            _numeric(chat_id, "chat_id"),
+            _numeric(user_id, "user_id"),
+            right,
+            bool(enabled),
+        )
         return format_tool_result(record)
     except (NotSignedIn, TDLibUnavailable, ValueError) as e:
         return str(e)
