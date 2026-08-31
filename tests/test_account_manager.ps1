@@ -459,36 +459,47 @@ try {
     if ($onNo) { throw 'A typed no was ignored.' }
     Write-Host 'ok  Enter accepts and a typed n declines'
 
-    # Every route that puts an account into .env must offer the TDLib half.
+    # Every route that puts an account into .env must finish the TDLib half.
     #
-    # This is the bug that made the feature look broken: the step was wired into
-    # `Add-Account` only, and "Generate a session string only" has the generator
-    # write TELEGRAM_SESSION_STRING_<LABEL> itself. An account could therefore
-    # arrive fully configured for Telethon having never passed through
-    # Add-Account, and eleven tools stayed dark with nothing saying why. Ten
-    # launcher logs recorded no add at all, which is what finally showed it.
-    if ($source -notmatch "'6' = 'Finish an account for secret chats'") {
-        throw 'There is no menu entry for finishing an existing account.'
+    # The property is unchanged; the mechanism moved. It used to be a launcher
+    # step that spawned the login script and asked for the two-step password a
+    # SECOND time - seconds after the generator had already collected it and
+    # Telegram had accepted it. That reads as the tool not paying attention, and
+    # every extra attempt counts against the account's own limits. So the
+    # generator, which is holding the password and an authorised client, now
+    # finishes both halves itself, and the separate menu entry is gone.
+    $generator = [IO.File]::ReadAllText((Join-Path $projectRoot 'session_string_generator.py'))
+
+    if ($generator -notmatch '_finish_secret_chats\(client, safe_label, password\)') {
+        throw 'The generator no longer finishes the TDLib half - that is the original gap, reopened.'
     }
-    if ($source -notmatch 'function Complete-SecretChatLogin') {
-        throw 'Complete-SecretChatLogin is gone; existing accounts cannot be repaired.'
+    # The load-bearing part: the password is REUSED, not asked for again.
+    if ($generator -notmatch 'complete_login\(label, client, password=password\)') {
+        throw 'The generator no longer passes the password through, so it would ask a second time.'
+    }
+    # `\s*$` rather than `$`: the file is CRLF, and `$` closes before the \n with
+    # the \r still to match. That gotcha has cost this suite a false failure before.
+    if ($generator -notmatch '(?m)^\s+return pw\s*$') {
+        throw 'The sign-in no longer hands the accepted password back, so nothing can reuse it.'
+    }
+    # A pasted session string is the one case with no password to reuse, so that
+    # path keeps its own prompt.
+    if ($source -notmatch 'Invoke-SecretChatLogin -Label \$label') {
+        throw 'The pasted-session path no longer offers the TDLib half at all.'
+    }
+    if ($source -match "'6' = ") {
+        throw 'Menu entry 6 is back; the generator is supposed to make it unnecessary.'
     }
 
     $dispatch = [regex]::Match($source, '(?ms)switch \(\$choice\) \{.*?^        \}').Value
     if (-not $dispatch) { throw 'Could not isolate the menu dispatch.' }
-    foreach ($entry in @('2', '5', '6')) {
-        $branch = [regex]::Match($dispatch, "(?ms)'$entry' \{.*?\n            \}|'$entry' \{[^\n]*\}").Value
+    foreach ($entry in @('2', '5')) {
+        $branch = [regex]::Match($dispatch, "(?ms)'$entry' \{.*?
+            \}|'$entry' \{[^
+]*\}").Value
         if (-not $branch) { throw "Menu entry $entry has no dispatch branch." }
     }
-    # 5 is the generator-only route. It has to finish the job as well, or the
-    # exact gap above reopens.
-    if ($dispatch -notmatch "(?ms)'5' \{.*?Complete-SecretChatLogin.*?\}") {
-        throw 'The generator-only route no longer offers the TDLib half - that is the original bug.'
-    }
-    if ($dispatch -notmatch "'6' \{ Complete-SecretChatLogin \}") {
-        throw 'Menu entry 6 does not run Complete-SecretChatLogin.'
-    }
-    Write-Host 'ok  both routes into .env offer the TDLib half, and 6 repairs an old account'
+    Write-Host 'ok  the generator finishes both halves and reuses the password it already took'
 
     # A status probe attached to a listing must never take the listing down.
     $probe = [regex]::Match($source, '(?ms)^function Get-SecretChatStates \{.*?^\}').Value

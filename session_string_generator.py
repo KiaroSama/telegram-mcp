@@ -270,7 +270,7 @@ def _seconds_until_expiry(qr) -> float:
     return max(1.0, remaining - 1.0)
 
 
-def _qr_login(client: TelegramClient) -> None:
+def _qr_login(client: TelegramClient) -> Optional[str]:
     qr = client.qr_login()
     _render_qr(qr)
 
@@ -284,7 +284,7 @@ def _qr_login(client: TelegramClient) -> None:
             print(note("That QR code expired. Here is a fresh one."))
             _render_qr(qr)
         except errors.SessionPasswordNeededError:
-            _sign_in_with_password(client)
+            return _sign_in_with_password(client)
             return
 
     print()
@@ -293,7 +293,7 @@ def _qr_login(client: TelegramClient) -> None:
     sys.exit(1)
 
 
-def _sign_in_with_password(client: TelegramClient) -> None:
+def _sign_in_with_password(client: TelegramClient) -> Optional[str]:
     """Ask for the 2FA password until it is accepted or the attempts run out.
 
     Shared by BOTH login paths on purpose. This loop used to exist only in the QR
@@ -316,7 +316,10 @@ def _sign_in_with_password(client: TelegramClient) -> None:
             continue
         try:
             client.sign_in(password=pw)
-            return
+            # Returned, not discarded: the TDLib half needs this same password
+            # seconds from now, and asking again for one Telegram just accepted
+            # spends another attempt against the account's own limits.
+            return pw
         except errors.PasswordHashInvalidError:
             print(failure(f"That password was not accepted. {remaining - 1} attempt(s) left."))
 
@@ -332,7 +335,7 @@ def _sign_in_with_password(client: TelegramClient) -> None:
     sys.exit(1)
 
 
-def _phone_login(client: TelegramClient) -> None:
+def _phone_login(client: TelegramClient) -> Optional[str]:
     phone = input("Please enter your phone (or bot token): ")
 
     try:
@@ -357,7 +360,49 @@ def _phone_login(client: TelegramClient) -> None:
     try:
         client.sign_in(phone, code)
     except errors.SessionPasswordNeededError:
-        _sign_in_with_password(client)
+        return _sign_in_with_password(client)
+    return None
+
+
+def _finish_secret_chats(client: TelegramClient, label: str, password: Optional[str]) -> None:
+    """Sign this same account in to TDLib, without asking for anything again.
+
+    The account now has a Telethon login, and TDLib keeps a separate one that
+    secret chats and the newer admin rights run on. Telegram's device-linking
+    flow lets this fresh authorisation authorise that one, so no code is needed
+    -- and if two-step verification is on, the password the owner typed moments
+    ago is reused rather than demanded a second time.
+
+    That reuse is the point. Asking again for a password Telegram had just
+    accepted was the behaviour this replaced: it read as the tool not having
+    been paying attention, and every extra attempt counts against the account's
+    own limits.
+
+    Never fatal. The session string is already saved by this point, so a failure
+    here costs the secret-chat half and nothing else, and says how to finish it.
+    """
+    try:
+        from telegram_mcp.tdlib import complete_login, tdjson_status
+    except Exception:
+        return
+
+    if not tdjson_status()["available"]:
+        return
+
+    print()
+    print("Finishing the second half (secret chats) - no code, nothing to scan...")
+    try:
+        state = client.loop.run_until_complete(complete_login(label, client, password=password))
+    except Exception as exc:
+        print(failure(f"The secret-chat half did not finish: {exc}"))
+        print(hint("Everything else is saved; this account works for every other tool."))
+        return
+
+    if state == "authorizationStateReady":
+        print(f"Done - secret chats are ready for '{label}' too.")
+    else:
+        print(failure(f"The secret-chat half stopped at {state}."))
+        print(hint("Everything else is saved; this account works for every other tool."))
 
 
 def _report_session(env_var: str, session_string: str, *, echo: bool) -> None:
@@ -440,6 +485,7 @@ def main() -> None:
             print(hint(f"Saving under '{safe_label}' - a key cannot contain a space."))
         env_var = f"TELEGRAM_SESSION_STRING_{safe_label.upper()}"
     else:
+        safe_label = "default"
         env_var = "TELEGRAM_SESSION_STRING"
 
     if args.qr:
@@ -458,11 +504,12 @@ def main() -> None:
         client = TelegramClient(StringSession(), API_ID, API_HASH, **client_identity_kwargs())
         client.connect()
 
+        password = None
         if not client.is_user_authorized():
             if method == "1":
-                _qr_login(client)
+                password = _qr_login(client)
             else:
-                _phone_login(client)
+                password = _phone_login(client)
 
         session_string = StringSession.save(client.session)
 
@@ -492,6 +539,8 @@ def main() -> None:
                 print("")
                 print(f"Error updating .env file: {e}")
                 print(hint("Add the session string to .env by hand instead."))
+            else:
+                _finish_secret_chats(client, safe_label, password)
 
         client.disconnect()
 

@@ -658,50 +658,6 @@ function Invoke-SessionGenerator {
     }
 }
 
-function Complete-SecretChatLogin {
-    <#
-      Finish an existing account's TDLib half from the menu.
-
-      `Add-Account` offers this at the end, but that is not the only way an
-      account gets into `.env`: "Generate a session string only" has the
-      generator write the variable itself, so an account can arrive fully
-      configured for Telethon having never passed through Add-Account. Every
-      such account - and every one added before this step existed - is repaired
-      from here.
-    #>
-    $accounts = Get-Accounts
-    if ($accounts.Count -eq 0) {
-        Write-Host 'No accounts are configured yet.' -ForegroundColor Yellow
-        return
-    }
-
-    $labels = @($accounts.Keys)
-    if ($labels.Count -eq 1) {
-        $label = $labels[0]
-        Write-Host ''
-        Write-Host "Only one account is configured: $label"
-    }
-    else {
-        Write-Host ''
-        Write-Host 'Configured accounts:' -ForegroundColor Cyan
-        foreach ($name in $labels) { Write-Host "  $name" }
-        $label = Read-Label -Prompt 'Which account'
-        if ($null -eq $label) { return }
-        if (-not $accounts.ContainsKey($label)) {
-            Write-Failure "No account called '$label' is configured."
-            return
-        }
-    }
-
-    $states = Get-SecretChatStates
-    if ($states[$label] -eq 'authorizationStateReady') {
-        Write-Host "'$label' is already finished - secret chats work for it." -ForegroundColor Green
-        return
-    }
-    Invoke-SecretChatLogin -Label $label
-}
-
-
 function Get-SecretChatStates {
     <#
       Which accounts have finished their TDLib half, as label -> state.
@@ -777,6 +733,7 @@ function Invoke-SecretChatLogin {
         Write-Hint 'Telegram''s own library is not usable here, so secret chats are off.'
         Write-Hint '  Repair:   uv pip install -e .'
         Write-Hint "  Sign in:  python scripts\secret_chat_login.py $Label"
+        Write-Log "TDLib login for '$Label' not offered: the library is not usable here" -Level WARNING
         return
     }
 
@@ -787,6 +744,7 @@ function Invoke-SecretChatLogin {
     Write-Host ''
     if (-not (Read-Confirmation 'Finish it now?')) {
         Write-Host "Skipped. Run scripts\secret_chat_login.py $Label whenever you want it."
+        Write-Log "TDLib login for '$Label' offered and declined"
         return
     }
 
@@ -807,6 +765,7 @@ function Invoke-SecretChatLogin {
         Write-Failure 'That sign-in did not finish, so secret chats are not available yet.'
         Write-Hint "Nothing else was affected - '$Label' still works for every other tool."
         Write-Hint "Run scripts\secret_chat_login.py $Label to try again."
+        Write-Log "TDLib login for '$Label' attempted and did not finish (exit $code)" -Level WARNING
     }
 }
 
@@ -1003,7 +962,6 @@ $script:MenuItems = [ordered] @{
     '3' = 'Remove an account'
     '4' = 'Rename an account'
     '5' = 'Generate a session string only'
-    '6' = 'Finish an account for secret chats'
 }
 
 function Show-Menu {
@@ -1055,15 +1013,7 @@ try {
             '2' { Add-Account }
             '3' { Remove-Account }
             '4' { Rename-Account }
-            '5' {
-                Invoke-SessionGenerator
-                # The generator writes the session variable itself, so an
-                # account can arrive here having never passed through
-                # Add-Account and therefore never been offered its TDLib half.
-                # That is exactly how accounts ended up half-configured.
-                if ($script:GeneratorExitCode -eq 0) { Complete-SecretChatLogin }
-            }
-            '6' { Complete-SecretChatLogin }
+            '5' { Invoke-SessionGenerator }
             default { Write-Failure "Enter a menu number from 1 to $($script:MenuItems.Count), or exit." }
         }
         if ($script:Quitting) { break }

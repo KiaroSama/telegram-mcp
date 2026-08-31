@@ -486,3 +486,116 @@ async def test_authorising_a_client_that_is_not_waiting_for_a_login_is_refused(f
 
     with pytest.raises(RuntimeError, match="not waiting for a login"):
         await tdlib.authorise_from_telethon(client, object())
+
+
+# --------------------------------------------------------------------------
+# complete_login: one password, both halves
+# --------------------------------------------------------------------------
+#
+# The owner types the two-step password once, into the session generator, and
+# Telegram accepts it. The TDLib half then used to ask for the SAME password a
+# second time, seconds later. Beyond reading as a tool that was not paying
+# attention, every extra attempt counts against the account's own limits - the
+# owner's words were "do you want my account locked?".
+
+
+class _StubClient:
+    """Stands in for TDLibClient with a scripted sequence of states."""
+
+    def __init__(self, states, start_state):
+        self._states = list(states)
+        self.authorization_state = start_state
+        self.requests = []
+        self.closed = False
+
+    async def start(self):
+        return self.authorization_state
+
+    async def request(self, obj, timeout=30.0):
+        self.requests.append(obj)
+        return {"@type": "ok"}
+
+    async def _settle(self, timeout=60.0, ignore=frozenset()):
+        self.authorization_state = self._states.pop(0)
+        return self.authorization_state
+
+    async def close(self):
+        self.closed = True
+
+    def types(self):
+        return [r["@type"] for r in self.requests]
+
+
+@pytest.fixture
+def stub(monkeypatch):
+    def _make(start_state, states=()):
+        client = _StubClient(states, start_state)
+        monkeypatch.setattr(tdlib, "TDLibClient", lambda label, **kw: client)
+        monkeypatch.setattr(tdlib, "account_label", lambda account: account)
+        return client
+
+    return _make
+
+
+@pytest.mark.asyncio
+async def test_a_supplied_password_is_used_and_nothing_is_asked(stub):
+    """The whole point. A password in hand must never produce a prompt."""
+    client = stub("authorizationStateWaitPassword", ["authorizationStateReady"])
+    asked = []
+
+    state = await tdlib.complete_login(
+        "acct", object(), password="hunter2", ask_password=lambda: asked.append(1)
+    )
+
+    assert state == "authorizationStateReady"
+    assert asked == [], "it asked for a password it had already been given"
+    (sent,) = [r for r in client.requests if r["@type"] == "checkAuthenticationPassword"]
+    assert sent["password"] == "hunter2"
+
+
+@pytest.mark.asyncio
+async def test_a_database_left_waiting_for_a_password_does_not_start_over(stub):
+    """The state this account was actually stuck in. Re-running the old flow from
+    `WaitPhoneNumber` published a SECOND login token for nothing; starting from
+    the client's current state skips straight to the password."""
+    client = stub("authorizationStateWaitPassword", ["authorizationStateReady"])
+
+    await tdlib.complete_login("acct", object(), password="pw")
+
+    assert "requestQrCodeAuthentication" not in client.types(), "it published another token"
+
+
+@pytest.mark.asyncio
+async def test_an_account_already_signed_in_is_left_alone(stub):
+    client = stub("authorizationStateReady")
+
+    state = await tdlib.complete_login("acct", object(), password="pw")
+
+    assert state == "authorizationStateReady"
+    assert client.requests == [], "it touched an account that was already finished"
+
+
+@pytest.mark.asyncio
+async def test_without_a_password_or_a_way_to_ask_it_reports_rather_than_hangs(stub):
+    """A non-interactive caller must get the state back, not a prompt into a
+    stdin nobody is reading."""
+    client = stub("authorizationStateWaitPassword")
+
+    state = await tdlib.complete_login("acct", object())
+
+    assert state == "authorizationStateWaitPassword"
+    assert "checkAuthenticationPassword" not in client.types()
+
+
+@pytest.mark.asyncio
+async def test_the_client_is_closed_even_when_the_login_fails(stub):
+    """It owns the client it made. A raised error must not leak one."""
+    client = stub("authorizationStateWaitPassword")
+
+    def _boom():
+        raise RuntimeError("no password available")
+
+    with pytest.raises(RuntimeError):
+        await tdlib.complete_login("acct", object(), ask_password=_boom)
+
+    assert client.closed, "the TDLib client was left open"

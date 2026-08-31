@@ -55,14 +55,7 @@ server deliberately does not. The tools group into these areas:
 - **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
 - **Messages:** send, schedule, edit, delete, forward, copy, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `copy_message` is a forward without the attribution header, made by the server, so custom (premium) emoji and any media arrive exactly as they were - rebuilding the text locally cannot, because a premium emoji is a document id pinned to a UTF-16 offset. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry.
 - **Admin rights newer than Telethon's layer:** Telegram silently drops flags added after the TL layer a client announces — measured, not assumed: one request from a channel's own creator carrying flags.18, flags.19 and flags.20 was accepted and only flags.18 survived. Telethon announces 227 and is archived. The layer cannot be raised for one call — Telegram accepts `invokeWithLayer` only as a connection's first request, and announcing a later layer wholesale would require the library to know every constructor in it, because TL objects carry no length and an unknown one cannot be skipped. So `edit_admin_rights` finishes those rights over TDLib (layer 229) instead of only reporting the loss, and `set_admin_right` sets one directly. Both preserve every other right by reading and writing the whole rights object inside TDLib rather than translating names between the two libraries; `manage_linked_peers`, which has no unambiguous TDLib field, is reported rather than guessed at.
-- **Secret chats:** create an end-to-end encrypted chat, send text, photos and voice into it, read its history, arm its self-destruct timer, and close it. These nine tools do not run on Telethon, which never implemented MTProto 2.0 — they run on TDLib, Telegram's own client library. Two one-time steps, and `secret_chat_status` says which one is missing because they are fixed in completely different places:
-
-  ```bash
-  uv sync --extra secret        # or: pip install tdjson
-  python scripts/secret_chat_login.py <account>
-  ```
-
-  The second is unavoidable: TDLib cannot read a Telethon session and offers no way to import one, so an account that wants secret chats signs in once more and appears as another device on that account. Without the extra installed, every other tool is unaffected.
+- **Secret chats:** create an end-to-end encrypted chat, send text, photos and voice into it, read its history, arm its self-destruct timer, and close it. These nine tools do not run on Telethon, which never implemented MTProto 2.0 — they run on TDLib, Telegram's own client library. `tdjson` ships with the project, so for an account added through `Manage-Accounts.ps1` there is nothing extra to do: the session generator signs the account in to TDLib as well, in the same run, reusing the two-step password you have just typed rather than asking for it again. TDLib cannot read a Telethon session and offers no way to import one, so the account does appear as another device — that part is the protocol. `secret_chat_status` says what is missing for an account that arrived some other way, and `scripts/secret_chat_login.py <account>` finishes one by hand.
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
 ### Remembered contacts
@@ -400,7 +393,7 @@ to their own location, so they work from any directory and from a shortcut.
 | Script | What it does |
 |---|---|
 | `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Keeps a timestamped log per run by default, in `logs/` inside the private state directory - never beside the source - recording only this server's own diagnostics. Pass `-NoLogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG=off`) for a run that leaves nothing on disk. |
-| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, generate a session string, or finish an account for secret chats. The listing shows both halves per account, and every route that adds one offers the TDLib half (see below). |
+| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or generate a session string. The listing shows both halves per account, and every route that adds one finishes the TDLib half too (see below). |
 
 `Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of
 `.env` byte-for-byte alone — comments, ordering and every key it does not recognise.
@@ -477,12 +470,16 @@ with two-step verification is asked for its password once, because Telegram want
 from a linked device.
 
 Both routes that add an account — "Add an account" and "Generate a session string only" —
-offer it, and **"Finish an account for secret chats"** (menu item 6) does it for one that is
-already configured, including every account added before this existed. "List configured
-accounts" shows both halves per account, so `secret chats: NOT finished` is visible without
-running anything.
+finish it, because the work happens inside the session generator itself rather than in a
+step afterwards. That is also what removes the second password prompt: the generator is
+already holding the password Telegram accepted seconds earlier, so it reuses it. There is
+no separate menu entry for this, and an account left half-finished by an interrupted run is
+picked up from wherever it stopped rather than started again. "List configured accounts"
+shows both halves per account, so `secret chats: NOT finished` is visible without running
+anything.
 
-Outside the menu it is the same one command, still without a code:
+For an account that arrived some other way — a session string pasted in, or one configured
+before this existed — it is one command, still without a code:
 
 ```bash
 python scripts/secret_chat_login.py <label>

@@ -40,6 +40,7 @@ from telegram_mcp.safe_log import log_event
 from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, state_dir
 
 __all__ = [
+    "complete_login",
     "NotSignedIn",
     "account_label",
     "authorise_from_telethon",
@@ -553,3 +554,47 @@ async def authorise_from_telethon(client: "TDLibClient", telethon_client) -> str
     return await client._settle(
         ignore=frozenset({"authorizationStateWaitOtherDeviceConfirmation"})
     )
+
+
+async def complete_login(account: str, telethon_client, password=None, ask_password=None) -> str:
+    """Take an account's TDLib half from wherever it is to signed in.
+
+    One implementation for both callers, because they differ only in where the
+    two-step password comes from:
+
+    * ``session_string_generator.py`` has just watched the owner type it for the
+      Telethon login, so it passes it straight through and the owner is asked
+      **nothing**. Asking a second time for a password Telegram already accepted
+      seconds earlier is not caution, it is a defect -- and every extra attempt
+      is one more against the account's own limits.
+    * ``scripts/secret_chat_login.py`` is repairing an account signed in long
+      ago and has no password to reuse, so it supplies ``ask_password``.
+
+    Starts from the client's CURRENT state rather than assuming a fresh one: a
+    database left at ``WaitPassword`` by an interrupted run must not publish a
+    second login token, which is what re-running the old flow did.
+
+    Returns the state reached. ``authorizationStateReady`` is the only success.
+    The password is never logged, stored, or passed on a command line.
+    """
+    client = TDLibClient(account_label(account))
+    try:
+        state = await client.start()
+        if state == "authorizationStateReady":
+            return state
+
+        if state == "authorizationStateWaitPhoneNumber":
+            state = await authorise_from_telethon(client, telethon_client)
+
+        if state == "authorizationStateWaitPassword":
+            secret = (
+                password if password is not None else (ask_password() if ask_password else None)
+            )
+            if not secret:
+                return state
+            await client.request({"@type": "checkAuthenticationPassword", "password": secret})
+            state = await client._settle()
+
+        return state
+    finally:
+        await client.close()
