@@ -195,3 +195,85 @@ def test_edit_admin_rights_exposes_every_field_as_a_parameter():
 
     missing = _all_fields() - params
     assert not missing, f"edit_admin_rights cannot set: {sorted(missing)}"
+
+
+def test_the_later_flags_survive_a_round_trip_through_telethons_reader():
+    """Granting a right this server cannot then report would be the same
+    asymmetry in a new place.
+
+    `ChatAdminRights.from_reader` reads the flags integer, sets the seventeen
+    fields it knows and discards the rest, so bits 19 and 20 arrive from
+    Telegram and vanish before any caller sees them. The reader is wrapped at
+    import; this is what proves the wrap is installed and correct.
+    """
+    from telethon.extensions.binaryreader import BinaryReader
+
+    granted = moderation_mod._build_admin_rights(
+        {"manage_welcome_messages": True, "manage_linked_peers": True}, defaults={}
+    )
+
+    read_back = BinaryReader(bytes(granted)).tgread_object()
+    rights = moderation_mod.admin_rights_to_dict(read_back)
+
+    assert rights["manage_welcome_messages"] is True
+    assert rights["manage_linked_peers"] is True
+    assert rights["ban_users"] is False, "a right never granted came back set"
+
+
+def test_the_reader_wrap_is_installed_only_once():
+    """A second wrap would read the flags twice and rewind twice, which
+    silently corrupts every rights object after it."""
+    moderation_mod._install_extended_rights_reader()
+    moderation_mod._install_extended_rights_reader()
+
+    from telethon.extensions.binaryreader import BinaryReader
+
+    granted = moderation_mod._build_admin_rights({"manage_welcome_messages": True}, defaults={})
+    rights = moderation_mod.admin_rights_to_dict(BinaryReader(bytes(granted)).tgread_object())
+
+    assert rights["manage_welcome_messages"] is True
+
+
+def test_a_right_the_layer_cannot_carry_is_reported_not_swallowed():
+    """Measured on a live channel: one request from its creator carrying
+    flags.18, flags.19 and flags.20 was ACCEPTED, and only flags.18 was there
+    afterwards. Telegram masks flags newer than the layer the client announced.
+
+    Serialising the bits correctly is necessary and not sufficient, so the
+    tool has to say what it could not deliver. "Admin rights updated" while
+    the requested right is quietly absent is the worst available outcome:
+    nothing downstream can tell.
+    """
+    from telethon.tl.alltlobjects import LAYER
+
+    dropped = moderation_mod.undeliverable_rights(
+        {"manage_welcome_messages": True, "ban_users": True, "manage_linked_peers": False}
+    )
+
+    assert dropped == ["manage_welcome_messages"], "the wrong rights were called undeliverable"
+
+    note = moderation_mod._undeliverable_note(dropped)
+    assert "manage_welcome_messages" in note
+    assert str(LAYER) in note, "the note must name the layer it measured, not a remembered number"
+
+
+def test_every_right_beyond_the_announced_layer_is_known_to_be_undeliverable():
+    """The two lists must not drift: a flag added to the builder without being
+    added here would go back to being silently dropped."""
+    assert set(moderation_mod._EXTRA_ADMIN_RIGHT_BITS) == set(
+        moderation_mod.undeliverable_rights(
+            {name: True for name in moderation_mod._EXTRA_ADMIN_RIGHT_BITS}
+        )
+    )
+
+
+def test_the_reported_rights_cover_exactly_what_can_be_set():
+    """`get_admins` reads back through `admin_rights_to_dict`. A right the
+    reader cannot name is a right nobody can see the absence of - which is how
+    "one or two admins are missing this permission" became unanswerable
+    without opening Telegram itself."""
+    granted = moderation_mod._build_admin_rights()
+
+    assert set(moderation_mod.admin_rights_to_dict(granted)) == set(
+        moderation_mod._admin_rights_fields()
+    )

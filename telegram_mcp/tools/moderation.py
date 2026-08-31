@@ -61,6 +61,84 @@ class _ChatAdminRightsWithLaterFlags(ChatAdminRights):
         return raw[:4] + flags.to_bytes(4, "little")
 
 
+def _install_extended_rights_reader() -> None:
+    """Teach Telethon's reader to keep the two bits it does not know about.
+
+    `ChatAdminRights.from_reader` reads the flags integer, sets the seventeen
+    fields it knows, and drops the integer. So a right Telegram sends in
+    flags.19 or flags.20 arrives correctly and is discarded before any caller
+    can see it - which would leave this server able to GRANT a right it could
+    never report, the exact asymmetry the rest of this module exists to close.
+
+    Wrapping rather than replacing: the original still does all the decoding,
+    and this only rewinds far enough to read the same integer a second time.
+    Installed once, at import, because a second wrap would rewind twice.
+    """
+    if getattr(ChatAdminRights.from_reader, "_reads_later_flags", False):
+        return
+
+    original = ChatAdminRights.from_reader
+
+    def from_reader(cls, reader):
+        position = reader.tell_position()
+        flags = reader.read_int()
+        reader.set_position(position)
+        rights = original(reader)
+        for name, bit in _EXTRA_ADMIN_RIGHT_BITS.items():
+            setattr(rights, name, bool(flags >> bit & 1))
+        return rights
+
+    from_reader._reads_later_flags = True
+    ChatAdminRights.from_reader = classmethod(from_reader)
+
+
+_install_extended_rights_reader()
+
+
+def undeliverable_rights(values: dict) -> list:
+    """The requested rights this connection cannot actually deliver.
+
+    Telegram masks flags that do not exist in the layer the client announced,
+    and it does so SILENTLY: the request is accepted, the reply says the rights
+    were updated, and the flag is simply not there afterwards. Measured on a
+    live channel, one request from its creator carrying three flags -- flags.18
+    landed, flags.19 and flags.20 did not.
+
+    Telethon announces layer 227 (`telethon.tl.alltlobjects.LAYER`) and is
+    archived, so that number will not rise. Serialising the bits correctly, which
+    this module does, is necessary and not sufficient.
+
+    Reporting it is the whole point: a tool that answers "Admin rights updated"
+    while quietly dropping the one right the caller asked for is worse than one
+    that fails, because nothing downstream can tell.
+    """
+    return sorted(name for name in _EXTRA_ADMIN_RIGHT_BITS if values.get(name))
+
+
+def _undeliverable_note(dropped: list) -> str:
+    from telethon.tl.alltlobjects import LAYER
+
+    names = ", ".join(dropped)
+    return (
+        f" NOT set: {names}. Telegram accepted the request but drops these: they were added "
+        f"to chatAdminRights after TL layer {LAYER}, which is the layer Telethon announces "
+        "and, being archived, always will. Every other right in this call was applied. "
+        "Granting these needs a client on a later layer."
+    )
+
+
+def admin_rights_to_dict(rights) -> dict:
+    """Every right on a rights object, including the two Telethon lacks.
+
+    One reader for one writer: `get_admins` reports exactly the field set
+    `edit_admin_rights` can set, so a right present in one and absent from the
+    other is a bug either way round.
+    """
+    if rights is None:
+        return {}
+    return {name: bool(getattr(rights, name, False)) for name in _admin_rights_fields()}
+
+
 # Every field Telegram's ChatAdminRights carries. Built from the installed
 # Telethon rather than typed out, because a hand-written list is exactly how the
 # previous one fell five behind: `post_stories`, `edit_stories`,
@@ -313,7 +391,14 @@ async def edit_admin_rights(
                 channel=entity, user_id=user, admin_rights=admin_rights, rank=rank
             )
         )
-        return f"Admin rights updated for user {user_id} in chat {chat_id}."
+        answer = f"Admin rights updated for user {user_id} in chat {chat_id}."
+        dropped = undeliverable_rights(
+            {
+                "manage_linked_peers": manage_linked_peers,
+                "manage_welcome_messages": manage_welcome_messages,
+            }
+        )
+        return answer + (_undeliverable_note(dropped) if dropped else "")
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Error: you need admin rights (with 'add_admins') to modify admin rights."
     except telethon.errors.rpcerrorlist.UserAdminInvalidError:
@@ -349,6 +434,31 @@ async def get_admins(chat_id: Union[int, str], account: str = None) -> str:
             uname = getattr(p, "username", None)
             if uname:
                 rec["username"] = sanitize_name(uname)
+            # The module docstring has always said the rights are read back
+            # here. They were not: this returned a name and nothing else, so
+            # nothing could see which admin was missing which right - only
+            # Telegram's own UI could answer that.
+            participant = getattr(p, "participant", None)
+            if participant is not None:
+                # Reported for everyone, not only when rights are absent: a
+                # creator carries an `admin_rights` object exactly like an
+                # ordinary admin, so reading the rights alone cannot tell them
+                # apart - and the difference decides who may grant what.
+                # Telegram refuses to let an admin grant a right they do not
+                # hold themselves, silently, by dropping the flag from a request
+                # it otherwise accepts. The creator is the only participant who
+                # holds every right implicitly, so when nobody's rights show a
+                # given flag, the creator is the answer to "who can turn it on".
+                rec["role"] = (
+                    type(participant).__name__.replace("ChannelParticipant", "").lower()
+                    or "member"
+                )
+                rank = getattr(participant, "rank", None)
+                if rank:
+                    rec["rank"] = sanitize_name(rank)
+            rights = getattr(participant, "admin_rights", None)
+            if rights is not None:
+                rec["rights"] = admin_rights_to_dict(rights)
             records.append(rec)
         return format_tool_result(records) if records else "No admins found."
     except Exception as e:
