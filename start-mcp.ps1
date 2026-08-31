@@ -1,8 +1,13 @@
 [CmdletBinding()]
 param(
     # Persist the server's DIAGNOSTIC output (stderr) to a file under the state
-    # directory. Off by default, and never stdout: see the note below.
+    # directory. ON by default; never stdout, see the note below. Kept as an
+    # explicit switch so an existing command line that passes it still works.
     [switch] $LogToFile,
+
+    # The opt-OUT. A run that must leave nothing on disk asks for that here, or
+    # sets TELEGRAM_MCP_LAUNCHER_LOG to 0/false/no/off.
+    [switch] $NoLogToFile,
 
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $ServerArguments = @()
@@ -20,10 +25,23 @@ $logPath = $null
 # frames carry complete tool results: message text, contact names, chat titles,
 # files listed, whatever the client asked for. Teeing stdout wrote all of it to
 # disk. Only stderr -- which the server uses for diagnostics, and which
-# `telegram_mcp.safe_log` already bounds -- is ever persisted here, and only when
-# the operator asks for it with -LogToFile or TELEGRAM_MCP_LAUNCHER_LOG.
-$script:LogEnabled = $LogToFile.IsPresent -or
-    ($env:TELEGRAM_MCP_LAUNCHER_LOG -in @('1', 'true', 'yes', 'on'))
+# `telegram_mcp.safe_log` already bounds -- is ever persisted here.
+#
+# That is the whole privacy argument, and it is satisfied by the stdout/stderr
+# split alone. Logging was nevertheless OPT-IN, so the default run wrote nothing
+# and announced `log=unavailable` - a word that reads as "logging broke" when it
+# actually meant "you did not ask". The one run an operator most needs a log for
+# is the one that went wrong unexpectedly, which is exactly the run nobody
+# thought to pass a flag to. So it is on by default now, and the way to get
+# nothing on disk is to say so.
+$script:LogDisabledReason = $null
+if ($NoLogToFile.IsPresent) {
+    $script:LogDisabledReason = 'disabled by -NoLogToFile'
+}
+elseif ($env:TELEGRAM_MCP_LAUNCHER_LOG -in @('0', 'false', 'no', 'off')) {
+    $script:LogDisabledReason = 'disabled by TELEGRAM_MCP_LAUNCHER_LOG'
+}
+$script:LogEnabled = -not $script:LogDisabledReason
 
 # A server run can log for days, so the file needs a ceiling as well as a count:
 # the tee below rolls at LogMaxBytes keeping one previous part, and Remove-StaleFiles
@@ -145,8 +163,11 @@ function Remove-StaleFiles {
 }
 
 try {
+    # Not `throw 'not requested'`: routing the opt-out through the same catch as a
+    # real failure is what made both of them print the same word.
+    $script:LogFailure = $null
     try {
-        if (-not $script:LogEnabled) { throw 'not requested' }
+        if (-not $script:LogEnabled) { throw [OperationCanceledException]::new('opted out') }
         $logsDirectory = Join-Path (Get-StateDirectory) 'logs'
         [void] (New-Item -ItemType Directory -Path $logsDirectory -Force)
         # The directory first, and fatally: its inheritable entries are what make
@@ -185,11 +206,16 @@ try {
         Remove-StaleFiles -Directory $logsDirectory -Filter 'start-mcp_*.log' -Keep $script:LogRetention
         Remove-StaleFiles -Directory $logsDirectory -Filter 'start-mcp_*.log.1' -Keep $script:LogRetention
     }
+    catch [OperationCanceledException] {
+        $logPath = $null
+    }
     catch {
         $logPath = $null
-        if ($script:LogEnabled) {
-            Write-Warning "File logging is unavailable: $($_.Exception.Message)"
-        }
+        # Logging is on by default, so reaching here means it was wanted and
+        # broke. Say so unconditionally: a launcher that silently loses its log
+        # is the failure being reported here in the first place.
+        $script:LogFailure = $_.Exception.Message
+        Write-Warning "File logging failed, continuing without it: $($script:LogFailure)"
     }
 
     $uv = Get-Command uv -ErrorAction SilentlyContinue
@@ -197,7 +223,12 @@ try {
         throw "uv was not found in PATH. Install uv, then run this launcher again."
     }
 
-    $logDisplay = if ($logPath) { $logPath } else { 'unavailable' }
+    # Three distinct states, three distinct words. "unavailable" covered all of
+    # them and told the reader nothing about which one they were in.
+    $logDisplay = if ($logPath) { $logPath }
+    elseif ($script:LogFailure) { "FAILED ($script:LogFailure)" }
+    elseif ($script:LogDisabledReason) { $script:LogDisabledReason }
+    else { 'none' }
     $startMessage = "[$([DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss UTC'))] [INFO] [launcher] Starting: uv run main.py; log=$logDisplay"
     # stderr, not Write-Host: the host stream is stdout once redirected, and the
     # client reads this process's stdout as the MCP protocol.
