@@ -21,6 +21,45 @@ Changes here alter a permission -- never the chat's own identity (see
 
 from telegram_mcp.runtime import *
 
+# Rights Telegram has that the installed Telethon does not. Telethon 1.44 is
+# the last release - the project was archived in February 2026 - and it stops at
+# `manage_ranks` (flags.18), while layer 229 carries two more. Introspecting the
+# installed type is therefore still the floor but no longer the whole truth, so
+# these are named here and nowhere else.
+#
+# Adding them by hand is safe precisely because of the shape of this one type:
+# the constructor id did not change across those additions (0x5fb224d5) and
+# every field is a payload-free `flags.N?true`, so the wire form is exactly the
+# id followed by the flags int - nothing else has to be re-derived.
+_EXTRA_ADMIN_RIGHT_BITS = {
+    "manage_linked_peers": 19,
+    "manage_welcome_messages": 20,
+}
+
+
+class _ChatAdminRightsWithLaterFlags(ChatAdminRights):
+    """`ChatAdminRights` plus the rights this Telethon predates."""
+
+    def __init__(self, **kwargs):
+        # Popped before Telethon sees them, because this Telethon would reject
+        # the keyword - then set back as ordinary attributes, so that anything
+        # reading a right off this object finds all of them in the same place.
+        later = {name: bool(kwargs.pop(name, False)) for name in _EXTRA_ADMIN_RIGHT_BITS}
+        super().__init__(**kwargs)
+        for name, value in later.items():
+            setattr(self, name, value)
+
+    def _bytes(self):
+        # OR onto Telethon's own output rather than re-deriving the other bits.
+        # A future Telethon that learns one of these sets the same bit itself,
+        # which makes this a no-op for that field instead of a conflict.
+        raw = super()._bytes()
+        flags = int.from_bytes(raw[4:], "little")
+        for name, bit in _EXTRA_ADMIN_RIGHT_BITS.items():
+            if getattr(self, name):
+                flags |= 1 << bit
+        return raw[:4] + flags.to_bytes(4, "little")
+
 
 # Every field Telegram's ChatAdminRights carries. Built from the installed
 # Telethon rather than typed out, because a hand-written list is exactly how the
@@ -32,9 +71,12 @@ from telegram_mcp.runtime import *
 def _admin_rights_fields() -> tuple:
     import inspect
 
-    return tuple(
+    known = tuple(
         name for name in inspect.signature(ChatAdminRights.__init__).parameters if name != "self"
     )
+    # De-duplicated so that the day a Telethon release learns one of these, the
+    # field simply stops being "extra" instead of appearing twice.
+    return known + tuple(n for n in _EXTRA_ADMIN_RIGHT_BITS if n not in known)
 
 
 # Held back from the generous default: one lets an admin mint more admins, the
@@ -63,7 +105,7 @@ def _build_admin_rights(values: dict = None, defaults: dict = None) -> ChatAdmin
     """
     values = values or {}
     defaults = _generous_defaults() if defaults is None else defaults
-    return ChatAdminRights(
+    return _ChatAdminRightsWithLaterFlags(
         **{
             name: bool(values.get(name, defaults.get(name, False)))
             for name in _admin_rights_fields()
@@ -199,6 +241,8 @@ async def edit_admin_rights(
     delete_stories: bool = False,
     manage_direct_messages: bool = False,
     manage_ranks: bool = False,
+    manage_linked_peers: bool = False,
+    manage_welcome_messages: bool = False,
     account: str = None,
 ) -> str:
     """
@@ -229,6 +273,12 @@ async def edit_admin_rights(
             of the three are on.
         manage_direct_messages: can handle the channel's direct-message inbox.
         manage_ranks: can set other admins' custom titles.
+        manage_linked_peers: can manage the channel's linked peers.
+        manage_welcome_messages: can write and edit the chat's welcome messages.
+
+    The last two are rights Telegram added after Telethon's final release, so
+    they are put on the wire by this server rather than by the library. They
+    behave like any other right here.
     """
     try:
         cl = get_client(account)
@@ -254,6 +304,8 @@ async def edit_admin_rights(
                 "delete_stories": delete_stories,
                 "manage_direct_messages": manage_direct_messages,
                 "manage_ranks": manage_ranks,
+                "manage_linked_peers": manage_linked_peers,
+                "manage_welcome_messages": manage_welcome_messages,
             }
         )
         await cl(

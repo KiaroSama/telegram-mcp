@@ -15,6 +15,14 @@ rights standing.
 The fix is not a longer list - a longer list falls behind the next time Telegram
 adds a right. It is to build the rights object FROM the installed type, which is
 what `_build_admin_rights` does and what these tests pin.
+
+That held until Telethon stopped moving. The project was archived in February
+2026 at 1.44, which stops at `manage_ranks` (flags.18); layer 229 has since
+added `manage_linked_peers` (flags.19) and `manage_welcome_messages`
+(flags.20). So the installed type is now a FLOOR, not the whole truth, and the
+two later rights are named by hand - the one thing this file was written to
+avoid, now unavoidable, and therefore pinned at the only level that proves it:
+the bytes on the wire.
 """
 
 import inspect
@@ -24,6 +32,9 @@ from telethon.tl.types import ChatAdminRights
 
 from telegram_mcp.tools import moderation as moderation_mod
 
+# The two Telegram added after Telethon's final release.
+_LATER_THAN_TELETHON = {"manage_linked_peers", "manage_welcome_messages"}
+
 
 def _telethon_fields():
     return {
@@ -31,10 +42,74 @@ def _telethon_fields():
     }
 
 
+def _all_fields():
+    """Every right this server can grant, whether or not Telethon knows it."""
+    return set(moderation_mod._admin_rights_fields())
+
+
+def _flags_on_the_wire(rights):
+    """The flags int Telegram will actually receive.
+
+    `ChatAdminRights` is a payload-free flags object, so its whole serialised
+    form is the constructor id followed by this one integer. Reading it back is
+    the only check that distinguishes a right that was set from a right that was
+    merely stored on a Python object and then dropped.
+    """
+    raw = bytes(rights)
+    assert len(raw) == 8, f"expected id+flags, got {len(raw)} bytes"
+    assert int.from_bytes(raw[:4], "little") == ChatAdminRights.CONSTRUCTOR_ID, (
+        "constructor id changed - the hand-added flag bits below are only valid "
+        "for the layout they were read from"
+    )
+    return int.from_bytes(raw[4:], "little")
+
+
 def test_the_builder_knows_every_field_the_installed_telethon_has():
     """The guard that makes the rest of this file self-maintaining: if a future
-    Telethon adds a right, this is what notices."""
-    assert set(moderation_mod._admin_rights_fields()) == _telethon_fields()
+    Telethon adds a right, this is what notices.
+
+    A superset, not an equality: the builder now also carries rights Telethon
+    never shipped. Telethon's own fields remain the floor it may not fall below.
+    """
+    assert _all_fields() >= _telethon_fields()
+
+
+def test_the_rights_telethon_never_shipped_are_reachable_too():
+    """Named individually, because these are the ones no introspection can find:
+    the library that would have to declare them is archived."""
+    assert _LATER_THAN_TELETHON <= _all_fields()
+
+
+def test_a_right_telethon_lacks_still_reaches_telegram_as_the_right_bit():
+    """The load-bearing test of the whole hand-added-flags approach.
+
+    Setting an attribute on a Python object proves nothing: the earlier bug was
+    exactly a right that looked set and never left the process. These bit
+    positions come from layer 229's `chatAdminRights`, and this asserts the
+    server puts them where Telegram reads them.
+    """
+    for name, bit in (("manage_linked_peers", 19), ("manage_welcome_messages", 20)):
+        granted = _flags_on_the_wire(moderation_mod._build_admin_rights({name: True}))
+        assert granted >> bit & 1, f"{name} never reached flags.{bit}"
+
+        withheld = _flags_on_the_wire(
+            moderation_mod._build_admin_rights({name: False}, defaults={})
+        )
+        assert not (withheld >> bit & 1), f"{name} set flags.{bit} when it was declined"
+
+
+def test_the_hand_added_bits_do_not_disturb_the_rights_telethon_serialises():
+    """The bits are OR'd onto Telethon's own output. If that arithmetic were
+    wrong it would corrupt a neighbouring right rather than fail loudly."""
+    without = _flags_on_the_wire(moderation_mod._build_admin_rights({}, defaults={}))
+    with_later = _flags_on_the_wire(
+        moderation_mod._build_admin_rights(
+            {"manage_linked_peers": True, "manage_welcome_messages": True}, defaults={}
+        )
+    )
+
+    assert without == 0
+    assert with_later == (1 << 19) | (1 << 20)
 
 
 def test_the_five_that_were_unreachable_are_named_explicitly():
@@ -89,7 +164,7 @@ def test_a_demotion_clears_every_field_including_the_new_ones():
     old demotion could leave story and direct-message rights standing."""
     rights = moderation_mod._build_admin_rights({}, defaults={})
 
-    for name in _telethon_fields():
+    for name in _all_fields():
         assert getattr(rights, name) is False, f"{name} was not explicitly cleared"
 
 
@@ -118,5 +193,5 @@ def test_edit_admin_rights_exposes_every_field_as_a_parameter():
     is a right it cannot set."""
     params = set(inspect.signature(moderation_mod.edit_admin_rights).parameters)
 
-    missing = _telethon_fields() - params
+    missing = _all_fields() - params
     assert not missing, f"edit_admin_rights cannot set: {sorted(missing)}"
