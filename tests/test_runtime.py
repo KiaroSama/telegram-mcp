@@ -119,6 +119,15 @@ def test_installing_twice_does_not_stack_the_stamper():
     assert len(runtime.mcp.middleware) == before
 
 
+def test_the_handshake_reports_a_real_version():
+    """`MCPServer` takes `version` explicitly where FastMCP filled it in, and
+    passing nothing reports an empty string - which a client renders as a blank
+    rather than falling back to anything."""
+    assert runtime._server_version()
+    assert runtime._server_version() != ""
+    assert runtime.mcp.version == runtime._server_version()
+
+
 def test_get_exposed_tools_mode_defaults_to_all(monkeypatch):
     monkeypatch.delenv("TELEGRAM_EXPOSED_TOOLS", raising=False)
 

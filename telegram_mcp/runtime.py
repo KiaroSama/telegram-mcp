@@ -130,9 +130,26 @@ load_dotenv()
 # The shared HTTP service can be consumed by long-lived MCP clients. Stateless requests keep
 # those clients usable across server-process restarts instead of rejecting their next call
 # with "No valid session ID provided". Stdio transport remains unaffected.
+def _server_version() -> str:
+    """This package's version, for the `serverInfo` a client is shown.
+
+    FastMCP filled this in on its own; `MCPServer` takes it explicitly, and
+    passing nothing makes the handshake report `"version": ""` - an empty string
+    is worse than a wrong one, because a client renders it as a blank rather than
+    falling back. Reporting THIS package's version is also more useful than the
+    SDK's, which is what 1.x happened to show.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        return version("telegram-mcp")
+    except Exception:  # not installed as a distribution, e.g. a source checkout
+        return "0+unknown"
+
+
 # `stateless_http` was a constructor argument under FastMCP; in mcp 2.x it is a
 # parameter of run_streamable_http_async, so it moved to `runner._serve`.
-mcp = MCPServer("telegram")
+mcp = MCPServer("telegram", version=_server_version())
 
 # Annotate all tool results with audience=["user"] so MCP clients know
 # the content is user-generated data, not instructions for the model.
