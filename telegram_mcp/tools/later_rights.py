@@ -104,6 +104,107 @@ def _resolve_right(name: str, rights: dict) -> str:
     )
 
 
+async def _apply_right(client, chat_id: int, user_id: int, right: str, enabled: bool) -> dict:
+    """Switch one right and read the result back from Telegram.
+
+    Separated from the tool around it because `edit_admin_rights` needs exactly
+    this and nothing else: it has already resolved the account and does not want
+    a formatted string back.
+    """
+    status = await _current_status(client, chat_id, user_id)
+    rights = dict(status.get("rights") or {})
+    field = _resolve_right(right, rights)
+    before = bool(rights.get(field))
+
+    rights[field] = bool(enabled)
+    rights["@type"] = "chatAdministratorRights"
+    await client.request(
+        {
+            "@type": "setChatMemberStatus",
+            "chat_id": chat_id,
+            "member_id": _member(user_id),
+            "status": {
+                "@type": "chatMemberStatusAdministrator",
+                "can_be_edited": status.get("can_be_edited", True),
+                "rights": rights,
+            },
+        }
+    )
+
+    confirmed = await _current_status(client, chat_id, user_id)
+    after_rights = confirmed.get("rights") or {}
+    after = bool(after_rights.get(field))
+
+    record = {
+        "chat_id": chat_id,
+        "user_id": user_id,
+        "right": field,
+        "before": before,
+        "after": after,
+        "applied": after == bool(enabled),
+    }
+    if not record["applied"]:
+        record["note"] = (
+            "Telegram accepted the request and the right is still "
+            f"{after}. That is Telegram declining it, not a transport failure - "
+            "check that this account may grant it in this chat."
+        )
+    # A right the caller did not name must not have moved. Reported rather
+    # than trusted, because this tool rewrites the whole rights object.
+    moved = sorted(
+        k
+        for k, v in after_rights.items()
+        if k not in ("@type", field) and bool(v) != bool((status.get("rights") or {}).get(k))
+    )
+    if moved:
+        record["unexpectedly_changed"] = moved
+    return record
+
+
+async def finish_later_rights(account, chat_id: int, user_id: int, rights: list) -> dict:
+    """Deliver, over TDLib, the rights the MTProto connection could not carry.
+
+    `edit_admin_rights` sends every right in one `channels.editAdmin`, and
+    Telegram silently drops the ones newer than the layer Telethon announces.
+    Reporting that was the previous behaviour and it was honest, but it left the
+    caller holding a right they had asked for and not received. TDLib speaks the
+    current layer, so the remainder is finished there.
+
+    Returns what happened to each name rather than raising: the MTProto half of
+    the call already succeeded, so nothing here may turn a partial success into
+    an exception that reads like total failure.
+    """
+    outcome = {"delivered": [], "failed": {}, "unmappable": []}
+    routable = []
+    for name in rights:
+        (routable if name in _MTPROTO_ALIASES else outcome["unmappable"]).append(name)
+    if not routable:
+        return outcome
+
+    try:
+        client = await secret_client(account_label(account))
+    except (NotSignedIn, TDLibUnavailable, ValueError) as exc:
+        # Every name the caller asked about has to land in exactly one bucket.
+        # Returning early with an untouched `routable` would drop those names
+        # from the report entirely, which is the silence this whole path exists
+        # to end.
+        for name in routable:
+            outcome["failed"][name] = str(exc)
+        return outcome
+
+    for name in routable:
+        try:
+            record = await _apply_right(client, chat_id, user_id, name, True)
+        except (ValueError, TDLibError) as exc:
+            outcome["failed"][name] = str(exc)
+            continue
+        if record["applied"]:
+            outcome["delivered"].append(name)
+        else:
+            outcome["failed"][name] = record.get("note", "Telegram declined it.")
+    return outcome
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Get Admin Rights (TDLib)", openWorldHint=True, readOnlyHint=True
@@ -192,56 +293,8 @@ async def set_admin_right(
         enabled: True to grant, False to revoke.
     """
     try:
-        label = account_label(account)
-        client = await secret_client(label)
-
-        status = await _current_status(client, int(chat_id), int(user_id))
-        rights = dict(status.get("rights") or {})
-        field = _resolve_right(right, rights)
-        before = bool(rights.get(field))
-
-        rights[field] = bool(enabled)
-        rights["@type"] = "chatAdministratorRights"
-        await client.request(
-            {
-                "@type": "setChatMemberStatus",
-                "chat_id": int(chat_id),
-                "member_id": _member(int(user_id)),
-                "status": {
-                    "@type": "chatMemberStatusAdministrator",
-                    "can_be_edited": status.get("can_be_edited", True),
-                    "rights": rights,
-                },
-            }
-        )
-
-        confirmed = await _current_status(client, int(chat_id), int(user_id))
-        after_rights = confirmed.get("rights") or {}
-        after = bool(after_rights.get(field))
-
-        record = {
-            "chat_id": int(chat_id),
-            "user_id": int(user_id),
-            "right": field,
-            "before": before,
-            "after": after,
-            "applied": after == bool(enabled),
-        }
-        if not record["applied"]:
-            record["note"] = (
-                "Telegram accepted the request and the right is still "
-                f"{after}. That is Telegram declining it, not a transport failure - "
-                "check that this account may grant it in this chat."
-            )
-        # A right the caller did not name must not have moved. Reported rather
-        # than trusted, because this tool rewrites the whole rights object.
-        moved = sorted(
-            k
-            for k, v in after_rights.items()
-            if k not in ("@type", field) and bool(v) != bool((status.get("rights") or {}).get(k))
-        )
-        if moved:
-            record["unexpectedly_changed"] = moved
+        client = await secret_client(account_label(account))
+        record = await _apply_right(client, int(chat_id), int(user_id), right, bool(enabled))
         return format_tool_result(record)
     except (NotSignedIn, TDLibUnavailable, ValueError) as e:
         return str(e)

@@ -76,7 +76,11 @@ class NotSignedIn(RuntimeError):
             f"secret-chat library (state: {state}). TDLib keeps its own "
             f"authorisation and cannot import a Telethon session - but this account's "
             f"existing login can authorise it, so this asks for no code and nothing to "
-            f"scan. Run once:" + chr(10) + f"    python scripts/secret_chat_login.py {account}"
+            f"scan. Run once:"
+            + chr(10)
+            + "    Manage-Accounts.ps1 -> option 6, 'Finish an account for secret chats'"
+            + chr(10)
+            + f"    or, without the launcher: python scripts/secret_chat_login.py {account}"
         )
         self.account = account
         self.state = state

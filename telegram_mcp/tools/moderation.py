@@ -20,6 +20,7 @@ Changes here alter a permission -- never the chat's own identity (see
 """
 
 from telegram_mcp.runtime import *
+from telegram_mcp.tools.later_rights import finish_later_rights
 
 # Rights Telegram has that the installed Telethon does not. Telethon 1.44 is
 # the last release - the project was archived in February 2026 - and it stops at
@@ -122,9 +123,36 @@ def _undeliverable_note(dropped: list) -> str:
     return (
         f" NOT set: {names}. Telegram accepted the request but drops these: they were added "
         f"to chatAdminRights after TL layer {LAYER}, which is the layer Telethon announces "
-        "and, being archived, always will. Every other right in this call was applied. "
-        "Granting these needs a client on a later layer."
+        "and, being archived, always will. Every other right in this call was applied."
     )
+
+
+def _later_rights_note(outcome: dict) -> str:
+    """What became of the rights this connection's layer could not carry.
+
+    The layer cannot be raised from here -- Telegram accepts `invokeWithLayer`
+    only as a connection's FIRST request, so there is no per-call escape, and
+    announcing a later layer wholesale would require the library to understand
+    every constructor in it, which an archived library does not.
+
+    So the remainder is finished over TDLib, and this reports the outcome per
+    right. A name that reached neither list would be the original silent drop
+    wearing a longer message, so every requested name appears exactly once.
+    """
+    note = ""
+    if outcome.get("delivered"):
+        note += " Delivered over TDLib instead: " + ", ".join(sorted(outcome["delivered"])) + "."
+    stuck = sorted([*outcome.get("failed", {}), *outcome.get("unmappable", [])])
+    if stuck:
+        note += _undeliverable_note(stuck)
+        for name in sorted(outcome.get("unmappable", [])):
+            note += (
+                f" {name}: TDLib has no field that unambiguously matches it, and a guessed"
+                " mapping revokes rights silently, so it was not guessed at."
+            )
+        for name, why in sorted(outcome.get("failed", {}).items()):
+            note += f" {name}: {why}"
+    return note
 
 
 def admin_rights_to_dict(rights) -> dict:
@@ -398,7 +426,16 @@ async def edit_admin_rights(
                 "manage_welcome_messages": manage_welcome_messages,
             }
         )
-        return answer + (_undeliverable_note(dropped) if dropped else "")
+        if not dropped:
+            return answer
+        # The MTProto half is already applied; this finishes the rest over
+        # TDLib, which speaks the current layer. It reports rather than raises,
+        # because turning a partial success into an exception would read like
+        # nothing was applied.
+        outcome = await finish_later_rights(
+            account, utils.get_peer_id(entity), utils.get_peer_id(user), dropped
+        )
+        return answer + _later_rights_note(outcome)
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Error: you need admin rights (with 'add_admins') to modify admin rights."
     except telethon.errors.rpcerrorlist.UserAdminInvalidError:

@@ -280,3 +280,80 @@ async def test_reading_rights_reports_which_are_granted(wire):
     assert "can_send_welcome_messages" in result["rights"]
     assert "can_pin_messages" in result["granted"]
     assert "can_edit_messages" not in result["granted"]
+
+
+# --------------------------------------------------------------------------
+# Finishing what the MTProto layer could not carry
+# --------------------------------------------------------------------------
+#
+# `edit_admin_rights` sends every right in one `channels.editAdmin` and Telegram
+# silently drops the ones newer than the announced layer. It cannot announce a
+# later one: Telegram accepts `invokeWithLayer` only as a connection's FIRST
+# request (measured -- `ConnectionLayerInvalidError`), so there is no per-call
+# escape. TDLib finishes the remainder.
+#
+# The property under test throughout is that every right the caller asked for
+# ends up in exactly one bucket. A name that reached none of them is the
+# original silent drop wearing a longer message.
+
+
+@pytest.mark.asyncio
+async def test_a_right_the_layer_dropped_is_finished_over_tdlib(wire):
+    client = wire()
+
+    outcome = await lr.finish_later_rights("acct", -1002677705573, 42, ["manage_welcome_messages"])
+
+    assert outcome["delivered"] == ["manage_welcome_messages"]
+    assert outcome["failed"] == {}
+    assert client.sent_rights()["can_send_welcome_messages"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_right_with_no_tdlib_equivalent_is_not_guessed_at(wire):
+    """`manage_linked_peers` has no unambiguous TDLib field. Picking the
+    closest-looking one would revoke a right silently, which is the failure this
+    module was built to avoid, so it is reported instead of mapped."""
+    client = wire()
+
+    outcome = await lr.finish_later_rights("acct", -1002677705573, 42, ["manage_linked_peers"])
+
+    assert outcome["unmappable"] == ["manage_linked_peers"]
+    assert outcome["delivered"] == []
+    assert client.requests == [], "a right with no known mapping still reached Telegram"
+
+
+@pytest.mark.asyncio
+async def test_a_missing_tdlib_login_still_names_every_right_it_could_not_finish(monkeypatch):
+    """The bucket-completeness property at its most tempting failure point:
+    returning early here would drop the names entirely, so the caller would be
+    told the rights were fine."""
+    monkeypatch.setattr(lr, "account_label", lambda account=None: "acct")
+
+    async def _refuse(label):
+        raise lr.NotSignedIn("acct", "authorizationStateWaitPassword")
+
+    monkeypatch.setattr(lr, "secret_client", _refuse)
+
+    outcome = await lr.finish_later_rights(
+        "acct", -1002677705573, 42, ["manage_welcome_messages", "manage_linked_peers"]
+    )
+
+    assert outcome["delivered"] == []
+    assert "manage_welcome_messages" in outcome["failed"]
+    # The real exception, not a stand-in, so this also pins that what reaches
+    # the caller names the launcher rather than a Python command they have said
+    # they do not want to run.
+    assert "option 6" in outcome["failed"]["manage_welcome_messages"], "the remedy was not named"
+    assert outcome["unmappable"] == ["manage_linked_peers"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_declining_the_right_is_reported_rather_than_counted_as_delivered(wire):
+    """A write TDLib accepts but Telegram does not honour must not be reported
+    as delivered -- that is the same lie as the layer drop, one layer down."""
+    wire(obey_writes=False)
+
+    outcome = await lr.finish_later_rights("acct", -1002677705573, 42, ["manage_welcome_messages"])
+
+    assert outcome["delivered"] == []
+    assert "manage_welcome_messages" in outcome["failed"]

@@ -277,3 +277,43 @@ def test_the_reported_rights_cover_exactly_what_can_be_set():
     assert set(moderation_mod.admin_rights_to_dict(granted)) == set(
         moderation_mod._admin_rights_fields()
     )
+
+
+def test_the_note_accounts_for_every_right_however_it_ended_up():
+    """`edit_admin_rights` now finishes the dropped rights over TDLib, so the
+    note has three outcomes to report instead of one. The property that matters
+    is not the wording: it is that a requested right cannot fall between the
+    buckets. A name mentioned nowhere reads as success, which is exactly the
+    silent drop this whole path exists to end.
+    """
+    outcome = {
+        "delivered": ["manage_welcome_messages"],
+        "failed": {"a_right_telegram_refused": "Telegram declined it."},
+        "unmappable": ["manage_linked_peers"],
+    }
+
+    note = moderation_mod._later_rights_note(outcome)
+
+    for name in ("manage_welcome_messages", "a_right_telegram_refused", "manage_linked_peers"):
+        assert name in note, f"{name} vanished from the report"
+    assert "Delivered over TDLib" in note
+    assert "NOT set: a_right_telegram_refused, manage_linked_peers" in note, (
+        "a right that was delivered must not also be listed as not set"
+    )
+
+
+def test_a_right_that_was_delivered_is_not_also_reported_as_dropped():
+    """The regression worth pinning: the note is built from what HAPPENED, not
+    from what was requested, so a right TDLib delivered reads as delivered."""
+    note = moderation_mod._later_rights_note(
+        {"delivered": ["manage_welcome_messages"], "failed": {}, "unmappable": []}
+    )
+
+    assert "manage_welcome_messages" in note
+    assert "NOT set" not in note
+
+
+def test_nothing_dropped_and_nothing_delivered_says_nothing():
+    """The ordinary call. A note appended to every successful result would train
+    readers to skip it."""
+    assert moderation_mod._later_rights_note({"delivered": [], "failed": {}, "unmappable": []}) == ""

@@ -388,7 +388,9 @@ Eleven tools. Nine for the chats themselves: `secret_chat_status`, `create_secre
 (`tools/secret_chats.py`). Two more use the same transport for a different reason —
 `set_admin_right` and `get_admin_rights_via_tdlib` (`tools/later_rights.py`) reach the admin
 rights Telethon's announced layer 227 cannot carry. Transport for all eleven is
-`telegram_mcp/tdlib.py`.
+`telegram_mcp/tdlib.py`. `edit_admin_rights` stays on MTProto but borrows the same
+transport for those rights alone, so the tool an agent reaches for first delivers
+them rather than reporting them lost.
 
 ### Not in the plan
 
