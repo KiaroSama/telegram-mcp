@@ -52,8 +52,9 @@ MAX_MACHINE_VALUE = 2048
 _NOT_PRESSABLE = {
     "url": "Opens a link. The URL is reported; nothing here follows it.",
     "url_auth": "Opens a link that would log the account in to a third-party site.",
-    "webview": "Opens a Mini App inside Telegram. There is no callback to answer, so "
-    "it cannot be pressed from the API — capture it with get_telegram_frames instead.",
+    "webview": "Opens a Mini App inside Telegram. There is no callback to answer, so a press "
+    "cannot reach it — but open_mini_app(bot=..., url=<this button's url>) launches the same "
+    "app and returns the URL that renders it.",
     "switch_inline": "Switches the composer to an inline query in some chat.",
     "user_profile": "Opens a user profile.",
     "copy": "Copies text to the clipboard in the client.",

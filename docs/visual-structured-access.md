@@ -452,7 +452,7 @@ Not every button can be pressed, and the tool says which rather than pretending:
 |---|---|---|
 | `callback` | yes | The only kind that answers a callback. |
 | `url`, `url_auth` | no | Opens a link; the URL is reported, never followed. |
-| `webview` | no | A Mini App. There is no callback to answer — capture it with `get_telegram_frames`. |
+| `webview` | no | A Mini App. No callback to answer, but `open_mini_app(bot=..., url=<the button's url>)` launches the same app and returns the URL that renders it. |
 | `copy`, `buy`, `game`, `switch_inline`, `user_profile`, `request_*` | no | Actions Telegram performs in the client. |
 | `plain` | no | A reply-keyboard button: it sends its own text as a message. |
 

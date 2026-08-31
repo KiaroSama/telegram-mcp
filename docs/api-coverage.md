@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **193** |
+| MCP tools registered | **194** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -168,10 +168,14 @@ Phase 1b. Two things learned while building them are worth more than the count:
 ### Still not reachable, lower value, build on demand
 
 Pinned-dialog ordering, fact-check, todo lists, history
-import/export, message-level bot inline queries, message **view counts**
-(`messages.GetMessagesViews`, distinct from the read receipts that already work),
-and **Mini App launch** (`messages.RequestWebView` — `inspect_buttons` describes such
-a button and says plainly that no callback can press it, but nothing launches one).
+import/export, message-level bot inline queries, and message **view counts**
+(`messages.GetMessagesViews`, distinct from the read receipts that already work).
+
+Mini App launch used to be listed here. It is now `open_mini_app`, which covers all
+three of Telegram's launch methods — `messages.RequestWebView` for the app an inline
+button opens, `messages.RequestAppWebView` for a named `t.me/<bot>/<app>`, and
+`messages.RequestMainWebView` for a bot's own profile app. Telegram returns a URL,
+not a page: the tool hands that URL back whole, labelled as the credential it is.
 
 ### Deliberately not building
 

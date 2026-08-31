@@ -68,14 +68,22 @@ def test_a_callback_button_is_pressable_and_a_url_button_is_not():
     assert "press_note" in keyboard[1]
 
 
-def test_a_mini_app_button_says_it_cannot_be_pressed_and_names_the_capture_route():
-    """A WebView opens a Mini App; there is no callback to answer."""
+def test_a_mini_app_button_says_it_cannot_be_pressed_and_names_the_route_that_works():
+    """A WebView opens a Mini App; there is no callback to answer.
+
+    The note used to send the reader to `get_telegram_frames`, which captures the
+    OWNER'S OWN Telegram Desktop window - not something this server can do for
+    them. `open_mini_app` launches the same app over the API, so that is the route
+    to name, and the button's `url` is the argument it takes.
+    """
     keyboard = _buttons_of(
         _message([[_button("KeyboardButtonWebView", text="Play", url="https://app.example")]])
     )
 
     assert keyboard[0]["pressable"] is False
-    assert "get_telegram_frames" in keyboard[0]["press_note"]
+    assert keyboard[0]["url"] == "https://app.example", "the argument open_mini_app needs"
+    assert "open_mini_app" in keyboard[0]["press_note"]
+    assert "get_telegram_frames" not in keyboard[0]["press_note"]
 
 
 def test_a_password_gated_callback_is_refused_rather_than_attempted():
