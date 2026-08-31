@@ -209,9 +209,10 @@ async def test_an_unauthorised_login_is_explained_rather_than_crashing(monkeypat
     `None.id`, so the owner saw "AttributeError" and an error code - nothing
     about the session having been replaced, which is what had happened.
 
-    The cause is worth naming precisely: removing and re-adding an account writes
-    a NEW session string to `.env`, and a server started earlier still holds the
-    old one. Only a restart picks it up.
+    The cause is worth naming precisely. It used to be "the server holds a stale
+    session; restart it" - and then `get_client` learned to re-read `.env`, which
+    made that advice wrong rather than merely unnecessary. Reaching here now means
+    the login is dead at TELEGRAM's end, so that is what it has to say.
     """
     from telegram_mcp.tools import profile as profile_mod
 
@@ -232,8 +233,12 @@ async def test_an_unauthorised_login_is_explained_rather_than_crashing(monkeypat
     answer = await profile_mod.get_me(account="acct")
 
     assert "AttributeError" not in answer
-    assert "Restart the MCP server" in answer, "the remedy was not named"
-    assert "no longer valid" in answer
+    assert "no longer valid" in answer, "it does not say the login is dead"
+    assert "Manage-Accounts.ps1" in answer, "the remedy was not named"
+    # The advice that became wrong. A replaced session is picked up on its own,
+    # so sending the reader to restart would hide the real cause behind a step
+    # that changes nothing.
+    assert "Restart" not in answer
 
 
 def test_formatting_nothing_says_what_came_back_empty():

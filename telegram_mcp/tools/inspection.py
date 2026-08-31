@@ -616,7 +616,7 @@ async def get_media_frames(
 @require_explicit_account
 @with_account(readonly=True)
 async def get_custom_emoji(
-    document_ids: Union[int, List[int]],
+    document_ids: Union[int, str, List[Union[int, str]]],
     count: int = 1,
     max_bytes: int = DEFAULT_EMOJI_BYTES,
     max_dimension: int = MAX_IMAGE_DIMENSION,
@@ -640,6 +640,11 @@ async def get_custom_emoji(
 
     Args:
         document_ids: One custom emoji document ID, or a list (at most 10 per call).
+            **Pass them as STRINGS.** Telegram's document ids are 64-bit and
+            routinely exceed 2**53, which is the largest integer a JSON number
+            survives intact: sent as a number, `5934007978150595964` arrives as
+            `5934007978150595584` and Telegram answers "no such emoji" for an id
+            that plainly exists. Strings cross unchanged and are converted here.
         count: Frames to render per animated emoji (webm or rendered .tgs); capped at 10.
         max_bytes: Byte budget PER DOCUMENT — a call resolves up to 10 of them —
             aborting the transfer rather than buffering the rest once it is
@@ -651,7 +656,12 @@ async def get_custom_emoji(
     found in field values.
     """
     try:
-        ids = [document_ids] if isinstance(document_ids, int) else list(document_ids or [])
+        # `(int, str)`, not `int`: a bare string is iterable, so the old check
+        # sent one id through `list()` and got its DIGITS back as ten separate
+        # ids. Widening the parameter to accept strings is what made that
+        # reachable, so the guard widens with it.
+        single = isinstance(document_ids, (int, str))
+        ids = [document_ids] if single else list(document_ids or [])
         ids = [int(value) for value in ids][:MAX_CUSTOM_EMOJI_IDS]
         if not ids:
             return (

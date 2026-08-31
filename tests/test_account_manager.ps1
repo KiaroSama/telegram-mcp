@@ -662,6 +662,28 @@ try {
         throw 'Remove-Account no longer clears the TDLib database.'
     }
 
+
+    # Nothing may tell the owner to restart for an account change.
+    #
+    # `get_client` re-reads `.env` when it moves, so the advice is not merely
+    # unnecessary - it is wrong, and it is the advice that sent the owner round
+    # this loop repeatedly today. The launcher printed it in four places.
+    foreach ($claim in @('Restart the MCP server', 'restart the MCP server')) {
+        if ($source -match [regex]::Escape($claim)) {
+            throw "The launcher still tells the owner to restart for an account change: '$claim'."
+        }
+    }
+    $profileSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'telegram_mcp/tools/profile.py'))
+    if ($profileSource -match 'Restart the MCP server') {
+        throw 'get_me still tells the caller to restart; a replaced session is picked up on its own.'
+    }
+    # And the mechanism that makes that true has to still be wired in.
+    $connection = [IO.File]::ReadAllText((Join-Path $projectRoot 'telegram_mcp/connection.py'))
+    if ($connection -notmatch '(?ms)def get_client.*?refresh_accounts\(\)') {
+        throw 'get_client no longer refreshes from .env, so "no restart needed" became false.'
+    }
+    Write-Host 'ok  no message claims a restart is needed, and the reload is still wired in'
+
     # A status probe attached to a listing must never take the listing down.
     $probe = [regex]::Match($source, '(?ms)^function Get-SecretChatStates \{.*?^\}').Value
     if ($probe -notmatch 'IsNullOrWhiteSpace\(\$PSScriptRoot\)') {

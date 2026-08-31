@@ -47,7 +47,7 @@ Message sent successfully:
 
 ## What It Can Do
 
-The server registers **192 MCP tools**. That count is measured, not estimated — see
+The server registers **193 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 
@@ -55,6 +55,7 @@ server deliberately does not. The tools group into these areas:
 - **Chats and groups:** list chats, inspect metadata, create groups/channels, join or leave chats, invite users, manage admins, bans, default permissions, slow mode, topics, invite links, common chats, read receipts, and message links.
 - **Messages:** send, schedule, edit, delete, forward, copy, pin, unpin, mark read, reply, search, inspect context, create polls, manage reactions, inspect inline buttons, and press inline callbacks. `copy_message` is a forward without the attribution header, made by the server, so custom (premium) emoji and any media arrive exactly as they were - rebuilding the text locally cannot, because a premium emoji is a document id pinned to a UTF-16 offset. `send_message`, `reply_to_message`, and `edit_message` support classic formatting (`parse_mode='md'`/`'html'`) and server-side rich formatting (`parse_mode='rich'`/`'rich_markdown'`/`'rich_html'` — full Markdown/HTML with tables, headings, formulas, and collapsible sections). Rich modes require Telegram Premium on the account; Premium is re-checked on every call, and without it nothing is sent — the tool returns a structured `telegram_premium_required` result so the agent can reformat with classic modes and retry.
 - **Admin rights newer than Telethon's layer:** Telegram silently drops flags added after the TL layer a client announces — measured, not assumed: one request from a channel's own creator carrying flags.18, flags.19 and flags.20 was accepted and only flags.18 survived. Telethon announces 227 and is archived. The layer cannot be raised for one call — Telegram accepts `invokeWithLayer` only as a connection's first request, and announcing a later layer wholesale would require the library to know every constructor in it, because TL objects carry no length and an unknown one cannot be skipped. So `edit_admin_rights` finishes those rights over TDLib (layer 229) instead of only reporting the loss, and `set_admin_right` sets one directly. Both preserve every other right by reading and writing the whole rights object inside TDLib rather than translating names between the two libraries; `manage_linked_peers`, which has no unambiguous TDLib field, is reported rather than guessed at.
+- **Tables and other rich blocks:** a message written with Telegram's newer rich formatting arrives through MTProto **completely empty** - no text, no entities, no media, and no error, because its body is a `messageRichMessage`, a content type that does not exist in the TL layer Telethon announces. Measured on a live message that renders as a bordered two-column table with premium emoji: `inspect_message` and `get_message_context` both reported `[empty]` and nothing was raised. `read_rich_message` reads the same message over TDLib and returns every block - a table as structured `rows` (each cell with its header flag and any colspan/rowspan) and as ready-made `markdown`. Nested formatting is flattened rather than dropped, so bold runs and a caption's link survive.
 - **Secret chats:** create an end-to-end encrypted chat, send text, photos and voice into it, read its history, arm its self-destruct timer, and close it. These nine tools do not run on Telethon, which never implemented MTProto 2.0 — they run on TDLib, Telegram's own client library. `tdjson` ships with the project, so for an account added through `Manage-Accounts.ps1` there is nothing extra to do: the session generator signs the account in to TDLib as well, in the same run, reusing the two-step password you have just typed rather than asking for it again. TDLib cannot read a Telethon session and offers no way to import one, so the account does appear as another device — that part is the protocol. `secret_chat_status` says what is missing for an account that arrived some other way, and `scripts/secret_chat_login.py <account>` finishes one by hand.
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
@@ -486,6 +487,15 @@ python scripts/secret_chat_login.py <label>
 ```
 
 ## Multi-Account Setup
+
+**`.env` is re-read while the server runs.** An account added, removed, or signed in again
+is picked up on the next tool call — no restart. The check is one `stat` of the file; it is
+only parsed, and clients only rebuilt, when that stamp actually moves, and the session value
+itself is never held, only a digest of it so a change can be noticed.
+
+That is not a convenience. Before it, forgetting to restart did not produce "unknown
+account": it produced `AuthKeyUnregisteredError` from the session the process was still
+holding, which reads like Telegram revoking the login rather than like stale state locally.
 
 Use suffixed session variables to configure multiple Telegram accounts:
 

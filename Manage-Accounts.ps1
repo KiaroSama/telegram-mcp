@@ -882,7 +882,7 @@ function Add-Account {
         if ((Get-Accounts).Contains($label)) {
             Write-Host ''
             Write-Host "The generator saved '$label' to .env." -ForegroundColor Green
-            Write-Host 'Restart the MCP server for it to take effect.' -ForegroundColor Cyan
+            Write-Host 'A running server picks this up on its own - no restart needed.' -ForegroundColor Cyan
             return
         }
         Write-Hint 'The generator did not save it, so paste the string it printed.'
@@ -920,7 +920,7 @@ function Add-Account {
     Write-Host ''
     Write-Host "Added '$label'." -ForegroundColor Green
     if ($backup) { Write-Host "Previous .env kept as $(Split-Path -Leaf $backup)" }
-    Write-Host 'Restart the MCP server for it to take effect.' -ForegroundColor Cyan
+    Write-Host 'A running server picks this up on its own - no restart needed.' -ForegroundColor Cyan
     if ((Get-Accounts).Count -gt 1) {
         Write-Host ''
         Write-Host 'You now have more than one account, so write tools will require' -ForegroundColor Yellow
@@ -1020,7 +1020,7 @@ function Remove-Account {
     Write-Host ''
     Write-Host "Removed '$label'." -ForegroundColor Green
     if ($backup) { Write-Host "Previous .env kept as $(Split-Path -Leaf $backup)" }
-    Write-Host 'Restart the MCP server for it to take effect.' -ForegroundColor Cyan
+    Write-Host 'A running server picks this up on its own - no restart needed.' -ForegroundColor Cyan
 }
 
 function Rename-Account {
@@ -1063,7 +1063,7 @@ function Rename-Account {
     Write-Host ''
     Write-Host "Renamed '$from' to '$to'." -ForegroundColor Green
     if ($backup) { Write-Host "Previous .env kept as $(Split-Path -Leaf $backup)" }
-    Write-Host 'Restart the MCP server for it to take effect.' -ForegroundColor Cyan
+    Write-Host 'A running server picks this up on its own - no restart needed.' -ForegroundColor Cyan
 }
 
 # --- menu --------------------------------------------------------------------

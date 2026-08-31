@@ -48,16 +48,14 @@ async def get_me(account: str = None) -> str:
             # `None.id` -- an AttributeError that says nothing about the cause
             # and sent the owner looking in the wrong place.
             #
-            # The cause is nearly always this: the account was removed and added
-            # again, which replaces the session string in `.env`, while THIS
-            # process still holds the session it read at startup. The old one is
-            # dead the moment the new login replaces it.
+            # `get_client` re-reads `.env` when it changes, so a session
+            # replaced on disk is already picked up. Reaching here therefore
+            # means the session is dead at TELEGRAM's end, not stale here.
             return (
-                "This account's Telegram login is no longer valid in the running server. "
-                "That usually means the account was signed in again after this server "
-                "started: the new session is in .env, but this process still holds the one "
-                "it read at startup. Restart the MCP server and try again. If it persists, "
-                "the session was revoked from Telegram's Settings > Devices."
+                "This account's Telegram login is no longer valid. A session replaced in "
+                ".env is picked up automatically, so this is Telegram's side: the login was "
+                "revoked, signed out, or ended from Settings > Devices. Add the account "
+                "again with Manage-Accounts.ps1 to sign in afresh."
             )
         return json.dumps(format_entity(me), indent=2)
     except Exception as e:
