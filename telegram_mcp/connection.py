@@ -601,8 +601,174 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
 clients: dict[str, TelegramClient] = _discover_accounts()
 
 
+def _env_file() -> Optional[str]:
+    """The `.env` this process reads, or None when it runs on real env vars."""
+    try:
+        from dotenv import find_dotenv
+
+        return find_dotenv(usecwd=True) or None
+    except Exception:
+        return None
+
+
+def _env_fingerprint(path: Optional[str]) -> tuple:
+    """Cheap "has it changed" stamp. Mtime AND size, because an edit that keeps
+    the byte count is exactly the shape of a session string being swapped."""
+    if not path:
+        return ()
+    try:
+        stat = os.stat(path)
+        return (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        return ()
+
+
+def _account_digest(value: str) -> str:
+    """A session string is a full login; only ever its digest is kept."""
+    import hashlib
+
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+_ACCOUNT_PREFIXES = ("TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")
+
+
+def _accounts_from_disk() -> dict:
+    """The environment as it would be if this process had started right now.
+
+    Account variables come from the FILE alone, everything else from the live
+    process. That asymmetry is the point: `load_dotenv` can add a new variable
+    to `os.environ` but never removes one, so an account deleted from `.env`
+    would otherwise still be in the environment and stay configured forever.
+    """
+    from dotenv import dotenv_values
+
+    path = _env_file()
+    on_disk = dotenv_values(path) if path else {}
+    env = {k: v for k, v in os.environ.items() if not k.startswith(_ACCOUNT_PREFIXES)}
+    env.update({k: v for k, v in on_disk.items() if v})
+    return env
+
+
+def _current_digests(env: dict) -> dict:
+    return {
+        key: _account_digest(value)
+        for key, value in env.items()
+        if key.startswith(_ACCOUNT_PREFIXES) and value
+    }
+
+
+_env_stamp: tuple = _env_fingerprint(_env_file())
+_env_digests: dict = {}
+
+
+def refresh_accounts() -> list:
+    """Pick up accounts added, removed or re-logged-in since startup.
+
+    Adding an account used to need a server restart, and the failure when you
+    forgot was not "unknown account" - it was `AuthKeyUnregisteredError` from
+    the session this process was still holding, which reads like Telegram
+    revoking the login rather than like stale state here. Re-logging in an
+    existing account produced the same thing.
+
+    Cost on the common path is one `os.stat`. The file is only parsed, and
+    clients only rebuilt, when that stamp actually moves.
+
+    Returns the labels that changed, so a caller can say what happened.
+    """
+    global _env_stamp, _env_digests
+
+    path = _env_file()
+    stamp = _env_fingerprint(path)
+    if stamp == _env_stamp and _env_digests:
+        return []
+
+    try:
+        env = _accounts_from_disk()
+        digests = _current_digests(env)
+    except Exception:
+        # A half-written `.env` - the account manager backs up and rewrites, so
+        # there IS a window - must not take the running server down. The next
+        # call sees a new stamp and tries again.
+        return []
+
+    if not _env_digests:  # first call: adopt the startup state, change nothing
+        _env_stamp, _env_digests = stamp, digests
+        return []
+    if digests == _env_digests:
+        _env_stamp = stamp
+        return []
+
+    try:
+        rebuilt = _discover_accounts(env)
+    except Exception:
+        # A `.env` that no longer describes a valid account set (a duplicate
+        # label, an unusable one) leaves the WORKING clients in place. Refusing
+        # to serve because a file on disk went wrong would be worse than serving
+        # what already works.
+        _env_stamp = stamp
+        return []
+
+    changed = sorted(set(rebuilt) ^ set(clients)) + sorted(
+        label for label in set(rebuilt) & set(clients) if _replaced(label, digests)
+    )
+    for label in set(clients) - set(rebuilt):
+        _retire(clients.pop(label))
+    for label, client in rebuilt.items():
+        if label in clients and not _replaced(label, digests):
+            continue
+        if label in clients:
+            _retire(clients[label])
+        clients[label] = client
+
+    _env_stamp, _env_digests = stamp, digests
+    return sorted(set(changed))
+
+
+def _replaced(label: str, digests: dict) -> bool:
+    """Whether this label's session value differs from the one in use."""
+    keys = [k for k in digests if k.upper().endswith(label.upper())] or []
+    before = {k: v for k, v in _env_digests.items() if k in keys}
+    after = {k: v for k, v in digests.items() if k in keys}
+    return before != after
+
+
+def _retire(client) -> None:
+    """Close a client this process no longer serves.
+
+    `get_client` is synchronous and is called both from inside the server's loop
+    and from plain code, so there are two cases and the first version handled
+    only one: it scheduled the disconnect on the running loop and did nothing at
+    all when there was none - which is the ordinary case, so the socket simply
+    stayed open. Its own test caught that.
+
+    Never raises. A lookup must not fail because tidying up did.
+    """
+    import asyncio
+
+    try:
+        closing = client.disconnect()
+    except Exception:
+        return
+    if closing is None:  # Telethon already closed it synchronously
+        return
+    try:
+        asyncio.get_running_loop().create_task(closing)
+        return
+    except RuntimeError:
+        pass  # no loop here: close it now rather than leaving it open
+    try:
+        asyncio.run(closing)
+    except Exception:
+        try:
+            closing.close()  # at least do not leave a pending coroutine
+        except Exception:
+            pass
+
+
 def get_client(account: str = None) -> TelegramClient:
     """Resolve account label to TelegramClient."""
+    refresh_accounts()
     if account is None:
         if len(clients) == 1:
             return next(iter(clients.values()))

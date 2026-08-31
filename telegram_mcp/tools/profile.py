@@ -42,6 +42,23 @@ async def get_me(account: str = None) -> str:
         cl = get_client(account)
         await ensure_connected(cl)
         me = await cl.get_me()
+        if me is None:
+            # Connected but not authorised. Telethon answers None rather than
+            # raising, so this used to reach `format_entity` and die on
+            # `None.id` -- an AttributeError that says nothing about the cause
+            # and sent the owner looking in the wrong place.
+            #
+            # The cause is nearly always this: the account was removed and added
+            # again, which replaces the session string in `.env`, while THIS
+            # process still holds the session it read at startup. The old one is
+            # dead the moment the new login replaces it.
+            return (
+                "This account's Telegram login is no longer valid in the running server. "
+                "That usually means the account was signed in again after this server "
+                "started: the new session is in .env, but this process still holds the one "
+                "it read at startup. Restart the MCP server and try again. If it persists, "
+                "the session was revoked from Telegram's Settings > Devices."
+            )
         return json.dumps(format_entity(me), indent=2)
     except Exception as e:
         return log_and_format_error("get_me", e)

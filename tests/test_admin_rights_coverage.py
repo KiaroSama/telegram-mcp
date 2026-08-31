@@ -319,3 +319,52 @@ def test_nothing_dropped_and_nothing_delivered_says_nothing():
     assert (
         moderation_mod._later_rights_note({"delivered": [], "failed": {}, "unmappable": []}) == ""
     )
+
+
+@pytest.mark.asyncio
+async def test_a_session_too_new_to_promote_says_so_instead_of_looking_like_a_permission_gap():
+    """Telegram refuses admin changes from a login younger than about 24 hours,
+    however complete its rights are. Measured live: the channel's own CREATOR
+    was refused, minutes after that account was added.
+
+    Worth its own message because the account that hits this is nearly always
+    one just configured - the rights read correctly, the call fails, and the
+    generic "you need admin rights" answer sends the reader to check a
+    permission that was never the problem.
+    """
+    import telethon
+
+    from telegram_mcp.tools import moderation as mod
+
+    class _Refuses:
+        def is_connected(self):
+            return True
+
+        async def __call__(self, request):
+            raise telethon.errors.rpcerrorlist.FreshChangeAdminsForbiddenError(request=None)
+
+    client = _Refuses()
+
+    async def _connected(_client):
+        return None
+
+    async def _resolve(reference, _client):
+        class _Peer:
+            id = 5876481644
+
+        return _Peer()
+
+    original = (mod.get_client, mod.ensure_connected, mod.resolve_entity)
+    mod.get_client = lambda account=None: client
+    mod.ensure_connected = _connected
+    mod.resolve_entity = _resolve
+    try:
+        answer = await mod.edit_admin_rights(
+            chat_id=-1002046407246, user_id=5876481644, account="acct", change_info=True
+        )
+    finally:
+        mod.get_client, mod.ensure_connected, mod.resolve_entity = original
+
+    assert "24 hours" in answer, "the age rule was not named"
+    assert "anti-hijack" in answer
+    assert "need admin rights" not in answer, "it still reads as a missing permission"

@@ -200,3 +200,47 @@ async def test_a_user_session_is_refused_before_anything_is_sent(_wire):
 
     assert client.requests == [], "a user session must not reach Telegram"
     assert "bot" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_an_unauthorised_login_is_explained_rather_than_crashing(monkeypatch):
+    """Telethon answers `None` from `get_me()` for a client that is connected but
+    no longer authorised. That None used to reach `format_entity` and die on
+    `None.id`, so the owner saw "AttributeError" and an error code - nothing
+    about the session having been replaced, which is what had happened.
+
+    The cause is worth naming precisely: removing and re-adding an account writes
+    a NEW session string to `.env`, and a server started earlier still holds the
+    old one. Only a restart picks it up.
+    """
+    from telegram_mcp.tools import profile as profile_mod
+
+    class _Unauthorised:
+        async def get_me(self):
+            return None
+
+        def is_connected(self):
+            return True
+
+    monkeypatch.setattr(profile_mod, "get_client", lambda account=None: _Unauthorised())
+
+    async def _connected(client):
+        return None
+
+    monkeypatch.setattr(profile_mod, "ensure_connected", _connected)
+
+    answer = await profile_mod.get_me(account="acct")
+
+    assert "AttributeError" not in answer
+    assert "Restart the MCP server" in answer, "the remedy was not named"
+    assert "no longer valid" in answer
+
+
+def test_formatting_nothing_says_what_came_back_empty():
+    """The shared guard, so no other path can produce the same opaque crash."""
+    from telegram_mcp.runtime import get_marked_id
+
+    with pytest.raises(ValueError) as raised:
+        get_marked_id(None)
+
+    assert "no longer authorised" in str(raised.value)

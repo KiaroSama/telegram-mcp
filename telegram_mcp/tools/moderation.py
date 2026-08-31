@@ -436,6 +436,18 @@ async def edit_admin_rights(
             account, utils.get_peer_id(entity), utils.get_peer_id(user), dropped
         )
         return answer + _later_rights_note(outcome)
+    except telethon.errors.rpcerrorlist.FreshChangeAdminsForbiddenError:
+        # Telegram's anti-hijack rule, not a permission this account is missing:
+        # a session younger than about 24 hours may not promote or demote
+        # anyone, however complete its rights are. Worth naming, because the
+        # account that hits this is usually one just added - the rights look
+        # right, the call fails, and nothing says the clock is the reason.
+        return (
+            "Error: Telegram refuses admin changes from a session this new. A login has to "
+            "be about 24 hours old before it can promote or demote anyone, no matter what "
+            "rights it holds - it is an anti-hijack rule, not a missing permission. Use an "
+            "older session for this account, or wait and retry."
+        )
     except telethon.errors.rpcerrorlist.ChatAdminRequiredError:
         return "Error: you need admin rights (with 'add_admins') to modify admin rights."
     except telethon.errors.rpcerrorlist.UserAdminInvalidError:

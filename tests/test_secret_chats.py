@@ -15,7 +15,7 @@ import json
 
 import pytest
 
-from telegram_mcp.tdlib import NotSignedIn, TDLibUnavailable
+from telegram_mcp.tdlib import NotSignedIn, TDLibError, TDLibUnavailable
 from telegram_mcp.tools import secret_chats as sc
 
 
@@ -299,3 +299,84 @@ async def test_status_reports_the_install_step_when_the_library_is_absent(monkey
 
     assert result["secret_chats"] == "unavailable"
     assert "tdjson" in result["fix"]
+
+
+# --------------------------------------------------------------------------
+# Opening a secret chat with someone TDLib has never heard of
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def peer(monkeypatch):
+    """Resolve any reference to one user, the way Telethon would."""
+
+    def _peer(user_id=5899781975):
+        class _User:
+            id = user_id
+
+        monkeypatch.setattr(sc, "get_client", lambda account=None: object())
+
+        async def _connected(client):
+            return None
+
+        async def _resolve(reference, client):
+            return _User()
+
+        monkeypatch.setattr(sc, "ensure_connected", _connected)
+        monkeypatch.setattr(sc, "resolve_entity", _resolve)
+        return user_id
+
+    return _peer
+
+
+@pytest.mark.asyncio
+async def test_tdlib_is_taught_the_user_before_the_chat_is_asked_for(wire, peer):
+    """Telethon and TDLib keep SEPARATE databases.
+
+    Resolving the reference populates Telethon's, not TDLib's, and a TDLib
+    database created minutes ago knows almost nobody. `createNewSecretChat` on a
+    perfectly valid id then fails with a refusal naming neither the user nor the
+    reason - which is exactly what a freshly signed-in account hit.
+    """
+    user_id = peer()
+    client = wire({"createNewSecretChat": {"@type": "secretChat", "id": 7, "state": {}}})
+
+    await sc.create_secret_chat(user_id=user_id, account="acct")
+
+    types = client.types()
+    assert "createPrivateChat" in types, "TDLib was never told who the user is"
+    assert types.index("createPrivateChat") < types.index(
+        "createNewSecretChat"
+    ), "the user was fetched after the chat was already asked for"
+
+
+@pytest.mark.asyncio
+async def test_a_user_tdlib_already_knows_costs_nothing_extra(wire, peer):
+    """A failing lookup must not stop the real call: TDLib may already know
+    them, and the verdict belongs to `createNewSecretChat`."""
+    user_id = peer()
+    client = wire(
+        {
+            "createPrivateChat": TDLibError(400, "Chat not found"),
+            "createNewSecretChat": {"@type": "secretChat", "id": 7, "state": {}},
+        }
+    )
+
+    answer = await sc.create_secret_chat(user_id=user_id, account="acct")
+
+    assert "createNewSecretChat" in client.types()
+    assert "Invitation sent" in answer
+
+
+@pytest.mark.asyncio
+async def test_telegrams_refusal_is_shown_not_filed_under_an_error_code(wire, peer):
+    """The reason is one sentence from Telegram - "the user restricts new chats",
+    "have no write access". Hiding it behind a code sends the reader to a log to
+    find out what the API already said."""
+    user_id = peer()
+    wire({"createNewSecretChat": TDLibError(400, "USER_RESTRICTED_NEW_CHATS")})
+
+    answer = await sc.create_secret_chat(user_id=user_id, account="acct")
+
+    assert "USER_RESTRICTED_NEW_CHATS" in answer
+    assert "error occurred" not in answer.lower(), "the reason was replaced by a code"

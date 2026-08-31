@@ -252,6 +252,24 @@ async def create_secret_chat(user_id: Union[int, str], account: str = None) -> s
         if peer_id is None:
             return f"Error: {user_id} did not resolve to a user."
 
+        # Teach TDLib the user before asking it to open a chat with them.
+        #
+        # Telethon and TDLib keep SEPARATE databases, and resolving above only
+        # populated Telethon's. A TDLib database that has just been created knows
+        # almost nobody, so `createNewSecretChat` on a perfectly valid id fails
+        # with a refusal that names neither the user nor the reason.
+        #
+        # `createPrivateChat` is the documented way to fetch one: it costs a
+        # round trip, notifies nobody, and creates no visible chat.
+        try:
+            await client.request(
+                {"@type": "createPrivateChat", "user_id": peer_id, "force": False}
+            )
+        except TDLibError:
+            # Not fatal on its own - TDLib may already know them, and the real
+            # verdict belongs to the call below.
+            pass
+
         chat = await client.request({"@type": "createNewSecretChat", "user_id": peer_id})
         record = _chat_record(chat)
         record["note"] = (
@@ -263,7 +281,13 @@ async def create_secret_chat(user_id: Union[int, str], account: str = None) -> s
         return _unavailable(e)
     except ValueError as e:
         return str(e)
-    except (TDLibError, TimeoutError) as e:
+    except TDLibError as e:
+        # Telegram's own refusal, shown rather than filed under an error code.
+        # It is the API's verdict - "the user restricts new chats", "have no
+        # write access" - and hiding it behind a code sends the caller to a log
+        # to read one sentence. Matches `set_admin_right`, which does the same.
+        return f"Telegram refused this: {e}"
+    except TimeoutError as e:
         return log_and_format_error("create_secret_chat", e, user_id=user_id)
     except Exception as e:
         return log_and_format_error("create_secret_chat", e, user_id=user_id)

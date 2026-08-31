@@ -104,7 +104,21 @@ def get_entity_type(entity: Any) -> str:
 
 
 def get_marked_id(entity: Any) -> int:
-    """Return a Telethon-compatible marked ID for an entity."""
+    """Return a Telethon-compatible marked ID for an entity.
+
+    `None` is refused by name. Telethon's `get_me()` answers None for a client
+    that is connected but no longer authorised, and that None used to arrive
+    here and fail as `'NoneType' object has no attribute 'id'` -- a message that
+    names neither the entity nor the reason, so the reader looks at the wrong
+    half of the system. Every caller formats something it fetched; saying which
+    fetch came back empty is the difference between a lead and a puzzle.
+    """
+    if entity is None:
+        raise ValueError(
+            "No entity to format: the lookup returned nothing. For your own account "
+            "that means this login is no longer authorised - the session was replaced "
+            "or revoked since the server started."
+        )
     if isinstance(entity, Channel):
         return -1000000000000 - entity.id
     if isinstance(entity, Chat):
