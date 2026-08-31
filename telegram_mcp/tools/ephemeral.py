@@ -473,6 +473,19 @@ async def save_disappearing_media(
         ]
     except (FrameExtractionError, ImageError) as e:
         return f"Could not render the disappearing media in message {message_id}: {e}"
+    except telethon.errors.rpcerrorlist.AuthBytesInvalidError:
+        # Observed once, on the first download after a client restart: Telethon
+        # borrows a sender for the file's datacentre and that exchange fails.
+        # It happens BEFORE any byte is fetched, so the message was never
+        # opened and its countdown never started - which makes retrying safe,
+        # and makes saying so the whole point. For a tool whose contract is
+        # "you get one fetch", an opaque error reads as "you just burned it".
+        return (
+            f"Could not reach the datacentre holding message {message_id}'s media, and "
+            "nothing was fetched. The message was NOT opened and its countdown has not "
+            "started, so calling this again is safe - it usually succeeds on the second "
+            "try. (Telegram: AUTH_BYTES_INVALID, seen after a client restart.)"
+        )
     except Exception as e:
         return log_and_format_error(
             "save_disappearing_media", e, chat_id=chat_id, message_id=message_id

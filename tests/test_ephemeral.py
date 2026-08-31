@@ -547,3 +547,35 @@ def test_saving_disappearing_media_is_declared_a_write():
     annotation and the router disagreed about what it does; only
     `require_explicit_account` was keeping it out of the read-only fan-out."""
     assert mod.save_disappearing_media.__telegram_readonly__ is False
+
+
+@pytest.mark.asyncio
+async def test_a_failure_before_any_byte_says_the_message_is_still_unopened(monkeypatch):
+    """A one-fetch tool must distinguish "you burned it" from "try again".
+
+    Observed live, on the first download after a client restart: Telethon
+    borrows a sender for the file's datacentre and that handshake fails with
+    `AuthBytesInvalidError`. It happens before any byte moves, so the message
+    was never opened and its countdown never started - the retry succeeded and
+    the file arrived intact.
+
+    The old answer was an opaque error code. For a tool whose entire contract is
+    that a second fetch returns nothing, that reads as "your one chance is
+    gone", and a caller who believes it will not retry a call that would have
+    worked.
+    """
+    import telethon
+
+    from telegram_mcp.tools import ephemeral as eph
+
+    def _explode(*args, **kwargs):
+        raise telethon.errors.rpcerrorlist.AuthBytesInvalidError(request=None)
+
+    monkeypatch.setattr(eph, "get_client", _explode)
+
+    answer = await eph.save_disappearing_media(chat_id=1, message_id=2, account="acct")
+
+    assert isinstance(answer, str)
+    assert "nothing was fetched" in answer
+    assert "NOT opened" in answer
+    assert "safe" in answer
