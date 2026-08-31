@@ -39,6 +39,7 @@ from telegram_mcp.tools.stories import *
 from telegram_mcp.tools.channel_admin import *
 from telegram_mcp.tools.saved import *
 from telegram_mcp.tools.stickers import *
+from telegram_mcp.tools.saved_gifs import *
 
 # translation.py, not translate.py: `import *` binds the tool name `translate`
 # into this package, which would otherwise shadow the submodule of the same name.

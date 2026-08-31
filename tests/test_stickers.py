@@ -191,3 +191,175 @@ async def test_moving_sends_the_position_and_is_marked_idempotent(_wire):
 
     assert client.sent("ChangeStickerPositionRequest").position == 4
     assert payload["results"][0]["position"] == 4
+
+
+# --- installing and removing a whole pack ------------------------------------
+#
+# A different axis from the tools above: those edit a set's CONTENTS for everyone
+# who has it, these attach or detach the pack from this one account.
+
+
+@pytest.mark.asyncio
+async def test_installing_by_short_name_sends_the_short_name_reference(_wire):
+    client = _wire(
+        _Client(
+            {
+                "InstallStickerSetRequest": SimpleNamespace(sets=[]),
+                "GetStickerSetRequest": _set_result(short_name="Pack"),
+            }
+        )
+    )
+
+    await mod.install_sticker_set(short_name="Pack", account="a")
+
+    sent = client.sent("InstallStickerSetRequest")
+    assert type(sent.stickerset).__name__ == "InputStickerSetShortName"
+    assert sent.stickerset.short_name == "Pack"
+    assert sent.archived is False
+
+
+@pytest.mark.asyncio
+async def test_an_emoji_pack_installs_through_the_same_call_and_is_named_as_one(_wire):
+    """Telegram has no separate "install emoji pack" method - an emoji pack IS a
+    sticker set with `emojis` set. A caller who meant one and got the other can
+    only tell from the answer, so the answer says which arrived."""
+    emoji_set = _set_result(short_name="Faces")
+    emoji_set.set.emojis = True
+    _wire(
+        _Client(
+            {
+                "InstallStickerSetRequest": SimpleNamespace(sets=[]),
+                "GetStickerSetRequest": emoji_set,
+            }
+        )
+    )
+
+    record = json.loads(await mod.install_sticker_set(short_name="Faces", account="a"))["results"][
+        0
+    ]
+
+    assert record["kind"] == "emoji"
+    assert record["installed"] is True
+
+
+@pytest.mark.asyncio
+async def test_packs_telegram_archived_to_make_room_are_named(_wire):
+    """`stickerSetInstallResultArchive` is not a failure: the account was at its
+    pack limit, so Telegram archived older packs and listed them. Reporting it as
+    plain success hides packs vanishing from the picker."""
+    displaced = SimpleNamespace(set=SimpleNamespace(short_name="Old", title="An Old Pack"))
+    _wire(
+        _Client(
+            {
+                "InstallStickerSetRequest": SimpleNamespace(sets=[displaced]),
+                "GetStickerSetRequest": _set_result(short_name="Pack"),
+            }
+        )
+    )
+
+    answer = await mod.install_sticker_set(short_name="Pack", account="a")
+    record = json.loads(answer)["results"][0]
+
+    assert record["displaced_to_archive"] == [{"short_name": "Old", "title": "An Old Pack"}]
+    assert "pack limit" in answer
+
+
+@pytest.mark.asyncio
+async def test_an_id_without_its_access_hash_is_refused_before_any_request(_wire):
+    """Half a reference cannot address a set, and InputStickerSetID would raise
+    on the None rather than say which half was missing."""
+    client = _wire(_Client())
+
+    answer = await mod.install_sticker_set(set_id=123, account="a")
+
+    assert "access_hash" in answer
+    assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_nothing_identifying_the_pack_is_refused(_wire):
+    client = _wire(_Client())
+
+    answer = await mod.uninstall_sticker_set(account="a")
+
+    assert "Nothing identifies the pack" in answer
+    assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_uninstalling_reads_the_pack_first_so_it_can_be_put_back(_wire):
+    """A removal that does not name what went leaves the caller unable to undo it:
+    install_sticker_set needs the short name, and after the uninstall the set is
+    no longer in this account's list to look up."""
+    client = _wire(
+        _Client(
+            {
+                "GetStickerSetRequest": _set_result(short_name="Pack"),
+                "UninstallStickerSetRequest": True,
+            }
+        )
+    )
+
+    answer = await mod.uninstall_sticker_set(short_name="Pack", account="a")
+
+    assert client.names() == ["GetStickerSetRequest", "UninstallStickerSetRequest"], (
+        "the read must come BEFORE the removal: " f"{client.names()}"
+    )
+    assert "install_sticker_set(short_name='Pack')" in answer
+    assert json.loads(answer)["results"][0]["uninstalled"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_pack_that_cannot_be_described_is_still_uninstalled(_wire):
+    """Losing the description must not lose the removal. The read is there to
+    make the answer useful, not to gate the write."""
+
+    def _refuse(request):
+        raise ValueError("Telegram will not describe this set")
+
+    client = _wire(_Client({"GetStickerSetRequest": _refuse, "UninstallStickerSetRequest": True}))
+
+    answer = await mod.uninstall_sticker_set(short_name="Pack", account="a")
+
+    assert client.sent("UninstallStickerSetRequest") is not None, "the removal was skipped"
+    assert json.loads(answer)["results"][0]["uninstalled"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_short_name_that_is_not_one_says_where_a_short_name_comes_from(_wire):
+    """The commonest mistake with these two tools is passing a title or a t.me URL
+    instead of the short name. Telethon raises StickersetInvalidError for all of
+    them, and the generic handler turned that into "An error occurred (code:
+    GEN-ERR-413)" - measured live against a name that did not exist, which says
+    nothing about the name being the problem."""
+    from telethon import errors
+
+    def _invalid(request):
+        raise errors.StickersetInvalidError(request=None)
+
+    _wire(_Client({"InstallStickerSetRequest": _invalid, "GetStickerSetRequest": _invalid}))
+
+    answer = await mod.install_sticker_set(short_name="Not A Real Pack", account="a")
+
+    assert "GEN-ERR" not in answer, "still an opaque code"
+    assert "'Not A Real Pack'" in answer, "the name it refused is not quoted back"
+    assert "t.me/addstickers" in answer, "it does not say where a short name comes from"
+
+
+@pytest.mark.asyncio
+async def test_an_unrecognised_id_blames_the_pairing_rather_than_the_name(_wire):
+    """An access_hash is bound to the set AND to the account, so one carried over
+    from somewhere else fails identically to a wrong id. Quoting a short name that
+    was never passed would send the reader looking for the wrong mistake."""
+    from telethon import errors
+
+    def _invalid(request):
+        raise errors.StickersetInvalidError(request=None)
+
+    _wire(_Client({"UninstallStickerSetRequest": _invalid, "GetStickerSetRequest": _invalid}))
+
+    answer = await mod.uninstall_sticker_set(set_id=123, access_hash=456, account="a")
+
+    assert "access_hash" in answer
+    assert "123" in answer
+    assert "short name" not in answer, "it blames a name the caller never gave"

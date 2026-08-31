@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **194** |
+| MCP tools registered | **199** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -98,6 +98,8 @@ predicted.
 | Quick-reply shortcuts | `list_quick_replies`, `send_quick_reply` | `tools/saved.py` |
 | Translation | `translate` | `tools/translation.py` |
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
+| Packs on the account: install and remove | `install_sticker_set`, `uninstall_sticker_set`, `get_sticker_sets(kind=...)` | `tools/stickers.py`, `tools/media.py` |
+| Saved GIFs | `list_saved_gifs`, `save_gif`, `unsave_gif` | `tools/saved_gifs.py` |
 | Channel username (the identity gap) | `check_channel_username`, `set_channel_username` | `tools/channel_admin.py` |
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
@@ -176,6 +178,22 @@ three of Telegram's launch methods — `messages.RequestWebView` for the app an 
 button opens, `messages.RequestAppWebView` for a named `t.me/<bot>/<app>`, and
 `messages.RequestMainWebView` for a bot's own profile app. Telegram returns a URL,
 not a page: the tool hands that URL back whole, labelled as the credential it is.
+
+### Measured while building the pack tools
+
+`messages.getAllStickers` returns sticker sets ONLY. An installed custom-emoji
+pack was invisible to every tool here, so `uninstall_sticker_set` had no way to
+name one - the account under test had 82 sticker packs and **81 emoji packs**,
+none of them reachable. Emoji packs come from `messages.getEmojiStickers`, which
+is why `get_sticker_sets` grew a `kind`. Installing is not split the same way:
+`messages.installStickerSet` takes either, because an emoji pack IS a sticker set
+with `emojis` set.
+
+`messages.getSavedGifs` answers with at most 400 documents, and that is a window
+rather than a total. On an account whose reply held 400, removing one GIF - it
+was confirmed absent from the next reply - left the reply still holding 400. So
+no number from this API means "how many GIFs are saved", and the tools report
+`returned` rather than a count.
 
 ### Deliberately not building
 

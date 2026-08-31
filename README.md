@@ -47,7 +47,7 @@ Message sent successfully:
 
 ## What It Can Do
 
-The server registers **194 MCP tools**. That count is measured, not estimated — see
+The server registers **199 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 
@@ -72,6 +72,7 @@ Aliases live in `${XDG_STATE_HOME:-~/.local/state}/telegram-mcp/aliases.json` (o
 
 **Aliases belong to the account that saved them.** A chat ID only identifies a person within one login, so the same alias on a different account would name someone else entirely, or nobody. Two accounts can therefore each save their own `мама`, and neither can send to the other's. Aliases saved before this scoping existed are adopted automatically when there is exactly one login configured; with several, the account that saved them cannot be known, so they are offered as something to confirm rather than resolved into a recipient.
 - **Media:** send files, download media, upload files, send voice notes, stickers, GIFs, and inspect message media.
+- **Packs and saved GIFs:** install or remove a whole pack — sticker, custom-emoji or mask — and manage the account's saved-GIF row. Two things here are Telegram's design rather than this server's: an emoji pack IS a sticker set with `emojis` set, so one call installs either kind and the result says which arrived; and `get_sticker_sets` needed a `kind` argument because `messages.getAllStickers` returns sticker sets ONLY, leaving an installed emoji pack unreachable by any tool. Uninstalling removes the pack from this account alone and the answer hands back the `install_sticker_set(...)` call that undoes it. For GIFs, `save_gif` takes a MESSAGE rather than a document id, because a document reference expires and a stale one is refused.
 - **Peer photos:** `list_photos` indexes a peer's pictures, `open_photo` returns one, and
   `get_photo_sheet` returns them as a single labelled grid instead of one image block each.
   Two sources, because Telegram has no single photo list: `avatars` is the profile-picture
@@ -1008,11 +1009,13 @@ had a tool. Grouped by what an agent can actually do with it.
 | **Saved Messages** | `list_saved_dialogs`, `get_saved_history`, `list_saved_tags` | `name_saved_tag` |
 | **Quick replies** | `list_quick_replies` | `send_quick_reply` |
 | **Sticker sets** | `inspect_sticker_set`, `suggest_sticker_set_name` | `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` |
+| **Packs on the account** | `get_sticker_sets` (`kind="stickers"`/`"emoji"`/`"both"`) | `install_sticker_set`, `uninstall_sticker_set` |
+| **Saved GIFs** | `list_saved_gifs` | `save_gif`, `unsave_gif` |
 | **Channel identity** | `check_channel_username` | `set_channel_username` |
 | **Channel analytics** | `get_channel_statistics`, `get_similar_channels` | — |
 | **Translation** | `translate` | — |
 
-Four of these carry a caveat that is part of the feature rather than a footnote:
+Five of these carry a caveat that is part of the feature rather than a footnote:
 
 - **Poll options are identified by opaque bytes on the wire, not by index.** `vote_in_poll` takes
   the human-facing index and looks the blob up in the poll it just read, so a reordered poll
@@ -1021,6 +1024,11 @@ Four of these carry a caveat that is part of the feature rather than a footnote:
   exactly like a timeout before it, so a blind retry duplicates the sticker. Every write reports
   the set's count before and after, and `add_sticker_to_set` takes an `expected_count` that
   refuses the add if the set moved underneath you.
+- **A saved-GIF listing is a window, not a total.** `messages.getSavedGifs` answers with at
+  most 400. Measured: on an account whose reply held 400, a removal that provably
+  succeeded left the reply still holding 400 — something behind it moved up. So the
+  result reports `returned`, never a count that could be read as "how many are saved",
+  and a save or removal is judged by whether the id is present.
 - **Saved Messages is not one flat chat.** Forwarding into it files the copy under the *original
   sender*, so it is a set of per-sender buckets; a reaction placed there doubles as a named tag.
 - **Statistics come back as graph tokens, not numbers.** Telegram answers most graphs with a token

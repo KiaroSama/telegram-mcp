@@ -288,6 +288,69 @@ async def test_get_sticker_sets_reports_the_short_name_a_write_tool_needs(monkey
 
 
 @pytest.mark.asyncio
+async def test_emoji_packs_need_their_own_request_and_kind_selects_it(monkeypatch):
+    """`messages.getAllStickers` returns sticker sets ONLY. An installed
+    custom-emoji pack was invisible here, so `uninstall_sticker_set` had no way to
+    name one - the identifier a caller needs was unreachable from any tool.
+
+    Emoji packs come from `messages.getEmojiStickers` instead. Nothing about a
+    pack differs between the two; only which request finds it.
+    """
+    from telegram_mcp.tools import media as media_mod
+
+    def _pack(short_name, emojis):
+        return types.StickerSet(
+            id=99,
+            access_hash=1234,
+            title="A Pack",
+            short_name=short_name,
+            count=7,
+            hash=0,
+            official=False,
+            masks=False,
+            emojis=emojis,
+            installed_date=None,
+            thumbs=[],
+            thumb_dc_id=None,
+            thumb_version=None,
+            thumb_document_id=None,
+        )
+
+    class _Both:
+        """Answers each listing request with a different pack, so a call that sent
+        the wrong one is visible in the result rather than merely in the log."""
+
+        def __init__(self):
+            self.requests = []
+
+        async def __call__(self, request):
+            self.requests.append(request)
+            name = type(request).__name__
+            if name == "GetEmojiStickersRequest":
+                return types.messages.AllStickers(hash=0, sets=[_pack("emoji_pack", True)])
+            return types.messages.AllStickers(hash=0, sets=[_pack("sticker_pack", False)])
+
+        def is_connected(self):
+            return True
+
+    _wire(monkeypatch, media_mod, _Both())
+
+    stickers_only = await media_mod.get_sticker_sets()
+    assert "sticker_pack" in stickers_only
+    assert "emoji_pack" not in stickers_only, "the default must not change"
+
+    emoji_only = await media_mod.get_sticker_sets(kind="emoji")
+    assert "emoji_pack" in emoji_only
+    assert "sticker_pack" not in emoji_only
+
+    both = await media_mod.get_sticker_sets(kind="both")
+    assert "emoji_pack" in both and "sticker_pack" in both
+
+    refused = await media_mod.get_sticker_sets(kind="masks")
+    assert "must be" in refused, "an unknown kind silently returned something"
+
+
+@pytest.mark.asyncio
 async def test_suggest_sticker_set_name_asks_telegram_rather_than_guessing(monkeypatch):
     """A short name is permanent once the set exists, so the check has to be the
     server's answer, not a local slug."""
