@@ -599,3 +599,131 @@ async def test_the_client_is_closed_even_when_the_login_fails(stub):
         await tdlib.complete_login("acct", object(), ask_password=_boom)
 
     assert client.closed, "the TDLib client was left open"
+
+
+@pytest.mark.asyncio
+async def test_the_label_is_used_as_given_and_never_re_resolved(monkeypatch, tmp_path):
+    """The bug that sent the owner back to log in a third time.
+
+    `complete_login` used to call `account_label`, which imports
+    `telegram_mcp.connection` and reads the configured accounts. The session
+    generator calls this moments after writing a NEW account to `.env` -- the
+    environment had been read before that line existed, so the account that had
+    just been saved successfully looked unconfigured and the step died with
+    "No Telegram session configured".
+
+    Asserted by making the resolver explode: if anything in this path consults
+    it, the test fails with that call rather than with a vague timeout.
+    """
+
+    def _must_not_be_called(account):
+        raise AssertionError(
+            "complete_login re-resolved the label through connection; a freshly "
+            "written account is invisible to that cached view"
+        )
+
+    monkeypatch.setattr(tdlib, "account_label", _must_not_be_called)
+
+    seen = {}
+
+    class _Ready:
+        authorization_state = "authorizationStateReady"
+
+        async def start(self):
+            return "authorizationStateReady"
+
+        async def close(self):
+            pass
+
+    def _capture(label, **kwargs):
+        seen["label"] = label
+        return _Ready()
+
+    monkeypatch.setattr(tdlib, "TDLibClient", _capture)
+
+    state = await tdlib.complete_login("kgb_verifier", object())
+
+    assert state == "authorizationStateReady"
+    assert seen["label"] == "kgb_verifier", "the caller's own label was not the one used"
+
+
+# --------------------------------------------------------------------------
+# Recovering from a database whose authorisation Telegram has forgotten
+# --------------------------------------------------------------------------
+#
+# The loop that cost the owner four real logins. A TDLib database lives beside
+# the Telethon sessions and used to outlive the `.env` line that named it, so
+# removing an account and adding it again handed the NEW session the OLD one's
+# dead auth key. Every attempt then failed with AUTH_KEY_UNREGISTERED, which no
+# amount of logging in again can clear.
+
+
+@pytest.mark.asyncio
+async def test_a_forgotten_authorisation_is_discarded_and_retried(monkeypatch, tmp_path):
+    attempts = []
+    wiped = []
+
+    async def _attempt(label, telethon_client, password, ask_password):
+        attempts.append(label)
+        if len(attempts) == 1:
+            raise tdlib.TDLibError(401, "AUTH_KEY_UNREGISTERED")
+        return "authorizationStateReady"
+
+    monkeypatch.setattr(tdlib, "_attempt_login", _attempt)
+    monkeypatch.setattr(tdlib, "_discard_database", lambda label: wiped.append(label))
+
+    state = await tdlib.complete_login("kgb_verifier", object(), password="pw")
+
+    assert state == "authorizationStateReady"
+    assert wiped == ["kgb_verifier"], "the dead database was not discarded"
+    assert len(attempts) == 2, "it did not try again on a clean database"
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_refusal_never_destroys_the_database(monkeypatch):
+    """The dangerous direction. A wrong password, a flood wait, a network blip -
+    none of those mean the stored authorisation is dead, and wiping on them would
+    throw away a working login (and, with it, secret-chat keys that cannot be
+    re-derived)."""
+    wiped = []
+
+    async def _attempt(label, telethon_client, password, ask_password):
+        raise tdlib.TDLibError(400, "PASSWORD_HASH_INVALID")
+
+    monkeypatch.setattr(tdlib, "_attempt_login", _attempt)
+    monkeypatch.setattr(tdlib, "_discard_database", lambda label: wiped.append(label))
+
+    with pytest.raises(tdlib.TDLibError):
+        await tdlib.complete_login("kgb_verifier", object(), password="wrong")
+
+    assert wiped == [], "an ordinary refusal destroyed the database"
+
+
+@pytest.mark.asyncio
+async def test_a_second_failure_is_reported_rather_than_looping(monkeypatch):
+    """One retry, not a loop: if the clean database fails too, the problem is not
+    the database and retrying costs another login."""
+    attempts = []
+
+    async def _attempt(label, telethon_client, password, ask_password):
+        attempts.append(label)
+        raise tdlib.TDLibError(401, "AUTH_KEY_UNREGISTERED")
+
+    monkeypatch.setattr(tdlib, "_attempt_login", _attempt)
+    monkeypatch.setattr(tdlib, "_discard_database", lambda label: None)
+
+    with pytest.raises(tdlib.TDLibError):
+        await tdlib.complete_login("kgb_verifier", object(), password="pw")
+
+    assert len(attempts) == 2, "it retried more than once"
+
+
+def test_discarding_a_database_removes_the_whole_directory(monkeypatch, tmp_path):
+    database = tmp_path / "tdlib" / "kgb_verifier"
+    (database / "files").mkdir(parents=True)
+    (database / "td.binlog").write_bytes(b"stale")
+
+    monkeypatch.setattr(tdlib, "database_dir_for", lambda label: database)
+    tdlib._discard_database("kgb_verifier")
+
+    assert not database.exists(), "the dead database survived"

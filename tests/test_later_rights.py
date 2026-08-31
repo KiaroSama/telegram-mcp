@@ -340,10 +340,17 @@ async def test_a_missing_tdlib_login_still_names_every_right_it_could_not_finish
 
     assert outcome["delivered"] == []
     assert "manage_welcome_messages" in outcome["failed"]
-    # The real exception, not a stand-in, so this also pins that what reaches
-    # the caller names the launcher rather than a Python command they have said
+    # The real exception, not a stand-in, so this also pins that what reaches the
+    # caller names the LAUNCHER rather than only a Python command they have said
     # they do not want to run.
-    assert "option 6" in outcome["failed"]["manage_welcome_messages"], "the remedy was not named"
+    #
+    # Asserted as "names the launcher", not as a menu number: pinning the number
+    # made this fail for the right reason but the wrong cause when the menu was
+    # renumbered, which taught nobody anything. `test_account_manager.ps1` owns
+    # the separate guard that the number actually exists.
+    remedy = outcome["failed"]["manage_welcome_messages"]
+    assert "Manage-Accounts.ps1" in remedy, "the remedy does not name the launcher"
+    assert "option" in remedy, "the remedy does not say which menu entry to choose"
     assert outcome["unmappable"] == ["manage_linked_peers"]
 
 

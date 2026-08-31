@@ -43,7 +43,7 @@ from telegram_mcp.tdlib import (  # noqa: E402
     TDLibError,
     TDLibUnavailable,
     account_label,
-    authorise_from_telethon,
+    complete_login,
     database_dir_for,
     tdjson_status,
 )
@@ -85,49 +85,37 @@ async def _run(account: str) -> int:
     print(f"Account:  {label}")
     print(f"Database: {database_dir_for(label)}")
 
-    client = TDLibClient(label)
-    state = await client.start()
-
-    if state == "authorizationStateReady":
-        me = await client.request({"@type": "getMe"})
-        name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
-        print(f"\nAlready signed in as {name} (id {me.get('id')}). Nothing to do.")
-        await client.close()
-        return 0
-
-    # A client can come up ALREADY past the token step: an earlier run's token
-    # was accepted and Telegram is now asking for the two-step password. Trying
-    # to authorise from there publishes a second token for nothing, which is
-    # what the first live run did.
-    if state == "authorizationStateWaitPhoneNumber":
-        telethon_client = await _telethon_client(label)
-        print()
-        print("Authorising from this account's existing Telethon login...")
-        state = await authorise_from_telethon(client, telethon_client)
-
-    if state == "authorizationStateWaitPassword":
-        # Telegram asks for this even when the token is valid. It is the one
-        # thing here a person still has to supply.
+    def _ask_password() -> str:
+        # Telegram wants this even when the token is valid. For an account signed
+        # in long ago there is genuinely no password in hand to reuse -- unlike
+        # the session generator, which passes on the one it has just watched
+        # being typed, so that route asks for nothing.
         print("\nThis account has two-step verification.")
         sys.stdout.flush()
-        password = getpass.getpass("Two-step verification password (not shown): ")
-        if not password:
-            print("Nothing entered; cancelled.")
-            await client.close()
-            return 1
-        await client.request({"@type": "checkAuthenticationPassword", "password": password})
-        state = await client._settle()
+        return getpass.getpass("Two-step verification password (not shown): ")
+
+    # One state machine, shared with the generator. It begins from wherever the
+    # database actually is, so a run interrupted at the password step resumes
+    # there instead of publishing a second login token for nothing.
+    telethon_client = await _telethon_client(label)
+    state = await complete_login(label, telethon_client, ask_password=_ask_password)
 
     if state != "authorizationStateReady":
         print(f"\nTDLib stopped at {state}, so secret chats are not available yet.")
-        await client.close()
         return 1
 
-    me = await client.request({"@type": "getMe"})
+    client = TDLibClient(label)
+    try:
+        me = await client.request({"@type": "getMe"})
+    finally:
+        await client.close()
     name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
-    print(f"\nSigned in as {name} (id {me.get('id')}) - no code needed.")
-    print("Secret chats are now available for this account.")
-    await client.close()
+    # Worded to be true whether this run did the work or found it already done:
+    # `complete_login` returns Ready for an account that was already signed in,
+    # and claiming "no code needed" there would credit this run with work it did
+    # not do.
+    print(f"\nSigned in as {name} (id {me.get('id')}).")
+    print("Secret chats are available for this account.")
     return 0
 
 

@@ -34,7 +34,7 @@ $envPath = Join-Path $PSScriptRoot '.env'
 # on this machine, a backup holds a full login to every one of them - so an
 # unbounded pile of either turns one readable directory into a standing leak.
 $script:LogRetention = 10
-$script:EnvBackupRetention = 5
+$script:EnvBackupRetention = 1
 $script:MaxBackupCollisions = 100
 
 # --- private files ------------------------------------------------------------
@@ -557,7 +557,15 @@ function Read-SessionString {
 # --- actions -----------------------------------------------------------------
 
 function Show-Accounts {
-    $accounts = Get-Accounts
+    <#
+      The numbers are not decoration: `Remove-Account` asks for one, so the
+      listing and the choice must agree. The caller passes the very dictionary it
+      will index, rather than each re-reading `.env`, because two reads are two
+      chances for the numbering to mean different things.
+    #>
+    param($Accounts)
+
+    $accounts = if ($null -ne $Accounts) { $Accounts } else { Get-Accounts }
     if ($accounts.Count -eq 0) {
         Write-Host 'No accounts are configured yet.' -ForegroundColor Yellow
         Write-Host 'Choose "Add an account" to configure the first one.'
@@ -570,16 +578,21 @@ function Show-Accounts {
     # dark without saying so.
     $states = Get-SecretChatStates
     $unfinished = @()
+    $number = 0
     foreach ($label in $accounts.Keys) {
+        $number++
         $note = if ($label -eq 'default') { '  (used when a tool is called without account=)' } else { '' }
-        Write-Host ("  {0,-16} {1}{2}" -f $label, $accounts[$label], $note)
+        Write-Host ("  {0,2}. {1,-16} {2}{3}" -f $number, $label, $accounts[$label], $note)
         $state = if ($states.ContainsKey($label)) { $states[$label] } else { '' }
         $summary = Get-SecretChatSummary -State $state
+        # Indented under the name, past the number, so the two lines read as one
+        # entry rather than as two accounts.
+        $continuation = '      {0,-16} {1}'
         if ($state -eq 'authorizationStateReady') {
-            Write-Host ("  {0,-16} {1}" -f '', $summary) -ForegroundColor Green
+            Write-Host ($continuation -f '', $summary) -ForegroundColor Green
         }
         else {
-            Write-Host ("  {0,-16} {1}" -f '', $summary) -ForegroundColor Yellow
+            Write-Host ($continuation -f '', $summary) -ForegroundColor Yellow
             $unfinished += $label
         }
     }
@@ -589,7 +602,11 @@ function Show-Accounts {
         # Write-Host, not Write-Hint: the rest of this listing paints directly,
         # and Write-Hint needs colour state a caller that only wants the list
         # has no reason to have set up.
-        Write-Host 'Choose "Finish an account for secret chats" - it needs no code.' -ForegroundColor Yellow
+        # Name a remedy that EXISTS. This line used to point at a menu entry
+        # that had been removed, which is worse than saying nothing: the reader
+        # scans the menu for it and concludes the tool is broken.
+        Write-Host 'Option 2, same label: it offers to finish just that half.' -ForegroundColor Yellow
+        Write-Host 'No scan and no code - only the two-step password.' -ForegroundColor Yellow
     }
     if ($accounts.Count -gt 1) {
         Write-Host ''
@@ -653,8 +670,20 @@ function Invoke-SessionGenerator {
 
     if ($script:GeneratorExitCode -ne 0) {
         Write-Host ''
-        Write-Failure 'The generator did not finish, so it produced no session string.'
-        Write-Host 'Nothing was saved. Run it again once the problem above is resolved.'
+        # Check, do not assume: the generator writes .env before finishing the
+        # secret-chat half, so a late failure leaves a PERFECTLY GOOD account
+        # behind. Announcing "nothing was saved" there sent the owner back to
+        # log in again - which is the one cost this whole flow exists to avoid.
+        $saved = if ($Label) { (Get-Accounts).Contains($Label) } else { $false }
+        if ($saved) {
+            Write-Failure 'The generator stopped before it finished everything.'
+            Write-Host "'$Label' IS saved and usable - do not log in again." -ForegroundColor Yellow
+            Write-Host 'Only the step after it failed; the message above says which.'
+        }
+        else {
+            Write-Failure 'The generator did not finish, so it produced no session string.'
+            Write-Host 'Nothing was saved. Run it again once the problem above is resolved.'
+        }
     }
 }
 
@@ -714,7 +743,12 @@ function Invoke-SecretChatLogin {
       is a separate client. That part is the protocol. Declining is free and the
       same script runs later.
     #>
-    param([Parameter(Mandatory)] [string] $Label)
+    param(
+        [Parameter(Mandatory)] [string] $Label,
+        # The caller has already put the question. Asking again here is the same
+        # question twice in a row, which is what a caller reports as noise.
+        [switch] $AlreadyConfirmed
+    )
 
     $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
     if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return }
@@ -737,12 +771,14 @@ function Invoke-SecretChatLogin {
         return
     }
 
-    Write-Host 'One step left: sign this account in to TDLib as well.' -ForegroundColor Cyan
-    Write-Hint 'That is what secret chats and the newer admin rights run on. It uses the'
-    Write-Hint 'login you just did - no second code, and nothing to scan.'
-    Write-Hint 'It does add one device to this account''s Telegram session list.'
-    Write-Host ''
-    if (-not (Read-Confirmation 'Finish it now?')) {
+    if (-not $AlreadyConfirmed) {
+        Write-Host 'One step left: sign this account in to TDLib as well.' -ForegroundColor Cyan
+        Write-Hint 'That is what secret chats and the newer admin rights run on. It uses the'
+        Write-Hint 'login you just did - no second code, and nothing to scan.'
+        Write-Hint 'It does add one device to this account''s Telegram session list.'
+        Write-Host ''
+    }
+    if (-not $AlreadyConfirmed -and -not (Read-Confirmation 'Finish it now?')) {
         Write-Host "Skipped. Run scripts\secret_chat_login.py $Label whenever you want it."
         Write-Log "TDLib login for '$Label' offered and declined"
         return
@@ -814,6 +850,23 @@ function Add-Account {
     if (-not $label) { Write-Host 'Cancelled.'; return }
 
     if ($accounts.Contains($label)) {
+        # An account whose Telethon half works and whose TDLib half does not needs
+        # neither a new scan nor a new session string - only the two-step password
+        # Telegram wants even from a linked device. Offering "replace it all" for
+        # that was the whole reason a half-finished account had nowhere to go once
+        # the separate menu entry was removed.
+        $states = Get-SecretChatStates
+        $half = if ($states.ContainsKey($label)) { $states[$label] } else { '' }
+        if ($half -and $half -ne 'authorizationStateReady') {
+            Write-Host ''
+            Write-Host "'$label' is already configured; only its secret-chat half is unfinished." -ForegroundColor Yellow
+            Write-Hint 'Finishing it needs no scan and no code - just the two-step password.'
+            Write-Host ''
+            if (Read-Confirmation 'Finish that half now?') {
+                Invoke-SecretChatLogin -Label $label -AlreadyConfirmed
+                return
+            }
+        }
         Write-Host "An account labelled '$label' already exists ($($accounts[$label]))." -ForegroundColor Yellow
         if (-not (Read-Confirmation 'Replace its session string?')) { Write-Host 'Cancelled.'; return }
     }
@@ -878,18 +931,76 @@ function Add-Account {
     Invoke-SecretChatLogin -Label $label
 }
 
+
+function Read-AccountNumber {
+    <#
+      Pick an account by the number the listing just printed.
+
+      Typing the label was the old way and it made "list it, read the name, go
+      back, type it exactly" a four-step job for a one-word answer - and an
+      underscore in the stored form that the eye reads as a space is enough to
+      make the typed version miss.
+
+      Indexes the caller's own dictionary, so the numbering cannot disagree with
+      what was shown. Returns the label, or $null for cancel.
+    #>
+    param(
+        [Parameter(Mandatory)] $Accounts,
+        [Parameter(Mandatory)] [string] $Prompt
+    )
+    $labels = @($Accounts.Keys)
+    while ($true) {
+        $raw = Read-Answer -Prompt $Prompt
+        if ($null -eq $raw) { return $null }
+        $trimmed = $raw.Trim()
+        if ($trimmed -eq '') { return $null }
+        if ($trimmed -match '^[0-9]+$') {
+            $index = [int] $trimmed
+            if ($index -ge 1 -and $index -le $labels.Count) { return $labels[$index - 1] }
+        }
+        Write-Note "Enter a number from 1 to $($labels.Count)."
+    }
+}
+
+function Remove-TdlibDatabase {
+    <#
+      Delete the account's TDLib database along with its .env line.
+
+      These are two stores and only one used to be cleared. The database
+      outlived the account, so removing an account and adding it again handed
+      the NEW session the OLD one's dead auth key, and every attempt after that
+      failed with AUTH_KEY_UNREGISTERED - a state no amount of logging in again
+      can clear, while each attempt costs a real login.
+
+      Best effort by design: the account is already gone from `.env` by this
+      point, and a leftover database is a nuisance rather than a failure. The
+      code recovers from one anyway (`telegram_mcp.tdlib.complete_login`), so a
+      failure here must not abort a removal that has already happened.
+    #>
+    param([Parameter(Mandatory)] [string] $Label)
+
+    $database = Join-Path (Join-Path (Get-StateDirectory) 'tdlib') $Label
+    if (-not (Test-Path -LiteralPath $database)) { return }
+    try {
+        Remove-Item -LiteralPath $database -Recurse -Force -ErrorAction Stop
+        Write-Log "Removed the TDLib database for '$Label'"
+    }
+    catch {
+        Write-Log "Could not remove the TDLib database for '$Label': $($_.Exception.Message)" -Level WARNING
+    }
+}
+
 function Remove-Account {
     $accounts = Get-Accounts
     if ($accounts.Count -eq 0) { Write-Host 'There is nothing to remove.' -ForegroundColor Yellow; return }
 
-    Show-Accounts
+    # The same dictionary the listing numbered, so choice N is the account
+    # printed as N. Re-reading .env here would be a second source of truth for
+    # the one thing that must not be wrong in a delete.
+    Show-Accounts -Accounts $accounts
     Write-Host ''
-    $label = Read-Label 'Label to remove - blank to cancel'
+    $label = Read-AccountNumber -Accounts $accounts -Prompt 'Number to remove - blank to cancel'
     if (-not $label) { Write-Host 'Cancelled.'; return }
-    if (-not $accounts.Contains($label)) {
-        Write-Host "No account is labelled '$label'." -ForegroundColor Yellow
-        return
-    }
     if ($accounts.Count -eq 1) {
         Write-Host ''
         Write-Host 'This is the only account. Removing it leaves the server unable to start' -ForegroundColor Yellow
@@ -904,6 +1015,7 @@ function Remove-Account {
 
     $backup = Backup-EnvFile
     Remove-EnvKey -Key $accounts[$label]
+    Remove-TdlibDatabase -Label $label
     Write-Log "Removed account '$label' ($($accounts[$label]))"
     Write-Host ''
     Write-Host "Removed '$label'." -ForegroundColor Green

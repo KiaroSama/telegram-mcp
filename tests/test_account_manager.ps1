@@ -229,15 +229,22 @@ $($functions.Value -join "`n`n")
     }
     Write-Host 'ok  .env backups are pruned to the newest few'
 
-    # Two operations in the same second each need their own restore point;
-    # `Copy-Item -Force` silently replaced the first with the second.
+    # A second backup in the same second must get its own NAME rather than
+    # overwrite the first through `Copy-Item -Force`. The name is the property
+    # under test; whether the older file then survives is retention's business,
+    # and retention is 1 - the owner asked for exactly one backup at a time,
+    # since each one is a complete set of logins sitting in the project root.
     Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force |
         Remove-Item -Force
     $first = Backup-EnvFile
     $second = Backup-EnvFile
     if ($first -eq $second) { throw 'Two backups in one second collapsed into one file.' }
-    if (-not (Test-Path -LiteralPath $first)) { throw 'The first backup was overwritten.' }
-    Write-Host 'ok  a second backup in the same second gets its own name'
+    if (-not (Test-Path -LiteralPath $second)) { throw 'The newest backup is missing.' }
+    $left = @(Get-ChildItem -LiteralPath $sandbox -Filter '.env.backup-*' -File -Force)
+    if ($left.Count -ne 1) {
+        throw "Retention left $($left.Count) backups in the root; the owner asked for one."
+    }
+    Write-Host 'ok  a same-second backup gets its own name, and only one is kept'
 
     if ($env:OS -eq 'Windows_NT') {
         # os.chmod-style modes do not exist here: without an explicit ACL the
@@ -500,6 +507,160 @@ try {
         if (-not $branch) { throw "Menu entry $entry has no dispatch branch." }
     }
     Write-Host 'ok  the generator finishes both halves and reuses the password it already took'
+
+    # No message may name a menu entry that does not exist.
+    #
+    # This shipped: the entry for finishing an account was removed, and the
+    # listing kept telling the owner to choose it. That is worse than silence -
+    # they scanned the menu for a line that was not there and reported the tool
+    # as broken, which is exactly what it was. `NotSignedIn` in tdlib.py named
+    # the same dead entry.
+    #
+    # Checked against the menu table itself, so removing or renumbering an entry
+    # cannot leave a message pointing at a hole.
+    $menuBlock = [regex]::Match($source, '(?ms)\$script:MenuItems = \[ordered\] @\{.*?^\}').Value
+    if (-not $menuBlock) { throw 'Could not isolate the menu table.' }
+    $entries = @([regex]::Matches($menuBlock, "'(\d+)' = '([^']+)'") | ForEach-Object {
+            [pscustomobject] @{ Number = $_.Groups[1].Value; Title = $_.Groups[2].Value }
+        })
+    if ($entries.Count -lt 3) { throw 'The menu table parsed to almost nothing; the guard would pass vacuously.' }
+
+    $titles = @($entries | ForEach-Object { $_.Title })
+    $numbers = @($entries | ForEach-Object { $_.Number })
+    $tdlibSource = [IO.File]::ReadAllText((Join-Path $projectRoot 'telegram_mcp/tdlib.py'))
+
+    foreach ($text in @($source, $tdlibSource)) {
+        foreach ($quoted in [regex]::Matches($text, '"([^"
+]{8,80})"')) {
+            $phrase = $quoted.Groups[1].Value
+            # Only phrases that read like a menu instruction are candidates.
+            if ($phrase -notmatch 'option \d|Choose "') { continue }
+            $named = [regex]::Match($phrase, 'option (\d+)')
+            if ($named.Success -and $numbers -notcontains $named.Groups[1].Value) {
+                throw "A message points at menu option $($named.Groups[1].Value), which the menu does not have: $phrase"
+            }
+        }
+    }
+    foreach ($dead in @('Finish an account for secret chats')) {
+        if ($titles -contains $dead) { continue }
+        if ($source -match [regex]::Escape($dead) -or $tdlibSource -match [regex]::Escape($dead)) {
+            throw "A message still names the removed menu entry '$dead'."
+        }
+    }
+    Write-Host 'ok  no message points at a menu entry that does not exist'
+
+
+    # Choosing an account by the number the listing printed.
+    #
+    # The load-bearing property is that the number SHOWN equals the number
+    # REMOVED. Getting that wrong deletes somebody else's account, and the
+    # confirmation prompt would not reveal it - it names the label the mapping
+    # already chose. So the mapping is asserted against the same dictionary the
+    # listing numbers, which is why both take one.
+    $sample = [ordered] @{ 'kgb_verifier' = 'K'; 'work' = 'W'; 'default' = 'D' }
+
+    $listing = & {
+        function Get-SecretChatStates { @{} }
+        Show-Accounts -Accounts $sample 6>&1 | ForEach-Object { "$_" }
+    }
+    $numbered = @($listing | Where-Object { $_ -match '^\s+\d+\.\s' })
+    if ($numbered.Count -ne 3) {
+        throw "The listing did not number every account; got $($numbered.Count) numbered lines of 3."
+    }
+    foreach ($pair in @(@(1, 'kgb_verifier'), @(2, 'work'), @(3, 'default'))) {
+        if ($numbered[$pair[0] - 1] -notmatch "^\s+$($pair[0])\.\s+$($pair[1])\b") {
+            throw "Listing line $($pair[0]) is not '$($pair[1])': $($numbered[$pair[0] - 1])"
+        }
+    }
+    Write-Host 'ok  the listing numbers every account, in order, from 1'
+
+    foreach ($pair in @(@('1', 'kgb_verifier'), @('2', 'work'), @('3', 'default'))) {
+        $answer = $pair[0]
+        $picked = & {
+            function Read-Answer { param($Prompt) $answer }
+            Read-AccountNumber -Accounts $sample -Prompt 'which'
+        }
+        if ($picked -ne $pair[1]) {
+            throw "Number $answer chose '$picked', but the listing shows '$($pair[1])' at that number."
+        }
+    }
+    Write-Host 'ok  number N chooses exactly the account the listing printed as N'
+
+    $rejected = & {
+        $script:queue = @('9', '0', 'abc', '2')
+        $script:at = 0
+        function Read-Answer { param($Prompt) $v = $script:queue[$script:at]; $script:at++; return $v }
+        function Write-Note { param($Text) }
+        Read-AccountNumber -Accounts $sample -Prompt 'which'
+    }
+    if ($rejected -ne 'work') { throw "Out-of-range and non-numeric answers were not re-asked; got '$rejected'." }
+    Write-Host 'ok  a number outside the list, and a non-number, are re-asked rather than acted on'
+
+    $cancelled = & {
+        function Read-Answer { param($Prompt) '' }
+        Read-AccountNumber -Accounts $sample -Prompt 'which'
+    }
+    if ($null -ne $cancelled) { throw "Blank did not cancel; got '$cancelled'." }
+    Write-Host 'ok  blank cancels instead of removing something'
+
+    # Structural, because the runtime checks above would still pass if the two
+    # halves each read .env separately and happened to agree today.
+    $removeBlock = [regex]::Match($source, '(?ms)^function Remove-Account \{.*?^\}').Value
+    if ($removeBlock -notmatch 'Show-Accounts -Accounts \$accounts') {
+        throw 'Remove-Account no longer numbers the listing from the dictionary it indexes.'
+    }
+    if ($removeBlock -match 'Read-Label') {
+        throw 'Remove-Account is asking for a typed label again.'
+    }
+    Write-Host 'ok  the listing and the choice index one dictionary, not two reads'
+
+
+    # Removing an account must clear BOTH stores.
+    #
+    # This is the defect that cost the owner four real logins. An account lives
+    # in `.env` AND in a TDLib database; removal cleared only the first, so the
+    # database outlived the account and the next login inherited its dead auth
+    # key. Telegram then answered AUTH_KEY_UNREGISTERED on every attempt - a
+    # state no amount of logging in again can clear.
+    #
+    # The owner's workflow is "delete it and log in again", so that path is the
+    # one that has to work, not the repair path they were offered instead.
+    $stateRoot = Join-Path (Get-StateDirectory) 'tdlib'
+    $victim = Join-Path $stateRoot 'a_test_label_that_is_not_real'
+    [void] (New-Item -ItemType Directory -Path (Join-Path $victim 'files') -Force)
+    Set-Content -LiteralPath (Join-Path $victim 'td.binlog') -Value 'stale' -Encoding utf8
+
+    Remove-TdlibDatabase -Label 'a_test_label_that_is_not_real'
+    if (Test-Path -LiteralPath $victim) {
+        Remove-Item -LiteralPath $victim -Recurse -Force -ErrorAction SilentlyContinue
+        throw 'Removing an account left its TDLib database behind.'
+    }
+    Write-Host 'ok  removing an account clears its TDLib database too'
+
+    # A label with no database is the ordinary case and must not throw.
+    Remove-TdlibDatabase -Label 'a_label_with_no_database_at_all'
+    Write-Host 'ok  a missing database is not an error'
+
+    # The two languages must agree on the path, or the removal above deletes
+    # nothing and the whole class of bug returns in silence.
+    $python = Join-Path $projectRoot '.venv\Scripts\python.exe'
+    if (Test-Path -LiteralPath $python -PathType Leaf) {
+        Push-Location -LiteralPath $projectRoot
+        try {
+            $fromPython = & $python -c "from telegram_mcp.tdlib import database_dir_for; print(database_dir_for('probe'))" 2>$null
+        }
+        finally { Pop-Location }
+        $fromPowerShell = Join-Path $stateRoot 'probe'
+        if ("$fromPython".Trim() -ne $fromPowerShell) {
+            throw "The two halves disagree on the database path: PowerShell '$fromPowerShell' vs Python '$fromPython'."
+        }
+        Write-Host 'ok  PowerShell and Python resolve the same database directory'
+    }
+
+    $removeBlock = [regex]::Match($source, '(?ms)^function Remove-Account \{.*?^\}').Value
+    if ($removeBlock -notmatch 'Remove-TdlibDatabase -Label \$label') {
+        throw 'Remove-Account no longer clears the TDLib database.'
+    }
 
     # A status probe attached to a listing must never take the listing down.
     $probe = [regex]::Match($source, '(?ms)^function Get-SecretChatStates \{.*?^\}').Value

@@ -79,9 +79,9 @@ class NotSignedIn(RuntimeError):
             f"existing login can authorise it, so this asks for no code and nothing to "
             f"scan. Run once:"
             + chr(10)
-            + "    Manage-Accounts.ps1 -> option 6, 'Finish an account for secret chats'"
+            + "    Manage-Accounts.ps1 -> option 2, adding this same account again"
             + chr(10)
-            + f"    or, without the launcher: python scripts/secret_chat_login.py {account}"
+            + f"    or, without a fresh scan: python scripts/secret_chat_login.py {account}"
         )
         self.account = account
         self.state = state
@@ -556,8 +556,17 @@ async def authorise_from_telethon(client: "TDLibClient", telethon_client) -> str
     )
 
 
-async def complete_login(account: str, telethon_client, password=None, ask_password=None) -> str:
+async def complete_login(label: str, telethon_client, password=None, ask_password=None) -> str:
     """Take an account's TDLib half from wherever it is to signed in.
+
+    ``label`` is already resolved -- this deliberately does NOT call
+    ``account_label``. That would import ``telegram_mcp.connection``, which reads
+    the accounts once at import time, and the session generator calls this
+    moments after writing a NEW account to ``.env``: the environment was read
+    before that line existed, so the freshly created account looked unconfigured
+    and the whole step died with "No Telegram session configured" on an account
+    that had just been saved successfully. The caller knows its own label; asking
+    a cached view to confirm it was the bug.
 
     One implementation for both callers, because they differ only in where the
     two-step password comes from:
@@ -568,7 +577,9 @@ async def complete_login(account: str, telethon_client, password=None, ask_passw
       seconds earlier is not caution, it is a defect -- and every extra attempt
       is one more against the account's own limits.
     * ``scripts/secret_chat_login.py`` is repairing an account signed in long
-      ago and has no password to reuse, so it supplies ``ask_password``.
+      ago and has no password to reuse, so it supplies ``ask_password``. It
+      resolves the label through ``account_label`` first, where a typed name
+      genuinely does need checking.
 
     Starts from the client's CURRENT state rather than assuming a fresh one: a
     database left at ``WaitPassword`` by an interrupted run must not publish a
@@ -577,7 +588,47 @@ async def complete_login(account: str, telethon_client, password=None, ask_passw
     Returns the state reached. ``authorizationStateReady`` is the only success.
     The password is never logged, stored, or passed on a command line.
     """
-    client = TDLibClient(account_label(account))
+    try:
+        return await _attempt_login(label, telethon_client, password, ask_password)
+    except (TDLibError, RuntimeError) as error:
+        if not _authorisation_is_dead(error):
+            raise
+        # The database holds an authorisation Telegram no longer honours. That
+        # happens every time an account is removed and added again: the TDLib
+        # database outlives `.env`, so the new session inherits the old one's
+        # dead auth key and every attempt fails with AUTH_KEY_UNREGISTERED --
+        # which no amount of logging in again can fix, and each attempt costs a
+        # real login.
+        #
+        # Discarding it loses nothing that still works. It is not the secret-chat
+        # HISTORY being thrown away either: those keys were tied to the same dead
+        # authorisation and Telegram has already forgotten them.
+        _discard_database(label)
+        return await _attempt_login(label, telethon_client, password, ask_password)
+
+
+def _authorisation_is_dead(error: Exception) -> bool:
+    """Whether the stored authorisation is unusable rather than merely refused.
+
+    Matched on the specific names, not on the 401 code: a client that has simply
+    not signed in yet also answers 401, and wiping its database for that would
+    destroy a login in progress.
+    """
+    text = str(error).upper()
+    return any(
+        name in text for name in ("AUTH_KEY_UNREGISTERED", "SESSION_REVOKED", "SESSION_EXPIRED")
+    )
+
+
+def _discard_database(label: str) -> None:
+    """Delete one account's TDLib database so the next login starts clean."""
+    import shutil
+
+    shutil.rmtree(database_dir_for(label), ignore_errors=True)
+
+
+async def _attempt_login(label, telethon_client, password, ask_password) -> str:
+    client = TDLibClient(label)
     try:
         state = await client.start()
         if state == "authorizationStateReady":
