@@ -203,7 +203,13 @@ async def secret_chat_status(account: str = None) -> str:
     except NotSignedIn as e:
         record["secret_chats"] = "not signed in"
         record["authorization_state"] = e.state
-        record["fix"] = f"python scripts/secret_chat_login.py {label}"
+        # The launcher first: adding the account again finishes this half with
+        # one password and no scan. The script stays as the alternative for a
+        # setup with no launcher.
+        record["fix"] = (
+            f"Manage-Accounts.ps1 -> option 2, same label ({label}); "
+            f"or python scripts/secret_chat_login.py {label}"
+        )
         return format_tool_result(record)
     except (TDLibUnavailable, TDLibError, TimeoutError) as e:
         return log_and_format_error("secret_chat_status", e, account=label)
@@ -358,6 +364,11 @@ async def list_secret_chats(account: str = None) -> str:
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("list_secret_chats", e)
 
@@ -402,6 +413,11 @@ async def send_secret_message(chat_id: int, message: str, account: str = None) -
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("send_secret_message", e, chat_id=chat_id)
 
@@ -468,10 +484,45 @@ async def send_secret_media(
             content["@type"] = "inputMessagePhoto"
             content["photo"] = {"@type": "inputFileLocal", "path": str(path)}
 
-        sent = await client.request(
-            {"@type": "sendMessage", "chat_id": int(chat_id), "input_message_content": content},
-            timeout=120,
-        )
+        try:
+            sent = await client.request(
+                {
+                    "@type": "sendMessage",
+                    "chat_id": int(chat_id),
+                    "input_message_content": content,
+                },
+                timeout=120,
+            )
+        except TDLibError as error:
+            if "InputFile is not specified" not in str(error):
+                raise
+            # Measured 2026-08-31 against tdjson 1.8.67, the newest build
+            # published. EVERY input-message-content carrying a file is refused
+            # this way, and the refusal is TDLib's own 400 raised locally, before
+            # any network call:
+            #
+            #   inputFileLocal (path, forward slashes, inside the database dir),
+            #   inputFileId (a fresh upload AND a file Telegram already held),
+            #   inputFileRemote with a real remote id, photo and document, with
+            #   and without caption/width/height/thumbnail, in a secret chat and
+            #   in an ordinary one, with and without `files_directory`.
+            #
+            # Text to the same chat works, abstract nested types parse correctly
+            # four levels deep, and DOWNLOADS work - so it is neither this
+            # request's shape nor a dead file subsystem. Saying so is the point:
+            # the bare error sent one evening into path formats and JSON shapes
+            # that were never the cause.
+            return (
+                "Telegram's own library refuses this: sending a file through TDLib fails with "
+                '"InputFile is not specified" in tdjson 1.8.67, the newest build published. '
+                "Measured against every file form it accepts - a local path, an uploaded file "
+                "id, and a remote id for a file Telegram already stores - in secret and "
+                "ordinary chats alike; the refusal is raised locally before any network call. "
+                "Text in secret chats is unaffected, and so is downloading. There is no way "
+                "around it from here: secret chats require TDLib, and this is its own limit. "
+                "For a file that need not be end-to-end encrypted, send_disappearing_media "
+                "runs on MTProto and works."
+            )
         return format_tool_result(
             {
                 "sent": True,
@@ -485,6 +536,11 @@ async def send_secret_media(
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("send_secret_media", e, chat_id=chat_id)
 
@@ -544,6 +600,11 @@ async def read_secret_messages(chat_id: int, limit: int = 30, account: str = Non
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("read_secret_messages", e, chat_id=chat_id)
 
@@ -627,6 +688,11 @@ async def save_secret_media(
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("save_secret_media", e, chat_id=chat_id, message_id=message_id)
 
@@ -667,6 +733,11 @@ async def set_secret_chat_timer(chat_id: int, seconds: int, account: str = None)
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("set_secret_chat_timer", e, chat_id=chat_id)
 
@@ -703,5 +774,10 @@ async def close_secret_chat(secret_chat_id: int, account: str = None) -> str:
         return _unavailable(e)
     except ValueError as e:
         return str(e)
+    except TDLibError as e:
+        # Telegram's own refusal, not an internal failure. A code here sends
+        # the reader to a log to find one sentence the API already gave;
+        # `create_secret_chat` and `set_admin_right` already show theirs.
+        return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("close_secret_chat", e, secret_chat_id=secret_chat_id)

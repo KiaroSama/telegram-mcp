@@ -380,3 +380,32 @@ async def test_telegrams_refusal_is_shown_not_filed_under_an_error_code(wire, pe
 
     assert "USER_RESTRICTED_NEW_CHATS" in answer
     assert "error occurred" not in answer.lower(), "the reason was replaced by a code"
+
+
+@pytest.mark.asyncio
+async def test_the_tdjson_file_limit_is_explained_not_passed_through(wire, monkeypatch, tmp_path):
+    """tdjson 1.8.67 - the newest build published - refuses EVERY file form in
+    `sendMessage` with "InputFile is not specified", raised locally before any
+    network call. Measured against a local path, an uploaded file id and a remote
+    id for a file Telegram already held, in secret and ordinary chats alike.
+
+    The bare error is actively misleading: it reads as a malformed request, and
+    it cost an evening of path formats and JSON shapes that were never the cause.
+    So the tool says what was measured and points at the tool that does work.
+    """
+    sample = tmp_path / "x.png"
+    sample.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    async def _path(raw_path, ctx, tool_name):
+        return sample, None
+
+    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    wire({"sendMessage": TDLibError(400, "InputFile is not specified")})
+
+    answer = await sc.send_secret_media(
+        chat_id=-1999148344067, file_path=str(sample), account="acct"
+    )
+
+    assert "1.8.67" in answer, "the build it was measured against is not named"
+    assert "send_disappearing_media" in answer, "no working alternative was offered"
+    assert "Text in secret chats is unaffected" in answer

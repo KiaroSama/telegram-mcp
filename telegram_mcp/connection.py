@@ -612,15 +612,31 @@ def _env_file() -> Optional[str]:
 
 
 def _env_fingerprint(path: Optional[str]) -> tuple:
-    """Cheap "has it changed" stamp. Mtime AND size, because an edit that keeps
-    the byte count is exactly the shape of a session string being swapped."""
+    """A digest of the file's CONTENT, not its metadata.
+
+    This was `(st_mtime_ns, st_size)` and that was wrong. Replacing one session
+    string with another of the same length changes neither: the account manager
+    rewrites `.env` wholesale, so a re-login is exactly a same-size rewrite, and
+    on a filesystem whose timestamp resolution is coarser than the gap between
+    the two writes the mtime does not move either. CI caught it on a Windows
+    runner where the local machine never had.
+
+    Hashing a file of a few kilobytes costs microseconds and is checked once per
+    `get_client`. The stat was the cheaper answer to the wrong question.
+    """
     if not path:
         return ()
     try:
-        stat = os.stat(path)
-        return (stat.st_mtime_ns, stat.st_size)
+        with open(path, "rb") as handle:
+            return (_account_digest_bytes(handle.read()),)
     except OSError:
         return ()
+
+
+def _account_digest_bytes(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
 
 
 def _account_digest(value: str) -> str:

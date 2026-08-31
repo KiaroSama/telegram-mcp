@@ -150,3 +150,32 @@ def test_a_missing_env_file_is_not_an_error(env_file, monkeypatch):
 def test_an_unreadable_env_file_is_not_an_error(env_file, monkeypatch):
     monkeypatch.setattr(conn, "_env_file", lambda: str(os.devnull) + "-does-not-exist")
     assert conn.refresh_accounts() == []
+
+
+def test_a_same_size_rewrite_is_still_noticed(env_file, tmp_path, monkeypatch):
+    """The bug CI found and this machine did not.
+
+    The fingerprint was `(mtime, size)`. Swapping one session string for another
+    of the SAME LENGTH changes neither - and that is not a contrived case, it is
+    precisely what a re-login writes, because the account manager rewrites the
+    whole file. Where the filesystem's timestamp resolution is coarser than the
+    gap between two writes, the mtime does not move either, and the dead session
+    stays in use with nothing reporting a problem.
+    """
+    path = env_file(["TELEGRAM_SESSION_STRING_ONE=aaa"])
+    before = conn._env_fingerprint(str(path))
+
+    # Same length, same instant. Only the bytes differ.
+    path.write_text("TELEGRAM_SESSION_STRING_ONE=zzz\n", encoding="utf-8")
+    os.utime(path, ns=(0, 0))
+    after = conn._env_fingerprint(str(path))
+
+    assert before != after, "a same-size rewrite at the same mtime went unnoticed"
+
+
+def test_the_fingerprint_of_an_unchanged_file_is_stable(env_file):
+    """The other half: it must not report a change that did not happen, or every
+    call would rebuild every client."""
+    path = env_file(["TELEGRAM_SESSION_STRING_ONE=aaa"])
+
+    assert conn._env_fingerprint(str(path)) == conn._env_fingerprint(str(path))
