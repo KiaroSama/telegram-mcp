@@ -46,6 +46,9 @@ LIMITS: dict[str, int] = {
     "get_saved_history": 100,  # Telegram's own cap on messages.getSavedHistory
     "inspect_messages": 50,  # every entity, reaction and media field per message
     "get_message_context": 25,  # taken twice, before and after
+    # Secret-chat history is read from this device's local database, so the
+    # cost is a local query rather than a fetch; the cap is about reply size.
+    "read_secret_messages": 100,
     # Chat and dialog listings: one record per chat, cheap but numerous.
     "get_chats": 200,
     "list_chats": 200,

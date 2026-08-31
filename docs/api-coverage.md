@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **181** |
+| MCP tools registered | **190** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -103,7 +103,8 @@ predicted.
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |
 
 Added since, 165 → **181**, ported from the original project rather than merged (a
-history rewrite here left the two with no merge base):
+history rewrite here left the two with no merge base). Secret chats then took it to
+**190**, from a different source entirely — see Phase 4:
 
 | Capability | Tools | Module |
 |---|---|---|
@@ -181,7 +182,7 @@ a button and says plainly that no callback can press it, but nothing launches on
 | Terminating active sessions | Reading the device list is harmless; ending sessions is a security action for a human. |
 | Login / QR / auth flow | Session creation already belongs to the operator's setup, and putting it behind a tool widens what a compromised agent can do. |
 | Group and video calls | Needs WebRTC and a media stack, not just TL. Out of proportion to any agent benefit. |
-| Secret chats | Telethon has no E2E implementation; see `.ai/DECISIONS.md`. |
+| ~~Secret chats~~ | No longer a gap. Telethon still has no E2E implementation and never will — the project is archived — so these nine tools run on TDLib instead. See Phase 4 below. |
 
 ## Administering a channel or group: what already ships
 
@@ -337,26 +338,45 @@ halves of that have now been observed. Whatever that error turns out to be, repo
 as a plain sentence rather than a raw RPC name — and **measure the gate rather than
 assuming it**, the way the repeat periods were measured.
 
-### Phase 4 — secret chats, if still wanted
+### Phase 4 — secret chats: done, by a route this section had missed
 
-Kept in the plan at your request. The position has not changed, and one new fact
-makes it sharper: the only third-party layer for Telethon,
+The analysis below is kept because its reasoning was sound and its conclusion was
+still wrong. It found two options and rejected both, correctly. There was a third.
+
+What it said, and what still holds: the only third-party layer for Telethon,
 `telethon-secret-chat`, last released **2020-11-29** — roughly six years and many TL
-layers behind the 227 this project runs on. An unmaintained crypto plugin is worse
-than none, because it looks like a solution.
+layers behind. An unmaintained crypto plugin is worse than none, because it looks
+like a solution. Auditing it, or writing the E2E layer here, each meant owning a
+cryptographic implementation this project has no business owning. Both were
+correctly refused.
 
-So there is no "add a library and expose a tool" route. The two honest options:
+The move was to stop looking at Telethon. **TDLib is Telegram's own client library**
+— the code their official clients are built on, Boost-licensed, and it implements
+secret chats completely. It ships as a pre-built binary (`tdjson`, with Windows
+wheels), and 1.8.67 speaks layer 229 where Telethon is stuck on 227 and archived.
+Nothing about the cryptography is written or reviewed here.
 
-- **Audit and update that library** against layer 227 — read it fully, fix the
-  message-layer wrapping, and re-verify the DH exchange, key fingerprints, sequence
-  numbering and rekeying.
-- **Implement the E2E layer here**, with the same work plus ownership of it.
+That answers the three questions this section said had to be settled first, which is
+what makes it a real resolution rather than a shortcut:
 
-Either way this is its own project with its own review, not a phase of this one, and
-it needs three things decided first: where per-device keys live (not the shared
-session file), what happens when a key is lost, and who reviews the crypto. Until
-those exist, `start_secret_chat` would be a tool that promises encryption this
-codebase cannot vouch for.
+- **Where per-device keys live** — in TDLib's own database, one per account under
+  `state_dir()/tdlib/<account>`, never the shared Telethon session file.
+- **What happens when a key is lost** — the chat's history is unrecoverable, which
+  is why `TDLibClient.close` exists and is called on shutdown rather than left to
+  process exit.
+- **Who reviews the crypto** — Telegram, because it is Telegram's code. This
+  codebase reviews the transport around it and nothing else.
+
+The cost, which is real and is stated in every tool that hits it: TDLib cannot read a
+Telethon session and offers no import path, so an account needs one additional
+sign-in through `scripts/secret_chat_login.py`, appearing as another device. The
+dependency is optional (`pip install -e .[secret]`); without it the other 181 tools
+are unaffected and `secret_chat_status` says which prerequisite is missing.
+
+Nine tools: `secret_chat_status`, `create_secret_chat`, `list_secret_chats`,
+`send_secret_message`, `send_secret_media`, `read_secret_messages`,
+`save_secret_media`, `set_secret_chat_timer`, `close_secret_chat`
+(`tools/secret_chats.py`, transport in `telegram_mcp/tdlib.py`).
 
 ### Not in the plan
 

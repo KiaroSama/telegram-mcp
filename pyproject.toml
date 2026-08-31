@@ -56,6 +56,15 @@ proxy = [
 lottie = [
     "rlottie-python>=1.3.8",
 ]
+# Secret chats. Telethon never implemented MTProto 2.0 end-to-end encryption and
+# was archived in February 2026 without one, so the only way to have them is
+# Telegram's own client library. Optional because it ships a ~12 MB native TDLib
+# build and because an account has to log in to it separately - see
+# scripts/secret_chat_login.py. Without it every other tool still works and the
+# secret-chat tools say why they cannot.
+secret = [
+    "tdjson>=1.8.67",
+]
 
 [project.urls]
 "Homepage" = "https://github.com/KiaroSama/telegram-mcp"
@@ -149,6 +158,7 @@ source = [
     "telegram_mcp.runtime",
     "telegram_mcp.safe_log",
     "telegram_mcp.sent",
+    "telegram_mcp.tdlib",
     "telegram_mcp.settings",
     "telegram_mcp.singleton",
     "telegram_mcp.text_fidelity",
