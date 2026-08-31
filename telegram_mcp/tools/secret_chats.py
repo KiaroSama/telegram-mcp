@@ -434,17 +434,23 @@ async def send_secret_media(
     ctx: Context = None,
 ) -> str:
     """
-    Send a photo or voice message into a secret chat, optionally self-destructing.
+    Send a photo or voice message into a secret chat.
 
-    Unlike text, media in a secret chat CAN carry its own timer, which is why
-    this takes one. Passing 0 leaves the media to the chat's timer instead.
+    Everything sent here obeys the CHAT's self-destruct timer, set with
+    `set_secret_chat_timer`. This tool used to say media could carry a timer of
+    its own; measured against Telegram, it cannot - a per-message timer is
+    refused in a secret chat with "Messages can self-destruct only in private
+    chats", which is a different feature for ordinary chats.
 
     Args:
         chat_id: From `create_secret_chat` or `list_secret_chats`.
         file_path: Path to the file, resolved under the same allowed roots as
             `upload_file` — this tool does not widen the filesystem surface.
-        self_destruct_seconds: 1-60 to arm this one message's own timer; 0 to
-            leave it to the chat's.
+        self_destruct_seconds: NOT usable here. Telegram accepts a per-message
+            timer only in ordinary private chats and refuses one in a secret
+            chat; pass 0 and set the chat's timer with set_secret_chat_timer,
+            which is the mechanism secret chats actually have. A non-zero value
+            is refused with that instruction rather than silently ignored.
         as_voice: Send the file as a voice note rather than a photo.
         caption: Optional caption.
     """
@@ -469,60 +475,47 @@ async def send_secret_media(
         if path_error:
             return path_error
 
-        content = {
-            "caption": {"@type": "formattedText", "text": caption},
-        }
-        if ttl:
-            content["self_destruct_type"] = {
-                "@type": "messageSelfDestructTypeTimer",
-                "self_destruct_time": ttl,
-            }
+        file = {"@type": "inputFileLocal", "path": str(path)}
+        # The file goes one level DOWN, inside a per-kind wrapper - not straight
+        # into `photo`/`voice_note`. TDLib's own log is what settled it:
+        #
+        #     input_message_content = inputMessagePhoto {
+        #         photo = inputPhoto { photo = null
+        #
+        # `inputMessagePhoto.photo` is an `inputPhoto`, whose own `photo` holds
+        # the InputFile. Passing the file a level too high left that inner field
+        # null, and TDLib answered "InputFile is not specified" - an error that
+        # names the type it wanted and not the place it wanted it, which is why
+        # every path format, file id and remote id was tried first and none of
+        # them was ever the problem.
+        content = {"caption": {"@type": "formattedText", "text": caption}}
         if as_voice:
             content["@type"] = "inputMessageVoiceNote"
-            content["voice_note"] = {"@type": "inputFileLocal", "path": str(path)}
+            content["voice_note"] = {"@type": "inputVoiceNote", "voice_note": file}
         else:
             content["@type"] = "inputMessagePhoto"
-            content["photo"] = {"@type": "inputFileLocal", "path": str(path)}
+            content["photo"] = {"@type": "inputPhoto", "photo": file}
 
-        try:
-            sent = await client.request(
-                {
-                    "@type": "sendMessage",
-                    "chat_id": int(chat_id),
-                    "input_message_content": content,
-                },
-                timeout=120,
-            )
-        except TDLibError as error:
-            if "InputFile is not specified" not in str(error):
-                raise
-            # Measured 2026-08-31 against tdjson 1.8.67, the newest build
-            # published. EVERY input-message-content carrying a file is refused
-            # this way, and the refusal is TDLib's own 400 raised locally, before
-            # any network call:
-            #
-            #   inputFileLocal (path, forward slashes, inside the database dir),
-            #   inputFileId (a fresh upload AND a file Telegram already held),
-            #   inputFileRemote with a real remote id, photo and document, with
-            #   and without caption/width/height/thumbnail, in a secret chat and
-            #   in an ordinary one, with and without `files_directory`.
-            #
-            # Text to the same chat works, abstract nested types parse correctly
-            # four levels deep, and DOWNLOADS work - so it is neither this
-            # request's shape nor a dead file subsystem. Saying so is the point:
-            # the bare error sent one evening into path formats and JSON shapes
-            # that were never the cause.
+        if ttl:
+            # Telegram refuses a per-message timer in a secret chat outright:
+            # "Messages can self-destruct only in private chats". The chat's own
+            # timer is the mechanism there, so say which one to set rather than
+            # sending a request that cannot succeed.
             return (
-                "Telegram's own library refuses this: sending a file through TDLib fails with "
-                '"InputFile is not specified" in tdjson 1.8.67, the newest build published. '
-                "Measured against every file form it accepts - a local path, an uploaded file "
-                "id, and a remote id for a file Telegram already stores - in secret and "
-                "ordinary chats alike; the refusal is raised locally before any network call. "
-                "Text in secret chats is unaffected, and so is downloading. There is no way "
-                "around it from here: secret chats require TDLib, and this is its own limit. "
-                "For a file that need not be end-to-end encrypted, send_disappearing_media "
-                "runs on MTProto and works."
+                f"Telegram does not accept a per-message self-destruct timer in a secret "
+                f"chat - it exists for ordinary private chats. Set the CHAT's timer instead: "
+                f"set_secret_chat_timer(chat_id={int(chat_id)}, seconds={ttl}), which applies "
+                f"to every message sent after it. Nothing was sent."
             )
+
+        sent = await client.request(
+            {
+                "@type": "sendMessage",
+                "chat_id": int(chat_id),
+                "input_message_content": content,
+            },
+            timeout=120,
+        )
         return format_tool_result(
             {
                 "sent": True,

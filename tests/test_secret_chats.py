@@ -383,29 +383,74 @@ async def test_telegrams_refusal_is_shown_not_filed_under_an_error_code(wire, pe
 
 
 @pytest.mark.asyncio
-async def test_the_tdjson_file_limit_is_explained_not_passed_through(wire, monkeypatch, tmp_path):
-    """tdjson 1.8.67 - the newest build published - refuses EVERY file form in
-    `sendMessage` with "InputFile is not specified", raised locally before any
-    network call. Measured against a local path, an uploaded file id and a remote
-    id for a file Telegram already held, in secret and ordinary chats alike.
+async def test_the_file_goes_inside_the_wrapper_telegram_expects(wire, monkeypatch, tmp_path):
+    """The bug that read as a broken TDLib build for an entire evening.
 
-    The bare error is actively misleading: it reads as a malformed request, and
-    it cost an evening of path formats and JSON shapes that were never the cause.
-    So the tool says what was measured and points at the tool that does work.
+    `inputMessagePhoto.photo` is not an InputFile - it is an `inputPhoto`, whose
+    OWN `photo` field holds the file. Passing the file a level too high left that
+    inner field null and TDLib answered "InputFile is not specified": an error
+    that names the type it wanted and not the place, which sent the search
+    through every path format, file id and remote id instead. TDLib's own log,
+    once its verbosity was raised, printed `photo = inputPhoto { photo = null`
+    and settled it in one line.
     """
     sample = tmp_path / "x.png"
-    sample.write_bytes(b"\x89PNG\r\n\x1a\n")
+    sample.write_bytes(b"fake-png-bytes")
 
     async def _path(raw_path, ctx, tool_name):
         return sample, None
 
     monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
-    wire({"sendMessage": TDLibError(400, "InputFile is not specified")})
+    client = wire({"sendMessage": {"@type": "message", "id": 5242881, "content": {}}})
 
-    answer = await sc.send_secret_media(
-        chat_id=-1999148344067, file_path=str(sample), account="acct"
+    await sc.send_secret_media(chat_id=-1999148344067, file_path=str(sample), account="acct")
+
+    (sent,) = [r for r in client.requests if r["@type"] == "sendMessage"]
+    photo = sent["input_message_content"]["photo"]
+    assert photo["@type"] == "inputPhoto", "the file was passed a level too high again"
+    assert photo["photo"]["@type"] == "inputFileLocal"
+
+
+@pytest.mark.asyncio
+async def test_a_voice_note_is_wrapped_the_same_way(wire, monkeypatch, tmp_path):
+    sample = tmp_path / "x.ogg"
+    sample.write_bytes(b"OggS")
+
+    async def _path(raw_path, ctx, tool_name):
+        return sample, None
+
+    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    client = wire({"sendMessage": {"@type": "message", "id": 5242889, "content": {}}})
+
+    await sc.send_secret_media(
+        chat_id=-1999148344067, file_path=str(sample), as_voice=True, account="acct"
     )
 
-    assert "1.8.67" in answer, "the build it was measured against is not named"
-    assert "send_disappearing_media" in answer, "no working alternative was offered"
-    assert "Text in secret chats is unaffected" in answer
+    (sent,) = [r for r in client.requests if r["@type"] == "sendMessage"]
+    note = sent["input_message_content"]["voice_note"]
+    assert note["@type"] == "inputVoiceNote"
+    assert note["voice_note"]["@type"] == "inputFileLocal"
+
+
+@pytest.mark.asyncio
+async def test_a_per_message_timer_is_refused_with_the_one_that_works(wire, monkeypatch, tmp_path):
+    """Telegram refuses a per-message self-destruct in a secret chat outright:
+    "Messages can self-destruct only in private chats". The chat's own timer is
+    the mechanism there, so the refusal names it rather than sending a request
+    that cannot succeed."""
+    sample = tmp_path / "x.png"
+    sample.write_bytes(b"fake-png-bytes")
+
+    async def _path(raw_path, ctx, tool_name):
+        return sample, None
+
+    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    client = wire()
+
+    answer = await sc.send_secret_media(
+        chat_id=-1999148344067, file_path=str(sample), self_destruct_seconds=30, account="acct"
+    )
+
+    assert "set_secret_chat_timer" in answer
+    assert "Nothing was sent" in answer
+    assert "sendMessage" not in client.types(), "it sent anyway"
