@@ -22,6 +22,55 @@ Changes here alter a permission -- never the chat's own identity (see
 from telegram_mcp.runtime import *
 
 
+# Every field Telegram's ChatAdminRights carries. Built from the installed
+# Telethon rather than typed out, because a hand-written list is exactly how the
+# previous one fell five behind: `post_stories`, `edit_stories`,
+# `delete_stories`, `manage_direct_messages` and `manage_ranks` existed on the
+# type and were never constructed, so no caller could grant them however
+# complete a `rights` dict it passed - the toggles simply stayed off in
+# Telegram's own admin panel with no error anywhere.
+def _admin_rights_fields() -> tuple:
+    import inspect
+
+    return tuple(
+        name for name in inspect.signature(ChatAdminRights.__init__).parameters if name != "self"
+    )
+
+
+# Held back from the generous default: one lets an admin mint more admins, the
+# other changes who they appear to be. Everything else is granted unless the
+# caller says otherwise.
+_WITHHELD_BY_DEFAULT = frozenset({"add_admins", "anonymous"})
+
+
+def _generous_defaults() -> dict:
+    """`promote_admin`'s default grant, over every field this Telethon has."""
+    return {name: name not in _WITHHELD_BY_DEFAULT for name in _admin_rights_fields()}
+
+
+def _build_admin_rights(values: dict = None, defaults: dict = None) -> ChatAdminRights:
+    """A ChatAdminRights carrying every field this Telethon knows about.
+
+    `values` need not be complete: a key it omits falls back to `defaults`, and
+    a field neither mentions is off. `promote_admin` leaves `defaults` alone so
+    an unmentioned right keeps its generous default - a caller declining one
+    right is declining one right, not opting out of the rest. `demote_admin`
+    passes an empty mapping so every field is explicitly cleared.
+
+    A key that is not a real right is ignored rather than raising: Telegram adds
+    rights over time, and a caller copying a newer example should lose that one
+    right rather than have the whole call refused by an older client.
+    """
+    values = values or {}
+    defaults = _generous_defaults() if defaults is None else defaults
+    return ChatAdminRights(
+        **{
+            name: bool(values.get(name, defaults.get(name, False)))
+            for name in _admin_rights_fields()
+        }
+    )
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Promote Admin", openWorldHint=True, destructiveHint=True, idempotentHint=True
@@ -50,37 +99,13 @@ async def promote_admin(
         chat = await resolve_entity(group_id, cl)
         user = await resolve_entity(user_id, cl)
 
-        # Set default admin rights if not provided
-        if not rights:
-            rights = {
-                "change_info": True,
-                "post_messages": True,
-                "edit_messages": True,
-                "delete_messages": True,
-                "ban_users": True,
-                "invite_users": True,
-                "pin_messages": True,
-                "add_admins": False,
-                "anonymous": False,
-                "manage_call": True,
-                "manage_topics": True,
-                "other": True,
-            }
-
-        admin_rights = ChatAdminRights(
-            change_info=rights.get("change_info", True),
-            post_messages=rights.get("post_messages", True),
-            edit_messages=rights.get("edit_messages", True),
-            delete_messages=rights.get("delete_messages", True),
-            ban_users=rights.get("ban_users", True),
-            invite_users=rights.get("invite_users", True),
-            pin_messages=rights.get("pin_messages", True),
-            add_admins=rights.get("add_admins", False),
-            anonymous=rights.get("anonymous", False),
-            manage_call=rights.get("manage_call", True),
-            manage_topics=rights.get("manage_topics", True),
-            other=rights.get("other", True),
-        )
+        # The default grants everything EXCEPT the two that change who the admin
+        # appears to be or lets them mint more admins: `add_admins` and
+        # `anonymous` stay off unless asked for by name.
+        # Either way the generous default applies to whatever the caller did not
+        # name, which is the long-standing contract: asking for less gets you
+        # less, but declining one right does not silently decline the others.
+        admin_rights = _build_admin_rights(rights)
 
         try:
             await cl(
@@ -122,21 +147,10 @@ async def demote_admin(
         chat = await resolve_entity(group_id, cl)
         user = await resolve_entity(user_id, cl)
 
-        # Create empty admin rights (regular user)
-        admin_rights = ChatAdminRights(
-            change_info=False,
-            post_messages=False,
-            edit_messages=False,
-            delete_messages=False,
-            ban_users=False,
-            invite_users=False,
-            pin_messages=False,
-            add_admins=False,
-            anonymous=False,
-            manage_call=False,
-            manage_topics=False,
-            other=False,
-        )
+        # Every right off, including any this Telethon knows and the old
+        # hand-written list did not - a demotion that leaves five rights set is
+        # not a demotion.
+        admin_rights = _build_admin_rights({}, defaults={})
 
         try:
             await cl(
@@ -180,6 +194,11 @@ async def edit_admin_rights(
     manage_call: bool = False,
     manage_topics: bool = False,
     other: bool = False,
+    post_stories: bool = False,
+    edit_stories: bool = False,
+    delete_stories: bool = False,
+    manage_direct_messages: bool = False,
+    manage_ranks: bool = False,
     account: str = None,
 ) -> str:
     """
@@ -205,25 +224,37 @@ async def edit_admin_rights(
         manage_call: can manage voice/video chats
         manage_topics: can create, edit, close and reopen forum topics (forum-enabled supergroups only)
         other: reserved for future rights
+        post_stories / edit_stories / delete_stories: the channel's stories.
+            Telegram shows these as one "Manage stories" row counting how many
+            of the three are on.
+        manage_direct_messages: can handle the channel's direct-message inbox.
+        manage_ranks: can set other admins' custom titles.
     """
     try:
         cl = get_client(account)
         await ensure_connected(cl)
         entity = await resolve_entity(chat_id, cl)
         user = await resolve_entity(user_id, cl)
-        admin_rights = ChatAdminRights(
-            change_info=change_info,
-            post_messages=post_messages,
-            edit_messages=edit_messages,
-            delete_messages=delete_messages,
-            ban_users=ban_users,
-            invite_users=invite_users,
-            pin_messages=pin_messages,
-            add_admins=add_admins,
-            anonymous=anonymous,
-            manage_call=manage_call,
-            manage_topics=manage_topics,
-            other=other,
+        admin_rights = _build_admin_rights(
+            {
+                "change_info": change_info,
+                "post_messages": post_messages,
+                "edit_messages": edit_messages,
+                "delete_messages": delete_messages,
+                "ban_users": ban_users,
+                "invite_users": invite_users,
+                "pin_messages": pin_messages,
+                "add_admins": add_admins,
+                "anonymous": anonymous,
+                "manage_call": manage_call,
+                "manage_topics": manage_topics,
+                "other": other,
+                "post_stories": post_stories,
+                "edit_stories": edit_stories,
+                "delete_stories": delete_stories,
+                "manage_direct_messages": manage_direct_messages,
+                "manage_ranks": manage_ranks,
+            }
         )
         await cl(
             functions.channels.EditAdminRequest(
