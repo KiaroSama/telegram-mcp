@@ -268,12 +268,20 @@ class TDLibClient:
         self._send({"@type": "getOption", "name": "version"})
         return await self._settle()
 
-    async def _settle(self, timeout: float = 30.0) -> str:
+    async def _settle(self, timeout: float = 30.0, ignore: frozenset = frozenset()) -> str:
         """Wait for an authorisation state that needs someone else to act.
 
         The intermediate states pass by on their own -- `WaitTdlibParameters` is
         answered here, `Ready` is the end -- so waiting for "not changing any
         more" would either hang or return a state that is about to be replaced.
+
+        `ignore` is for waiting to LEAVE a state that is otherwise settled. It
+        exists because this returns the current state immediately when that
+        state already qualifies: after a login token is accepted the client sits
+        in `WaitOtherDeviceConfirmation`, which counts as settled, so a plain
+        call answers "still waiting" instantly instead of waiting for Telegram
+        to push the acceptance through. Measured, not theorised - that is
+        exactly how the first live run failed.
         """
         settled = {
             "authorizationStateReady",
@@ -285,7 +293,7 @@ class TDLibClient:
             "authorizationStateWaitRegistration",
             "authorizationStateWaitOtherDeviceConfirmation",
             "authorizationStateClosed",
-        }
+        } - set(ignore)
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
             if self.authorization_state in settled:
@@ -535,5 +543,9 @@ async def authorise_from_telethon(client: "TDLibClient", telethon_client) -> str
     token = login_token(client.authorization_link or "")
     await telethon_client(functions.auth.AcceptLoginTokenRequest(token=token))
 
-    # Telegram pushes the acceptance to TDLib as a new authorisation state.
-    return await client._settle()
+    # Telegram pushes the acceptance through as a NEW authorisation state, so
+    # the wait has to be for leaving this one rather than for reaching any
+    # settled one - it is already in a settled one.
+    return await client._settle(
+        ignore=frozenset({"authorizationStateWaitOtherDeviceConfirmation"})
+    )

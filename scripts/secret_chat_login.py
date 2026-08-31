@@ -95,9 +95,15 @@ async def _run(account: str) -> int:
         await client.close()
         return 0
 
-    telethon_client = await _telethon_client(label)
-    print("\nAuthorising from this account's existing Telethon login...")
-    state = await authorise_from_telethon(client, telethon_client)
+    # A client can come up ALREADY past the token step: an earlier run's token
+    # was accepted and Telegram is now asking for the two-step password. Trying
+    # to authorise from there publishes a second token for nothing, which is
+    # what the first live run did.
+    if state == "authorizationStateWaitPhoneNumber":
+        telethon_client = await _telethon_client(label)
+        print()
+        print("Authorising from this account's existing Telethon login...")
+        state = await authorise_from_telethon(client, telethon_client)
 
     if state == "authorizationStateWaitPassword":
         # Telegram asks for this even when the token is valid. It is the one

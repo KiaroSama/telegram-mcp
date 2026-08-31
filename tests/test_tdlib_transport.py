@@ -432,13 +432,23 @@ async def test_the_existing_telethon_login_authorises_tdlib_with_no_code(fake, t
     class FakeTelethon:
         async def __call__(self, request):
             accepted.append(bytes(request.token))
-            # Telegram pushes the acceptance back as a new authorisation state.
-            client._handle_on_loop(
-                {
-                    "@type": "updateAuthorizationState",
-                    "authorization_state": {"@type": "authorizationStateReady"},
-                }
-            )
+
+            # AFTER this returns, not during it. Telegram pushes the acceptance
+            # through as a separate update, and a fake that delivered it inside
+            # the call hid a real bug: `_settle` answers immediately when the
+            # current state already counts as settled, and
+            # `WaitOtherDeviceConfirmation` does - so the wait returned "still
+            # waiting" instantly and the live login stopped one step short.
+            async def _later():
+                await asyncio.sleep(0)
+                client._handle_on_loop(
+                    {
+                        "@type": "updateAuthorizationState",
+                        "authorization_state": {"@type": "authorizationStateReady"},
+                    }
+                )
+
+            asyncio.ensure_future(_later())
             return object()
 
     async def _drive():
