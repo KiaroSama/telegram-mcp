@@ -19,11 +19,19 @@ jobs:
     timeout-minutes: 20
 
     # The floor and the ceiling. pyproject declares >=3.11 and classifies up to
-    # 3.13; running both is what turns that claim into evidence.
+    # 3.14; running the ends is what turns that claim into evidence.
+    #
+    # 3.14 was added only after the suite was actually run on it, not on the
+    # strength of the version being released: the resolve, every import, all 181
+    # tool registrations and the full suite were checked in a throwaway 3.14 venv
+    # first. That run earned its keep immediately - it caught a fragile budget in
+    # test_guarded_runner (pytest's cold import costs 6.09s on 3.14 against 4.10s
+    # on 3.13, and the test allowed 6.0s of silence), which 3.13 had been passing
+    # on under two seconds of margin.
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.11', '3.13']
+        python-version: ['3.11', '3.13', '3.14']
 
     steps:
       - name: Check out repository code
@@ -39,7 +47,7 @@ jobs:
       # two platforms. Keyed on uv.lock, so a dependency change still gets a cold
       # resolve rather than a stale environment.
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -97,7 +105,7 @@ jobs:
           python-version: '3.11'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
@@ -201,7 +209,7 @@ jobs:
           python-version: '3.13'
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.0.1
         with:
           enable-cache: true
           cache-dependency-glob: "uv.lock"
