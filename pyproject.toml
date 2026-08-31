@@ -43,6 +43,13 @@ dependencies = [
     "python-json-logger>=4.2.0",
     "qrcode>=8.2",
     "telethon>=1.44.0",
+    # Telegram's own client library. Required rather than optional because two
+    # things here have no other route: secret chats (Telethon never implemented
+    # MTProto 2.0) and the admin rights newer than the TL layer Telethon
+    # announces. It ships a ~12 MB native TDLib build with wheels for Windows,
+    # Linux and macOS; a platform without one cannot install this project, which
+    # is the cost of not having those features be an afterthought.
+    "tdjson>=1.8.67",
 ]
 
 [project.optional-dependencies]
@@ -56,15 +63,10 @@ proxy = [
 lottie = [
     "rlottie-python>=1.3.8",
 ]
-# Secret chats. Telethon never implemented MTProto 2.0 end-to-end encryption and
-# was archived in February 2026 without one, so the only way to have them is
-# Telegram's own client library. Optional because it ships a ~12 MB native TDLib
-# build and because an account has to log in to it separately - see
-# scripts/secret_chat_login.py. Without it every other tool still works and the
-# secret-chat tools say why they cannot.
-secret = [
-    "tdjson>=1.8.67",
-]
+# `secret` was an extra until secret chats stopped being optional; tdjson is a
+# plain dependency now. Kept as an empty alias so `pip install -e .[secret]`,
+# which the docs recommended, does not start failing for anyone who copied it.
+secret = []
 
 [project.urls]
 "Homepage" = "https://github.com/KiaroSama/telegram-mcp"

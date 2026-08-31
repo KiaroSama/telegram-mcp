@@ -5,3 +5,4 @@ regex>=2024.0.0
 python-json-logger>=4.2.0
 qrcode>=8.2
 telethon>=1.44.0
+tdjson>=1.8.67
