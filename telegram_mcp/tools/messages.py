@@ -20,7 +20,7 @@ polls) and ``messages_queue`` (scheduled sends and drafts).
 """
 
 from telegram_mcp.runtime import *
-from telegram_mcp.entities import rebuild_entities
+from telegram_mcp.entities import build_send_entities
 import random
 
 from telethon import utils as telethon_utils
@@ -226,7 +226,7 @@ async def send_message(
             (it can expire or be bought at any time).
     """
     try:
-        built_entities = rebuild_entities(entities, message)
+        built_entities = await build_send_entities(entities, message, account)
         if isinstance(built_entities, str):
             return built_entities
         if built_entities and parse_mode:
@@ -508,7 +508,7 @@ async def edit_message(
             default (Markdown), so **bold** in existing edits still renders.
     """
     try:
-        built_entities = rebuild_entities(entities, new_text)
+        built_entities = await build_send_entities(entities, new_text, account)
         if isinstance(built_entities, str):
             return built_entities
         if built_entities and parse_mode:
@@ -786,7 +786,7 @@ async def reply_to_message(
             sent and a structured telegram_premium_required result is returned).
     """
     try:
-        built_entities = rebuild_entities(entities, text)
+        built_entities = await build_send_entities(entities, text, account)
         if isinstance(built_entities, str):
             return built_entities
         if built_entities and parse_mode:

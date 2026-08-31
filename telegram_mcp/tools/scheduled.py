@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from typing import Any, List, Optional, Union
 
 from telegram_mcp.runtime import *
-from telegram_mcp.entities import rebuild_entities as _rebuild_entities
+from telegram_mcp.entities import build_send_entities
 from telegram_mcp.forum import reply_target_of, topic_reply_to_request
 from telegram_mcp.message_view import (
     describe_entities,
@@ -210,7 +210,7 @@ async def schedule_message(
         if refusal:
             return refusal
 
-        built_entities = _rebuild_entities(entities, message)
+        built_entities = await build_send_entities(entities, message, account)
         if isinstance(built_entities, str):
             return built_entities
 
@@ -310,7 +310,7 @@ async def edit_scheduled_message(
 
         built_entities = None
         if message is not None and entities is not None:
-            built_entities = _rebuild_entities(entities, message)
+            built_entities = await build_send_entities(entities, message, account)
             if isinstance(built_entities, str):
                 return built_entities
         elif message is None:

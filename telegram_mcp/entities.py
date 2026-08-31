@@ -44,7 +44,33 @@ def entity_classes() -> dict:
     return classes
 
 
-def rebuild_entities(items: Optional[List[dict]], text: str):
+async def resolve_mention_users(items: Optional[List[dict]], client) -> dict:
+    """`{user_id: InputUser}` for every `mention_name` in `items`.
+
+    Tagging somebody needs their access hash, not just their id, and an access
+    hash is only obtainable for a user this account has actually encountered -
+    a shared chat, a contact, a resolved username. So this asks the client and
+    lets `rebuild_entities` refuse by name whatever comes back missing, rather
+    than sending an entity Telegram will drop without comment.
+
+    Never raises: one unresolvable id must not stop the other entities from
+    being reported precisely.
+    """
+    wanted = {
+        int(item["user_id"])
+        for item in (items or [])
+        if item.get("type") == "mention_name" and item.get("user_id") is not None
+    }
+    resolved = {}
+    for user_id in wanted:
+        try:
+            resolved[user_id] = await client.get_input_entity(user_id)
+        except Exception:
+            continue
+    return resolved
+
+
+def rebuild_entities(items: Optional[List[dict]], text: str, input_users: Optional[dict] = None):
     """Telethon entities from `inspect_message`-shaped dicts, or an error string.
 
     **Offsets are UTF-16 code units into `text`**, and that is not a detail a
@@ -58,6 +84,11 @@ def rebuild_entities(items: Optional[List[dict]], text: str):
     out of range, marked `offset_is_raw`, or carrying a value the viewer already
     altered - fails the whole call, because a message sent with silently dropped
     formatting looks like it worked.
+
+    `input_users` maps user id -> Telethon `InputUser` and is needed only for
+    `mention_name`, the one kind whose read form Telegram will not accept back.
+    Callers that can reach the network resolve them first; without it, a
+    `mention_name` is refused rather than sent in a form that vanishes.
     """
     if not items:
         return None
@@ -100,6 +131,42 @@ def rebuild_entities(items: Optional[List[dict]], text: str):
         for source, target in ENTITY_FIELDS.items():
             if source in item:
                 fields[target] = item[source]
+
+        # `mention_name` is the one kind whose READ form is not its WRITE form.
+        # Telegram returns `messageEntityMentionName`, carrying a bare user id;
+        # sending needs `inputMessageEntityMentionName`, whose `user_id` is an
+        # InputUser - id AND access hash. Handing back the read form is accepted
+        # and then SILENTLY DROPPED: measured live, the message arrived with no
+        # entities at all and nothing reported a problem.
+        if kind == "mention_name":
+            user_id = fields.pop("user_id", None)
+            if user_id is None:
+                problems.append("mention_name has no user_id, so nobody would be tagged")
+                continue
+            if input_users is None:
+                problems.append(
+                    "mention_name cannot be sent without resolving the user first; "
+                    "this call did not supply a resolver"
+                )
+                continue
+            resolved = input_users.get(int(user_id))
+            if resolved is None:
+                problems.append(
+                    f"mention_name names user {user_id}, whom this account cannot resolve - "
+                    "an access hash is required to tag someone, and it comes from having "
+                    "seen them (a shared chat, a contact, a resolved username)"
+                )
+                continue
+            try:
+                built.append(
+                    types.InputMessageEntityMentionName(
+                        offset=offset, length=length, user_id=resolved
+                    )
+                )
+            except TypeError as error:
+                problems.append(f"mention_name could not be built: {error}")
+            continue
+
         try:
             built.append(entity_class(**fields))
         except TypeError as error:
@@ -108,3 +175,25 @@ def rebuild_entities(items: Optional[List[dict]], text: str):
     if problems:
         return "Refused: " + "; ".join(problems) + "."
     return built
+
+
+async def build_send_entities(items: Optional[List[dict]], text: str, account=None):
+    """`rebuild_entities`, having first resolved anyone a `mention_name` tags.
+
+    One function so all four sending paths - send, edit, schedule, quick reply -
+    behave the same. The network is touched ONLY when a `mention_name` is
+    actually present: every other entity kind is built from the request alone,
+    and paying for a connection to discover that would slow the common case for
+    the rare one.
+
+    The import is deferred because `connection` builds real clients at import
+    time and this module must stay importable without them.
+    """
+    input_users = None
+    if any((item or {}).get("type") == "mention_name" for item in (items or [])):
+        from telegram_mcp.connection import ensure_connected, get_client
+
+        client = get_client(account)
+        await ensure_connected(client)
+        input_users = await resolve_mention_users(items, client)
+    return rebuild_entities(items, text, input_users)

@@ -179,7 +179,90 @@ async def test_a_reply_can_carry_an_effect_too(wired):
 
 def test_the_scheduled_tools_now_share_one_rebuilder():
     """The gap existed because this logic was private to `scheduled.py`. Two
-    copies of "what an offset means" would drift the first time either changed."""
+    copies of "what an offset means" would drift the first time either changed.
+
+    The shared name moved from `rebuild_entities` to `build_send_entities` when
+    `mention_name` turned out to need the network before it can be built; the
+    property under test is unchanged - every sending path goes through ONE
+    builder."""
+    from telegram_mcp.entities import build_send_entities
+    from telegram_mcp.tools import messages as messages_module
     from telegram_mcp.tools import scheduled as scheduled_mod
 
-    assert scheduled_mod._rebuild_entities is rebuild_entities
+    assert scheduled_mod.build_send_entities is build_send_entities
+    assert messages_module.build_send_entities is build_send_entities
+
+
+# --------------------------------------------------------------------------
+# mention_name: the one kind whose read form is not its write form
+# --------------------------------------------------------------------------
+#
+# Measured live 2026-08-31: sending `messageEntityMentionName` - the form
+# Telegram RETURNS, carrying a bare user id - was accepted and the entity was
+# then silently dropped. The message arrived with no entities at all and nothing
+# reported a problem. Sending needs `inputMessageEntityMentionName`, whose
+# user_id is an InputUser: id AND access hash.
+
+
+def test_tagging_someone_builds_the_INPUT_form_telegram_accepts():
+    from telethon.tl.types import InputMessageEntityMentionName, InputUser
+
+    from telegram_mcp.entities import rebuild_entities
+
+    who = InputUser(user_id=5899781975, access_hash=123456789)
+    built = rebuild_entities(
+        [{"type": "mention_name", "offset": 0, "length": 6, "user_id": 5899781975}],
+        "tagged person",
+        input_users={5899781975: who},
+    )
+
+    assert isinstance(built, list) and len(built) == 1
+    entity = built[0]
+    assert isinstance(
+        entity, InputMessageEntityMentionName
+    ), "the READ form was built; Telegram accepts it and drops it without a word"
+    assert entity.user_id is who, "the access hash was lost, which is the half that matters"
+
+
+def test_a_tag_that_cannot_be_resolved_is_refused_rather_than_dropped():
+    """An access hash exists only for someone this account has encountered. A
+    silent send would look like it worked and tag nobody."""
+    from telegram_mcp.entities import rebuild_entities
+
+    refusal = rebuild_entities(
+        [{"type": "mention_name", "offset": 0, "length": 6, "user_id": 999}],
+        "tagged person",
+        input_users={},
+    )
+
+    assert isinstance(refusal, str)
+    assert "999" in refusal
+    assert "access hash" in refusal
+
+
+def test_without_a_resolver_a_tag_is_refused_not_guessed():
+    from telegram_mcp.entities import rebuild_entities
+
+    refusal = rebuild_entities(
+        [{"type": "mention_name", "offset": 0, "length": 6, "user_id": 5899781975}],
+        "tagged person",
+    )
+
+    assert isinstance(refusal, str) and "resolv" in refusal
+
+
+def test_every_other_entity_kind_needs_no_resolver():
+    """The network is touched only for `mention_name`. Bold, a link and a premium
+    emoji are built from the request alone, and must not start paying for a
+    connection because one rare kind needs it."""
+    from telegram_mcp.entities import rebuild_entities
+
+    built = rebuild_entities(
+        [
+            {"type": "bold", "offset": 0, "length": 6},
+            {"type": "text_url", "offset": 7, "length": 6, "url": "https://example.com"},
+        ],
+        "tagged person",
+    )
+
+    assert isinstance(built, list) and len(built) == 2
