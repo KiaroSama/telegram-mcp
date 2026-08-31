@@ -193,8 +193,16 @@ def test_every_message_reader_separates_the_topic_from_the_reply():
     from telegram_mcp.tools import messages as messages_mod
     from telegram_mcp.tools import messages_queue as queue_mod
     from telegram_mcp.tools import messages_read as read_mod
+    from telegram_mcp.tools import messages_view as view_mod
 
-    for module in (read_mod, messages_mod, queue_mod):
+    # `message_to_dict` and `format_message_line` moved out of `messages` into
+    # `messages_view`, so that is where the shared rule has to be used now. The
+    # tools left behind in `messages` write messages and read no reply target at
+    # all - demanding the name there would only buy a vestigial import, which is
+    # how a guard gets loosened instead of read.
+    readers = (read_mod, view_mod, queue_mod)
+
+    for module in readers + (messages_mod,):
         source = inspect.getsource(module)
         raw = [
             line.strip()
@@ -202,6 +210,9 @@ def test_every_message_reader_separates_the_topic_from_the_reply():
             if ".reply_to.reply_to_msg_id" in line or 'reply_to, "reply_to_msg_id"' in line
         ]
         assert raw == [], f"{module.__name__} still reads reply_to_msg_id raw: {raw}"
+
+    for module in readers:
+        source = inspect.getsource(module)
         assert "reply_target_of" in source, f"{module.__name__} does not use the shared rule"
 
 

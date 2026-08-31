@@ -28,7 +28,7 @@ import pytest
 from telegram_mcp import paging, runner
 from telegram_mcp.runtime import ValidationError
 from telegram_mcp.singleton import SessionLock
-from telegram_mcp.tools import events
+from telegram_mcp.tools import events, events_store
 
 # One list, used against every timing argument: what a caller must never be able
 # to turn into an unbounded wait.
@@ -66,7 +66,10 @@ async def _bounded(coroutine, seconds: float = 5.0):
 
 @pytest.fixture(autouse=True)
 def _clean_state(monkeypatch, tmp_path):
-    monkeypatch.setattr(events, "_pending_msgs", {})
+    # The map and the ledger are owned by events_store; the feed task and its
+    # settings by events. Patching either through the wrong module rebinds a
+    # name nothing reads and leaves the real state seeded from the last test.
+    monkeypatch.setattr(events_store, "_pending_msgs", {})
     monkeypatch.setattr(events, "_feed_task", None)
     monkeypatch.setattr(events, "_activity_event", None)
     monkeypatch.setattr(events, "_feed_settle_ms", 6000)
@@ -212,12 +215,12 @@ def test_a_feed_file_replaced_at_the_same_path_is_protected_again(monkeypatch, t
     path = tmp_path / "feed.jsonl"
     monkeypatch.setenv("TELEGRAM_EVENT_FEED_FILE", str(path))
 
-    events._touch_feed_file()
+    events_store._touch_feed_file()
     hardened = []
     if os.name == "nt":
-        real = events.restrict_to_owner_strict
+        real = events_store.restrict_to_owner_strict
         monkeypatch.setattr(
-            events,
+            events_store,
             "restrict_to_owner_strict",
             lambda target: hardened.append(str(target)) or real(target),
         )
@@ -239,12 +242,12 @@ def test_a_feed_file_replaced_at_the_same_path_is_protected_again(monkeypatch, t
         # Whatever the runner's umask, the replacement starts genuinely readable,
         # so "was it hardened again" has a determinate answer.
         os.chmod(path, 0o644)
-    assert not events.verify_owner_only(path), "the replacement was already private"
+    assert not events_store.verify_owner_only(path), "the replacement was already private"
 
-    events._touch_feed_file()
+    events_store._touch_feed_file()
 
     assert hardened, "the replacement object was never re-protected"
-    assert events.verify_owner_only(path)
+    assert events_store.verify_owner_only(path)
 
 
 def test_the_open_descriptor_and_the_name_must_be_the_same_object(monkeypatch, tmp_path):
@@ -262,9 +265,9 @@ def test_the_open_descriptor_and_the_name_must_be_the_same_object(monkeypatch, t
 
     fd = os.open(one, os.O_RDONLY)
     try:
-        assert events._same_object(one, fd)
-        assert not events._same_object(two, fd)
-        assert not events._same_object(tmp_path / "gone.jsonl", fd)
+        assert events_store._same_object(one, fd)
+        assert not events_store._same_object(two, fd)
+        assert not events_store._same_object(tmp_path / "gone.jsonl", fd)
     finally:
         os.close(fd)
 
@@ -287,21 +290,21 @@ def test_hardening_a_name_while_holding_a_different_object_is_refused(tmp_path):
     fd = os.open(other, os.O_RDONLY)
     try:
         with pytest.raises(OSError, match="no longer refers"):
-            events._restrict_to_owner(target, fd)
+            events_store._restrict_to_owner(target, fd)
     finally:
         os.close(fd)
 
     fd = os.open(target, os.O_RDONLY)
     try:
-        events._restrict_to_owner(target, fd)  # the same object is accepted
+        events_store._restrict_to_owner(target, fd)  # the same object is accepted
     finally:
         os.close(fd)
-    assert events.verify_owner_only(target)
+    assert events_store.verify_owner_only(target)
 
 
 def test_protection_is_re_checked_rather_than_remembered(monkeypatch, tmp_path):
     """No pathname cache: the state of the file decides, every time."""
-    assert not hasattr(events, "_owner_only_paths")
+    assert not hasattr(events_store, "_owner_only_paths")
 
 
 # --- a watcher that works on this platform ------------------------------------

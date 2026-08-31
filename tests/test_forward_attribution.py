@@ -1,6 +1,10 @@
 import datetime
 
-from telegram_mcp.tools import messages
+from telegram_mcp.tools import messages_view
+
+# Deliberately from `messages`, not from `messages_view` where it now lives: this
+# import is what proves the re-export still resolves for every caller that has
+# always reached the builder through this path.
 from telegram_mcp.tools.messages import message_to_dict
 
 
@@ -111,7 +115,10 @@ def test_message_without_forward_header_is_unaffected():
 
 def test_link_domain_is_overridable(monkeypatch):
     """t.me was unreachable for a day in July 2026; the domain must not be hardcoded."""
-    monkeypatch.setattr(messages, "LINK_DOMAIN", "telegram.me")
+    # Patched where the builder READS it. `messages` re-exports a copy of this
+    # binding, so setting it there rebinds a second name and the link below would
+    # still come back as t.me - a test that passes while proving nothing.
+    monkeypatch.setattr(messages_view, "LINK_DOMAIN", "telegram.me")
     msg = _Msg(
         fwd_from=_FwdHeader(date=FWD_DATE, channel_post=6279),
         forward=_Forward(chat=_Chat(title="Полезный Парфун", username="ParfunA")),
