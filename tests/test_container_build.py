@@ -165,3 +165,34 @@ def test_the_image_puts_sessions_outside_the_application_directory():
         "/data is not owned by the account that runs the server, so the session "
         "database cannot be written."
     )
+
+
+def test_the_base_image_can_actually_install_the_dependencies():
+    """A musl base cannot build this image, and says so only in CI.
+
+    `tdjson` is a required dependency — secret chats and the admin rights newer
+    than Telethon's TL layer have no other route — and it publishes manylinux
+    wheels with no musllinux wheel and no source distribution. On Alpine
+    `uv sync` fails with "doesn't have a source distribution or wheel for the
+    current platform", several minutes into a build, for a reason nothing in the
+    Dockerfile would have hinted at.
+
+    So the constraint is asserted here, where it costs a second: the base image
+    has to be a glibc one for as long as that dependency is required.
+    """
+    dockerfile = (REPO / "Dockerfile").read_text(encoding="utf-8")
+
+    base = [line for line in dockerfile.splitlines() if line.strip().upper().startswith("FROM ")]
+    assert base, "the Dockerfile declares no base image"
+
+    for line in base:
+        assert "alpine" not in line.lower(), (
+            f"{line.strip()!r} is a musl base, which cannot install tdjson "
+            "(manylinux wheels only, no sdist). Use a glibc image such as -slim."
+        )
+
+    requirements = (REPO / "requirements.txt").read_text(encoding="utf-8")
+    assert "tdjson" in requirements, (
+        "tdjson is no longer required, so this constraint may be lifted - delete "
+        "this test rather than leaving a rule whose reason has gone"
+    )

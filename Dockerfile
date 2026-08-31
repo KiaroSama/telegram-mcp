@@ -1,5 +1,16 @@
-# Use an official Python runtime as a parent image (Alpine-based for minimal vulnerabilities)
-FROM python:3.14-alpine
+# A glibc base, and that is a requirement rather than a preference.
+#
+# This was `python:3.14-alpine` while every dependency was pure Python. It cannot
+# be any more: `tdjson` - Telegram's own client library, which secret chats and
+# the post-layer-227 admin rights have no other route to - ships manylinux wheels
+# and NO musllinux wheel, and no source distribution either. On Alpine the build
+# fails at `uv sync` with "doesn't have a source distribution or wheel for the
+# current platform", which is a clear message arriving several minutes late.
+#
+# `-slim` is Debian, so the manylinux wheels install. The image is larger than
+# the Alpine one; that is the price of the native library, not an oversight.
+# tests/test_container_build.py fails if this line goes back to a musl base.
+FROM python:3.14-slim
 
 # Set the working directory in the container
 WORKDIR /app
