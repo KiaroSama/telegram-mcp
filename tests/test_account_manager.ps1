@@ -417,38 +417,47 @@ try {
     }
     Write-Host 'ok  0 unwinds one level and exit leaves, changing nothing on the way'
 
-    # --- the second sign-in, offered where the first one happens -----------------
+    # --- finishing the account against TDLib -------------------------------------
     #
-    # Secret chats run on TDLib, which cannot read a Telethon session, so adding an
-    # account that wants them needs one more login - and that login is another
-    # DEVICE on the person's Telegram account. Which is why the default matters
-    # more than the prompt: somebody pressing Enter through the flow is saying
-    # "the usual thing", and this is not the usual thing.
+    # Secret chats and the newer admin rights run on TDLib, which keeps its own
+    # authorisation. That used to mean a second login code. It does not: Telegram's
+    # device-linking flow lets the login that just happened authorise this one, so
+    # the step asks for nothing. What it must NOT do is grow a phone-and-code
+    # prompt of its own - that would be the second code coming back.
 
     $source = [IO.File]::ReadAllText((Join-Path $projectRoot 'Manage-Accounts.ps1'))
 
     if ($source -notmatch 'function Invoke-SecretChatLogin') {
-        throw 'Adding an account no longer offers the secret-chat login.'
+        throw 'Adding an account no longer finishes it against TDLib.'
     }
     if ($source -notmatch 'Invoke-SecretChatLogin -Label \$label') {
         throw 'Invoke-SecretChatLogin exists but Add-Account never calls it.'
     }
-    Write-Host 'ok  adding an account offers the second sign-in secret chats need'
+    Write-Host 'ok  adding an account finishes it against TDLib too'
+
+    $step = [regex]::Match($source, '(?ms)^function Invoke-SecretChatLogin \{.*?^\}').Value
+    if (-not $step) { throw 'Could not isolate Invoke-SecretChatLogin.' }
+    # The doc comment explains the mechanism and mentions "the phone app", so it
+    # has to come out before looking for a prompt - otherwise the prose that says
+    # no code is asked for is itself read as asking for one.
+    $code = [regex]::Replace($step, '(?ms)<#.*?#>', '')
+    foreach ($asked in @('Read-Host', 'phone', 'Phone', 'code:')) {
+        if ($code -match [regex]::Escape($asked)) {
+            throw "The TDLib step asks for '$asked' - the second code is back."
+        }
+    }
+    if ($step -notmatch 'secret_chat_login\.py') {
+        throw 'The TDLib step does not run the login script.'
+    }
+    Write-Host 'ok  it asks for nothing: the existing login authorises TDLib'
 
     # `Read-Confirmation` is already in scope: the harness above dot-sources every
     # function block, which is how this file drives an interactive script at all.
-
-    # Enter, twice, against both defaults. The [Y/n] question is the ordinary
-    # "carry on?"; the [y/N] one costs a device and has to be typed.
-    $carryOn = & { function Read-Host { param($Prompt) '' }; Read-Confirmation 'carry on?' }
-    if (-not $carryOn) { throw 'Enter stopped meaning yes for an ordinary confirmation.' }
-
-    $costly = & { function Read-Host { param($Prompt) '' }; Read-Confirmation 'add a device?' -DefaultNo }
-    if ($costly) { throw 'Enter accepted a step that adds a device to the account.' }
-
-    $typedYes = & { function Read-Host { param($Prompt) 'y' }; Read-Confirmation 'add a device?' -DefaultNo }
-    if (-not $typedYes) { throw 'A typed yes was refused for the -DefaultNo question.' }
-    Write-Host 'ok  Enter never accepts the step that adds a device; typing y does'
+    $onEnter = & { function Read-Host { param($Prompt) '' }; Read-Confirmation 'finish it now?' }
+    if (-not $onEnter) { throw 'Enter no longer means yes for the ordinary confirmation.' }
+    $onNo = & { function Read-Host { param($Prompt) 'n' }; Read-Confirmation 'finish it now?' }
+    if ($onNo) { throw 'A typed no was ignored.' }
+    Write-Host 'ok  Enter accepts and a typed n declines'
 
 
 }

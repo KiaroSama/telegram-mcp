@@ -488,24 +488,11 @@ function Read-Answer {
 # --- prompts -----------------------------------------------------------------
 
 function Read-Confirmation {
-    <#
-      Enter means yes, which is right for the ordinary "carry on?" question.
-
-      -DefaultNo inverts that for a step with a cost the person may not have
-      read yet. Someone pressing Enter through a flow is saying "the usual
-      thing"; adding a second device to their Telegram account is not the usual
-      thing, so it has to be typed.
-    #>
-    param(
-        [Parameter(Mandatory)] [string] $Question,
-        [switch] $DefaultNo
-    )
-    $hint = if ($DefaultNo) { '[y/N]' } else { '[Y/n]' }
-    $default = Get-Painted -Text $hint -ColorName 'Green'
+    param([Parameter(Mandatory)] [string] $Question)
+    $default = Get-Painted -Text '[Y/n]' -ColorName 'Green'
     $answer = (Read-Host "$(Get-Painted -Text $Question -ColorName 'Bold') $default").Trim()
     if ($answer -ieq 'exit') { $script:Quitting = $true; return $false }
-    if ([string]::IsNullOrWhiteSpace($answer)) { return -not $DefaultNo }
-    return ($answer -match '^(y|yes)$')
+    return ([string]::IsNullOrWhiteSpace($answer) -or $answer -match '^(y|yes)$')
 }
 
 function ConvertTo-Label {
@@ -651,18 +638,19 @@ function Invoke-SessionGenerator {
 
 function Invoke-SecretChatLogin {
     <#
-      The second sign-in, offered where the first one just happened.
+      Finish the account by signing it in to TDLib too, which is what secret
+      chats and the newer admin rights run on.
 
-      Secret chats do not run on Telethon - it never implemented MTProto 2.0 -
-      so they run on TDLib, Telegram's own library. TDLib cannot read a Telethon
-      session and offers no way to import one, so this is genuinely a second
-      login rather than a step that could have been folded into the first. It
-      appears as another device in the account's session list.
+      This asks for NOTHING. TDLib keeps its own authorisation and cannot import
+      a Telethon session - but Telegram's device-linking flow lets a new client
+      publish a login token and an already-authorised client accept it, so the
+      login that just happened authorises this one. No second code, and no QR
+      code is shown or scanned: that name is only what the phone app calls the
+      same exchange.
 
-      Offered, never assumed: most accounts never open a secret chat, and the
-      device is a real cost. Declining loses nothing - the same script can be
-      run any time afterwards, and everything else about the account already
-      works.
+      What it does add is a DEVICE in the account's session list, because TDLib
+      is a separate client. That part is the protocol. Declining is free and the
+      same script runs later.
     #>
     param([Parameter(Mandatory)] [string] $Label)
 
@@ -680,19 +668,19 @@ function Invoke-SecretChatLogin {
 
     Write-Host ''
     if ($available -ne 'yes') {
-        Write-Hint 'Secret chats also need Telegram''s own library, which is not installed here.'
-        Write-Hint '  Install:  uv pip install tdjson'
+        Write-Hint 'Telegram''s own library is not usable here, so secret chats are off.'
+        Write-Hint '  Repair:   uv pip install -e .'
         Write-Hint "  Sign in:  python scripts\secret_chat_login.py $Label"
         return
     }
 
-    Write-Host 'Secret chats need a SECOND sign-in for this account.' -ForegroundColor Yellow
-    Write-Hint 'They run on TDLib, which cannot read a Telethon session and has no way to'
-    Write-Hint 'import one - so this is another code, and another device on the account.'
-    Write-Hint "Skip it freely: run scripts\secret_chat_login.py $Label whenever you want it."
+    Write-Host 'One step left: sign this account in to TDLib as well.' -ForegroundColor Cyan
+    Write-Hint 'That is what secret chats and the newer admin rights run on. It uses the'
+    Write-Hint 'login you just did - no second code, and nothing to scan.'
+    Write-Hint 'It does add one device to this account''s Telegram session list.'
     Write-Host ''
-    if (-not (Read-Confirmation 'Sign in for secret chats now?' -DefaultNo)) {
-        Write-Host "Skipped. '$Label' works for everything except secret chats."
+    if (-not (Read-Confirmation 'Finish it now?')) {
+        Write-Host "Skipped. Run scripts\secret_chat_login.py $Label whenever you want it."
         return
     }
 
@@ -706,7 +694,7 @@ function Invoke-SecretChatLogin {
 
     Write-Host ''
     if ($code -eq 0) {
-        Write-Host "Secret chats are ready for '$Label'." -ForegroundColor Green
+        Write-Host "Done - secret chats are ready for '$Label'." -ForegroundColor Green
         Write-Log "TDLib login completed for '$Label'"
     }
     else {

@@ -456,24 +456,31 @@ becomes part of an environment variable *name*, and python-dotenv refuses to par
 containing a space — it warns and drops the line, so a literal space would save an
 account that then never loads.
 
-### Two logins, one flow
+### One code, both logins
 
-Adding an account signs it in to Telethon, which is what all but nine of the tools use.
-Secret chats are the exception: Telethon never implemented MTProto 2.0, so they run on
-TDLib, and **TDLib cannot read a Telethon session or import one** — there is no way to
-make one login serve both. What the manager can do, and now does, is ask for the second
-one while you are already there, so it is one sitting rather than two.
+Eleven of the tools do not run on Telethon: the nine secret-chat tools, because Telethon
+never implemented MTProto 2.0, plus `set_admin_right` and `get_admin_rights_via_tdlib`,
+because Telegram silently drops admin-rights flags newer than the TL layer a client
+announces. Those eleven run on TDLib, which keeps its **own** authorisation and cannot
+read or import a Telethon session.
 
-The prompt defaults to **no**, and that is deliberate: the second login is another device
-on your Telegram account, and most accounts never open a secret chat. Declining costs
-nothing — everything except the secret-chat tools already works, and you can run
+That sounds like a second login code, and for a while it was. It is not: Telegram's
+device-linking flow lets a new client publish a login token and an **already authorised**
+client accept it, so the login you just completed authorises TDLib. Adding an account
+therefore asks for **one** code, and the manager finishes the second half itself. Nothing
+is displayed to scan — the protocol calls this QR login only because that is how the phone
+app surfaces the same exchange.
+
+What it cannot remove is the **device**: TDLib is a separate client, so the account's
+session list gains an entry. That is the protocol, not a corner left uncut. An account
+with two-step verification is asked for its password once, because Telegram wants it even
+from a linked device.
+
+Accounts configured before this existed are finished the same way, still without a code:
 
 ```bash
 python scripts/secret_chat_login.py <label>
 ```
-
-at any time afterwards. If Telegram's library is not installed the manager says so and
-names the install command instead of asking a question you could not act on.
 
 ## Multi-Account Setup
 

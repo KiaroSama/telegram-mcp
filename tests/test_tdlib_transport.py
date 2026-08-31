@@ -378,3 +378,101 @@ def test_the_log_verbosity_is_lowered_before_anything_is_sent(fake, tmp_path):
 
     (request,) = [r for r in fake.executed if r["@type"] == "setLogVerbosityLevel"]
     assert request["new_verbosity_level"] <= 1
+
+
+# --------------------------------------------------------------------------
+# Authorising from the Telethon login that already exists
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "link,expected",
+    [
+        # Telegram encodes the token base64url and strips the padding, which is
+        # exactly what `b64decode` refuses. Each of these needs a different
+        # number of '=' put back.
+        ("tg://login?token=AQIDBAUGBwgJCgsMDQ4PEA", bytes(range(1, 17))),
+        ("tg://login?token=AQID", b"\x01\x02\x03"),
+        ("tg://login?token=AQI", b"\x01\x02"),
+    ],
+)
+def test_a_login_token_survives_telegrams_unpadded_base64(link, expected):
+    """A token decoded wrong is not rejected by Telegram as malformed - it is
+    rejected as the wrong token, which reads like the whole approach failing."""
+    assert tdlib.login_token(link) == expected
+
+
+def test_a_link_with_no_token_is_refused_by_name():
+    with pytest.raises(ValueError, match="No login token"):
+        tdlib.login_token("tg://login")
+
+
+@pytest.mark.asyncio
+async def test_the_existing_telethon_login_authorises_tdlib_with_no_code(fake, tmp_path):
+    """The whole point: TDLib publishes a login token and the account's already
+    authorised Telethon client accepts it, so nobody is asked for anything.
+
+    Pinned end to end because each half is useless alone - a token requested and
+    never accepted leaves TDLib waiting forever, and an accept without a request
+    has nothing to accept.
+    """
+    client = tdlib.TDLibClient("acct", database_dir=tmp_path / "db")
+    task = asyncio.ensure_future(client.start())
+    await asyncio.sleep(0)
+    client._handle_on_loop(
+        {
+            "@type": "updateAuthorizationState",
+            "authorization_state": {"@type": "authorizationStateWaitPhoneNumber"},
+        }
+    )
+    assert await task == "authorizationStateWaitPhoneNumber"
+
+    accepted = []
+
+    class FakeTelethon:
+        async def __call__(self, request):
+            accepted.append(bytes(request.token))
+            # Telegram pushes the acceptance back as a new authorisation state.
+            client._handle_on_loop(
+                {
+                    "@type": "updateAuthorizationState",
+                    "authorization_state": {"@type": "authorizationStateReady"},
+                }
+            )
+            return object()
+
+    async def _drive():
+        # The client answers the QR request with the link, the way TDLib does.
+        await asyncio.sleep(0)
+        client._handle_on_loop(
+            {
+                "@type": "updateAuthorizationState",
+                "authorization_state": {
+                    "@type": "authorizationStateWaitOtherDeviceConfirmation",
+                    "link": "tg://login?token=AQIDBAUGBwgJCgsMDQ4PEA",
+                },
+            }
+        )
+        extra = next(
+            obj["@extra"]
+            for _, obj in fake.sent
+            if obj.get("@type") == "requestQrCodeAuthentication"
+        )
+        client._handle_on_loop({"@type": "ok", "@extra": extra})
+
+    driver = asyncio.ensure_future(_drive())
+    state = await tdlib.authorise_from_telethon(client, FakeTelethon())
+    await driver
+
+    assert state == "authorizationStateReady"
+    assert accepted == [bytes(range(1, 17))], "the token Telethon accepted was not TDLib's"
+
+
+@pytest.mark.asyncio
+async def test_authorising_a_client_that_is_not_waiting_for_a_login_is_refused(fake, tmp_path):
+    """Called on a signed-in client it would publish a login token for an account
+    that already has one, which is a device nobody asked for."""
+    client = await _started(fake, tmp_path)
+
+    with pytest.raises(RuntimeError, match="not waiting for a login"):
+        await tdlib.authorise_from_telethon(client, object())

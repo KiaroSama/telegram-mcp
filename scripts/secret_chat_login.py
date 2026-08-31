@@ -1,22 +1,31 @@
 #!/usr/bin/env python3
-"""Log one account in to TDLib, once, so its secret chats work.
+"""Sign an account in to TDLib using the Telethon login it already has.
 
-Secret chats do not run on Telethon -- Telethon never implemented MTProto 2.0
-end-to-end encryption. They run on TDLib, Telegram's own client library (see
-``telegram_mcp/tdlib.py``). TDLib cannot read a Telethon session file and offers
-no way to import an existing authorisation, so an account that wants secret
-chats has to sign in here as well. That is a one-time step per account, and it
-adds one device to the account's session list.
+Secret chats do not run on Telethon -- it never implemented MTProto 2.0 -- so
+they run on TDLib (see ``telegram_mcp/tdlib.py``). TDLib keeps its own
+authorisation and cannot read a Telethon session or import one, which for a long
+time read as "one more login code per account".
 
-This is a terminal script rather than an MCP tool on purpose. The login code and
-a two-step password are typed by the account's owner into their own terminal;
-neither is ever an argument to a tool, a value in a log, or anything an agent
-sees. The password prompt is not echoed.
+It is not, and that was the wrong conclusion. Telegram's own device-linking flow
+lets a NEW client publish a login token and an ALREADY AUTHORISED client accept
+it. Both halves are reachable from here: TDLib produces the token, and this
+account's existing Telethon client accepts it. **Nothing is asked of you, and no
+QR code is displayed or scanned** -- the protocol calls it QR login because that
+is how the phone app surfaces it, but here the token never leaves the process.
 
     python scripts/secret_chat_login.py kgb_verifier
 
-Run it again at any time to check an account: an account that is already signed
-in reports so and exits without asking for anything.
+What this cannot remove is the second DEVICE: TDLib is a separate client, so the
+account's session list gains an entry. That is the protocol, not a shortcut not
+taken.
+
+Two-step verification is the one case that still needs a person. Telegram asks
+for the password even when a linked device presents a valid token, so this
+prompts for it -- not echoed, and typed by the account's owner into their own
+terminal rather than passed as an argument.
+
+Run it again at any time: an account that is already signed in says so and exits
+without touching anything.
 """
 
 from __future__ import annotations
@@ -33,94 +42,86 @@ from telegram_mcp.tdlib import (  # noqa: E402
     TDLibClient,
     TDLibError,
     TDLibUnavailable,
+    account_label,
+    authorise_from_telethon,
     database_dir_for,
     tdjson_status,
 )
 
 
-def _ask(prompt: str) -> str:
-    try:
-        value = input(prompt).strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\nCancelled.")
-        raise SystemExit(1)
-    if not value:
-        print("Nothing entered; cancelled.")
-        raise SystemExit(1)
-    return value
+async def _telethon_client(label: str):
+    """The account's Telethon client, connected and confirmed authorised.
 
+    Confirmed rather than assumed: an unauthorised client would fail at
+    `acceptLoginToken` with an error about the token, which sends the reader
+    looking at the wrong half of this.
+    """
+    from telegram_mcp.connection import clients
 
-async def _login(account: str) -> int:
-    client = TDLibClient(account)
-    print(f"Account:  {account}")
-    print(f"Database: {client.database_dir}")
-    state = await client.start()
-
-    # Each pass answers exactly one state, then re-reads: TDLib decides what
-    # comes next, and the order is not fixed (an account with a two-step
-    # password asks for it after the code, one without never does).
-    while state != "authorizationStateReady":
-        if state == "authorizationStateWaitPhoneNumber":
-            phone = _ask("Phone number, with country code (e.g. +98...): ")
-            await client.request(
-                {
-                    "@type": "setAuthenticationPhoneNumber",
-                    "phone_number": phone,
-                    "settings": {"@type": "phoneNumberAuthenticationSettings"},
-                }
-            )
-        elif state == "authorizationStateWaitCode":
-            code = _ask("Login code (Telegram sent it to your other devices): ")
-            await client.request({"@type": "checkAuthenticationCode", "code": code})
-        elif state == "authorizationStateWaitPassword":
-            # getpass, so the two-step password is not echoed to the terminal
-            # and cannot end up in a screen recording or a scrollback buffer.
-            password = getpass.getpass("Two-step verification password (not shown): ")
-            if not password:
-                print("Nothing entered; cancelled.")
-                return 1
-            await client.request({"@type": "checkAuthenticationPassword", "password": password})
-        elif state == "authorizationStateClosed":
-            print("TDLib closed the session before login finished.")
-            return 1
-        else:
-            print(
-                f"This account needs a step this script does not handle: {state}.\n"
-                "Finish it in an official Telegram client, then run this again."
-            )
-            return 1
-
-        state = await client._settle()
-
-    me = await client.request({"@type": "getMe"})
-    name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
-    print(f"\nSigned in as {name} (id {me.get('id')}).")
-    print("Secret chats are now available for this account.")
-    await client.close()
-    return 0
+    client = clients[label]
+    if not client.is_connected():
+        await client.connect()
+    if not await client.is_user_authorized():
+        raise RuntimeError(
+            f"Account {label!r} is not signed in to Telethon either, so there is no "
+            "authorisation here to extend. Add it with Manage-Accounts.ps1 first."
+        )
+    return client
 
 
 async def _run(account: str) -> int:
     status = tdjson_status()
     if not status["available"]:
         print(status["reason"])
-        print("\nThen run this script again.")
         return 1
     print(f"TDLib {status['tdlib_version']}")
 
-    # An already-signed-in account must not be asked for a code it does not
-    # need: a needless re-login would add a second device for no reason.
-    probe = TDLibClient(account)
-    state = await probe.start()
-    if state == "authorizationStateReady":
-        me = await probe.request({"@type": "getMe"})
-        name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
-        print(f"{account} is already signed in as {name} (id {me.get('id')}). Nothing to do.")
-        await probe.close()
-        return 0
-    await probe.close()
+    try:
+        label = account_label(account)
+    except ValueError as exc:
+        print(exc)
+        return 1
 
-    return await _login(account)
+    print(f"Account:  {label}")
+    print(f"Database: {database_dir_for(label)}")
+
+    client = TDLibClient(label)
+    state = await client.start()
+
+    if state == "authorizationStateReady":
+        me = await client.request({"@type": "getMe"})
+        name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
+        print(f"\nAlready signed in as {name} (id {me.get('id')}). Nothing to do.")
+        await client.close()
+        return 0
+
+    telethon_client = await _telethon_client(label)
+    print("\nAuthorising from this account's existing Telethon login...")
+    state = await authorise_from_telethon(client, telethon_client)
+
+    if state == "authorizationStateWaitPassword":
+        # Telegram asks for this even when the token is valid. It is the one
+        # thing here a person still has to supply.
+        print("\nThis account has two-step verification.")
+        password = getpass.getpass("Two-step verification password (not shown): ")
+        if not password:
+            print("Nothing entered; cancelled.")
+            await client.close()
+            return 1
+        await client.request({"@type": "checkAuthenticationPassword", "password": password})
+        state = await client._settle()
+
+    if state != "authorizationStateReady":
+        print(f"\nTDLib stopped at {state}, so secret chats are not available yet.")
+        await client.close()
+        return 1
+
+    me = await client.request({"@type": "getMe"})
+    name = " ".join(filter(None, (me.get("first_name"), me.get("last_name"))))
+    print(f"\nSigned in as {name} (id {me.get('id')}) - no code needed.")
+    print("Secret chats are now available for this account.")
+    await client.close()
+    return 0
 
 
 def main() -> int:
@@ -131,7 +132,6 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    print(f"TDLib database directory: {database_dir_for(args.account)}\n")
     try:
         return asyncio.run(_run(args.account))
     except TDLibUnavailable as exc:
@@ -139,6 +139,9 @@ def main() -> int:
         return 1
     except TDLibError as exc:
         print(f"Telegram refused this: {exc}")
+        return 1
+    except (KeyError, RuntimeError) as exc:
+        print(exc if str(exc) else f"Unknown account {args.account!r}.")
         return 1
     except KeyboardInterrupt:
         print("\nCancelled.")

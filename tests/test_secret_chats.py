@@ -251,7 +251,11 @@ def test_a_missing_login_names_the_script_that_fixes_it():
     message = str(NotSignedIn("kgb_verifier", "authorizationStateWaitPhoneNumber"))
 
     assert "scripts/secret_chat_login.py kgb_verifier" in message
-    assert "no way to import a Telethon session" in message
+    assert "cannot import a Telethon session" in message
+    # And it must say the fix is free. The message used to read "one extra
+    # sign-in", which was true and still cost a reader the wrong expectation:
+    # the existing login authorises TDLib, so no code is asked for.
+    assert "no code" in message
 
 
 def test_a_missing_library_names_the_install_command():

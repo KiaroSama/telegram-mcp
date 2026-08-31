@@ -42,6 +42,7 @@ from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, state_dir
 __all__ = [
     "NotSignedIn",
     "account_label",
+    "authorise_from_telethon",
     "TDLibClient",
     "TDLibError",
     "TDLibUnavailable",
@@ -72,11 +73,10 @@ class NotSignedIn(RuntimeError):
     def __init__(self, account: str, state: Optional[str]):
         super().__init__(
             f"Account {account!r} is signed in to Telethon but not to Telegram's "
-            f"secret-chat library (state: {state}). The two cannot share a login: "
-            f"TDLib has no way to import a Telethon session, so this account needs "
-            f"one extra sign-in, once. Run:"
-            + chr(10)
-            + f"    python scripts/secret_chat_login.py {account}"
+            f"secret-chat library (state: {state}). TDLib keeps its own "
+            f"authorisation and cannot import a Telethon session - but this account's "
+            f"existing login can authorise it, so this asks for no code and nothing to "
+            f"scan. Run once:" + chr(10) + f"    python scripts/secret_chat_login.py {account}"
         )
         self.account = account
         self.state = state
@@ -234,6 +234,10 @@ class TDLibClient:
         self.account = account
         self.database_dir = Path(database_dir) if database_dir else database_dir_for(account)
         self.authorization_state: Optional[str] = None
+        # `authorizationStateWaitOtherDeviceConfirmation` carries a `tg://login`
+        # link and nothing else. Keeping only the state name would throw away the
+        # one field that state exists to deliver.
+        self.authorization_link: Optional[str] = None
         self.updates: asyncio.Queue = asyncio.Queue(maxsize=1000)
         self._td = _tdjson()
         self._client_id: Optional[int] = None
@@ -279,6 +283,7 @@ class TDLibClient:
             "authorizationStateWaitEmailAddress",
             "authorizationStateWaitEmailCode",
             "authorizationStateWaitRegistration",
+            "authorizationStateWaitOtherDeviceConfirmation",
             "authorizationStateClosed",
         }
         deadline = asyncio.get_running_loop().time() + timeout
@@ -376,6 +381,7 @@ class TDLibClient:
 
     def _on_authorization(self, state: dict) -> None:
         self.authorization_state = state["@type"]
+        self.authorization_link = state.get("link")
         if self.authorization_state == "authorizationStateWaitTdlibParameters":
             self._send(self._parameters())
         if self._state_changed is not None:
@@ -464,3 +470,70 @@ async def close_all() -> None:
         for client in list(_by_account.values()):
             await client.close()
         _by_account.clear()
+
+
+# --------------------------------------------------------------------------
+# Authorising TDLib from the Telethon login that already exists.
+#
+# This is the difference between "one more code" and none at all. Telegram's
+# QR-login flow lets a NEW client publish a login token and an ALREADY
+# AUTHORISED client accept it - that is how the official desktop app links a
+# device. Both halves are reachable here: TDLib asks with
+# `requestQrCodeAuthentication` and answers with a `tg://login?token=...` link,
+# and Telethon accepts it with `auth.acceptLoginToken`.
+#
+# So an account already signed in to Telethon can authorise TDLib without the
+# person entering anything. It is still a second device on the account -- that
+# part is the protocol and cannot be removed -- but it is no longer a second
+# code.
+# --------------------------------------------------------------------------
+
+
+def login_token(link: str) -> bytes:
+    """The raw token inside a `tg://login?token=...` link.
+
+    Telegram encodes it base64url WITHOUT padding, which `b64decode` rejects,
+    so the padding is restored rather than the error being caught and guessed
+    at.
+    """
+    import base64
+    from urllib.parse import parse_qs, urlparse
+
+    values = parse_qs(urlparse(link).query).get("token") or []
+    if not values:
+        raise ValueError(f"No login token in {link!r}")
+    encoded = values[0]
+    return base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+
+
+async def authorise_from_telethon(client: "TDLibClient", telethon_client) -> str:
+    """Sign TDLib in using the account's existing Telethon authorisation.
+
+    Returns the authorisation state it reaches. `authorizationStateReady` is a
+    complete success. `authorizationStateWaitPassword` means the account has
+    two-step verification and Telegram wants it even for a linked device -- the
+    caller has to collect that, and it is a password rather than a code.
+
+    Raises `TDLibError` if Telegram refuses the token, which is the honest
+    outcome to report: the fallback is the ordinary phone-and-code login.
+    """
+    from telethon.tl import functions
+
+    if client.authorization_state != "authorizationStateWaitPhoneNumber":
+        raise RuntimeError(
+            "TDLib is not waiting for a login "
+            f"(state: {client.authorization_state}); nothing to authorise."
+        )
+
+    # `other_user_ids` is for adding an account beside ones already signed in to
+    # THIS TDLib database. There are none: one database per account here.
+    await client.request({"@type": "requestQrCodeAuthentication", "other_user_ids": []})
+    state = await client._settle()
+    if state != "authorizationStateWaitOtherDeviceConfirmation":
+        raise RuntimeError(f"TDLib did not offer a login token (state: {state}).")
+
+    token = login_token(client.authorization_link or "")
+    await telethon_client(functions.auth.AcceptLoginTokenRequest(token=token))
+
+    # Telegram pushes the acceptance to TDLib as a new authorisation state.
+    return await client._settle()
