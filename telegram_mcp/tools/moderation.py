@@ -123,7 +123,48 @@ def _undeliverable_note(dropped: list) -> str:
     return (
         f" NOT set: {names}. Telegram accepted the request but drops these: they were added "
         f"to chatAdminRights after TL layer {LAYER}, which is the layer Telethon announces "
-        "and, being archived, always will. Every other right in this call was applied."
+        "and, being archived, always will."
+    )
+
+
+async def _rights_telegram_declined(cl, entity, user, requested: dict) -> list:
+    """Rights asked for that Telegram did not grant, read back from Telegram.
+
+    The write is not the outcome. Telegram accepts `channels.editAdmin` in full
+    and then applies only the rights that MEAN something for that chat type,
+    silently: measured on a broadcast channel, `pin_messages`, `manage_topics`
+    and `manage_ranks` all came back False from a request that reported success,
+    because pinning is a supergroup right, topics need a forum, and ranks need
+    the supergroup context. Nothing said so.
+
+    `set_admin_right` has always read back for exactly this reason. This is the
+    same check for the tool that sets them all at once, so a declined right is
+    visible rather than assumed - the note used to end "Every other right in
+    this call was applied", which was a claim, not a measurement.
+
+    Never raises: a failed read-back must not turn an applied change into an
+    error. It returns nothing to report instead, which is what it knows.
+    """
+    wanted = {name for name, on in requested.items() if on}
+    if not wanted:
+        return []
+    try:
+        got = await cl(functions.channels.GetParticipantRequest(channel=entity, participant=user))
+        actual = admin_rights_to_dict(getattr(got.participant, "admin_rights", None))
+    except Exception:
+        return []
+    # A name absent from the read-back is one THIS Telethon cannot see, which is
+    # the post-227 case the TDLib path reports on separately. Only a right that
+    # came back explicitly False was declined.
+    return sorted(name for name in wanted if actual.get(name) is False)
+
+
+def _declined_note(declined: list) -> str:
+    return (
+        f" Telegram declined: {', '.join(declined)}. The request was accepted and these "
+        "were read back as still off - normally because the right does not apply to this "
+        "chat type (pinning and ranks are supergroup rights; topics need a forum), or "
+        "because this account may not grant it here."
     )
 
 
@@ -420,6 +461,11 @@ async def edit_admin_rights(
             )
         )
         answer = f"Admin rights updated for user {user_id} in chat {chat_id}."
+        declined = await _rights_telegram_declined(
+            cl, entity, user, admin_rights_to_dict(admin_rights)
+        )
+        if declined:
+            answer += _declined_note(declined)
         dropped = undeliverable_rights(
             {
                 "manage_linked_peers": manage_linked_peers,

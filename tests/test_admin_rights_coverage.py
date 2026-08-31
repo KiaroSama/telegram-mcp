@@ -26,6 +26,7 @@ the bytes on the wire.
 """
 
 import inspect
+from types import SimpleNamespace
 
 import pytest
 from telethon.tl.types import ChatAdminRights
@@ -368,3 +369,105 @@ async def test_a_session_too_new_to_promote_says_so_instead_of_looking_like_a_pe
     assert "24 hours" in answer, "the age rule was not named"
     assert "anti-hijack" in answer
     assert "need admin rights" not in answer, "it still reads as a missing permission"
+
+
+@pytest.mark.asyncio
+async def test_a_right_telegram_declined_is_read_back_not_assumed_applied():
+    """Measured live on a broadcast channel: `channels.editAdmin` was accepted in
+    full and `pin_messages`, `manage_topics` and `manage_ranks` came back False,
+    because pinning is a supergroup right, topics need a forum, and ranks need
+    the supergroup context. Setting each one alone through TDLib produced the
+    same False, so it is Telegram scoping them out, not a transport fault.
+
+    The tool used to end its note with "Every other right in this call was
+    applied" - a claim about an outcome nobody had read back. The owner acted on
+    it and believed a user held rights Telegram had never granted. So the write
+    is no longer the report: the rights are re-read and a declined one is named.
+    """
+    from telethon.tl.types import ChatAdminRights
+
+    from telegram_mcp.tools import moderation as mod
+
+    # What a broadcast channel actually returns for the request above.
+    applied = ChatAdminRights(
+        change_info=True, delete_messages=True, pin_messages=False, manage_topics=False
+    )
+
+    class _Channel:
+        async def __call__(self, request):
+            name = type(request).__name__
+            if name == "EditAdminRequest":
+                return SimpleNamespace(updates=[])
+            if name == "GetParticipantRequest":
+                return SimpleNamespace(participant=SimpleNamespace(admin_rights=applied))
+            raise AssertionError(f"unexpected request {name}")
+
+        def is_connected(self):
+            return True
+
+    async def _connected(_client):
+        return None
+
+    async def _resolve(reference, _client):
+        return SimpleNamespace(id=5876481644)
+
+    original = (mod.get_client, mod.ensure_connected, mod.resolve_entity)
+    mod.get_client = lambda account=None: _Channel()
+    mod.ensure_connected = _connected
+    mod.resolve_entity = _resolve
+    try:
+        answer = await mod.edit_admin_rights(
+            chat_id=-1002046407246,
+            user_id=5876481644,
+            account="acct",
+            change_info=True,
+            delete_messages=True,
+            pin_messages=True,
+            manage_topics=True,
+        )
+    finally:
+        mod.get_client, mod.ensure_connected, mod.resolve_entity = original
+
+    assert "Telegram declined: manage_topics, pin_messages" in answer
+    # A right that WAS applied must not be named as declined, or the report is
+    # noise the reader learns to skip.
+    assert "change_info" not in answer
+    assert "delete_messages" not in answer
+
+
+@pytest.mark.asyncio
+async def test_a_failed_read_back_does_not_turn_an_applied_change_into_an_error():
+    """The check is an improvement to the report, not a second thing that can
+    fail the call. If Telegram will not answer the read-back, the rights were
+    still written - saying otherwise would be a worse lie than the one it
+    replaced."""
+    from telegram_mcp.tools import moderation as mod
+
+    class _WontRead:
+        async def __call__(self, request):
+            if type(request).__name__ == "EditAdminRequest":
+                return SimpleNamespace(updates=[])
+            raise ConnectionError("read-back refused")
+
+        def is_connected(self):
+            return True
+
+    async def _connected(_client):
+        return None
+
+    async def _resolve(reference, _client):
+        return SimpleNamespace(id=5876481644)
+
+    original = (mod.get_client, mod.ensure_connected, mod.resolve_entity)
+    mod.get_client = lambda account=None: _WontRead()
+    mod.ensure_connected = _connected
+    mod.resolve_entity = _resolve
+    try:
+        answer = await mod.edit_admin_rights(
+            chat_id=-1002046407246, user_id=5876481644, account="acct", change_info=True
+        )
+    finally:
+        mod.get_client, mod.ensure_connected, mod.resolve_entity = original
+
+    assert answer.startswith("Admin rights updated")
+    assert "declined" not in answer, "an unread right was reported as declined"
