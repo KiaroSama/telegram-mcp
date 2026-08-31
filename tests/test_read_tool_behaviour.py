@@ -509,3 +509,110 @@ async def test_get_saved_history_bounds_the_limit_before_asking(monkeypatch):
 
     assert "limit" in result.lower()
     assert client.sent == [], "a zero limit reached the wire"
+
+
+# --- the two capture tools --------------------------------------------------
+#
+# `telegram_mcp/visual/capture.py` has its own 22 tests for the Win32 seam. What
+# had no test was the TOOL layer above it: which arguments each tool forwards,
+# and whether a bad option is refused before any capture is attempted. Patching
+# `_capture_encoded` is what makes that testable off Windows - the point here is
+# the call these tools make, not the pixels that come back.
+
+
+class _Capture:
+    """Stands in for `_capture_encoded`, recording exactly how it was called."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def __call__(self, *args, **kwargs):
+        self.calls.append((args, kwargs))
+        return b"\x89PNG-not-real", {"image": {"format": "png"}, "downscaled": False}
+
+
+@pytest.mark.asyncio
+async def test_get_telegram_region_forwards_the_crop_box(monkeypatch):
+    """The whole difference between the two tools is that one carries a region.
+    Dropping it would silently return the entire window - a much larger image
+    than asked for, and correct-looking."""
+    from telegram_mcp.tools import visual as visual_mod
+
+    capture = _Capture()
+    monkeypatch.setattr(visual_mod, "_capture_encoded", capture)
+
+    result = await visual_mod.get_telegram_region(10, 20, 110, 220)
+
+    _args, kwargs = capture.calls[-1]
+    assert kwargs["region"] == (10, 20, 110, 220)
+    assert len(result) == 2, "a metadata block and an image are both expected"
+    assert "format" in result[0], "the metadata block should describe the image"
+
+
+@pytest.mark.asyncio
+async def test_get_telegram_screen_asks_for_no_region(monkeypatch):
+    """Its counterpart: the full-window tool must not smuggle a crop through."""
+    from telegram_mcp.tools import visual as visual_mod
+
+    capture = _Capture()
+    monkeypatch.setattr(visual_mod, "_capture_encoded", capture)
+
+    await visual_mod.get_telegram_screen()
+
+    _args, kwargs = capture.calls[-1]
+    assert kwargs.get("region") is None
+
+
+@pytest.mark.asyncio
+async def test_native_resolution_reaches_the_capture(monkeypatch):
+    """`native_resolution` is the expensive switch - a 4K window at native size
+    costs roughly 20k tokens. A tool that accepted it and did not pass it on
+    would quietly keep downscaling while the caller believed otherwise."""
+    from telegram_mcp.tools import visual as visual_mod
+
+    capture = _Capture()
+    monkeypatch.setattr(visual_mod, "_capture_encoded", capture)
+
+    await visual_mod.get_telegram_region(0, 0, 50, 50, native_resolution=True)
+
+    assert capture.calls[-1][1]["native_resolution"] is True
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"method": "telepathy"},
+        {"image_format": "bmp"},
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_bad_option_is_refused_before_anything_is_captured(monkeypatch, kwargs):
+    """Capturing first and rejecting after would pay for a PrintWindow, a bitmap
+    and an encode before noticing the answer cannot be returned."""
+    from telegram_mcp.tools import visual as visual_mod
+
+    capture = _Capture()
+    monkeypatch.setattr(visual_mod, "_capture_encoded", capture)
+
+    result = await visual_mod.get_telegram_screen(**kwargs)
+
+    assert isinstance(result, str), "a refusal is a sentence, not an image list"
+    assert capture.calls == [], "a capture ran for options that were already invalid"
+
+
+@pytest.mark.asyncio
+async def test_a_capture_failure_comes_back_as_a_sentence(monkeypatch):
+    """Telegram Desktop not running is the ordinary case on a machine that has
+    the server installed. It must read as an explanation, not a traceback."""
+    from telegram_mcp.visual.capture import CaptureError
+    from telegram_mcp.tools import visual as visual_mod
+
+    async def _fail(*args, **kwargs):
+        raise CaptureError("no Telegram window found")
+
+    monkeypatch.setattr(visual_mod, "_capture_encoded", _fail)
+
+    result = await visual_mod.get_telegram_screen()
+
+    assert isinstance(result, str)
+    assert "no Telegram window found" in result
