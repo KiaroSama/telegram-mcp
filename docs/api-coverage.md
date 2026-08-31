@@ -239,11 +239,20 @@ the tree, which is the cost of having deferred them.
    skip on non-POSIX, which keeps the security check where it holds and stops a
    permanently-red suite from hiding the next real regression.
 4. ~~Split `tools/messages.py` and `runtime.py`~~ **done**, along with `tools/groups.py`,
-   `tools/chats.py` and `tests/test_runtime.py`. Nothing in the tree is over 800 lines
-   except `tools/contacts.py` at 802, which is one cohesive module and was left alone.
-   Splitting surfaced three instances of the same trap - a star import creates a second
-   name for one object, and the two drift the moment either is rebound - so
-   `tests/test_tool_registry.py` now guards it across the whole package.
+   `tools/chats.py` and `tests/test_runtime.py`. Splitting surfaced three instances of the
+   same trap - a star import creates a second name for one object, and the two drift the
+   moment either is rebound - so `tests/test_tool_registry.py` now guards it across the
+   whole package.
+
+   Revisited 2026-08-31 as the tree grew: `tools/messages.py` 1175 -> 859 (extracting
+   `messages_view.py`), `tools/events.py` 931 -> 668 (`events_store.py`) and
+   `tools/contacts.py` 864 -> 655 (`contact_aliases.py` - the three alias tools own a
+   local store, the other fourteen only read and write what Telegram holds). The files
+   still over 800 were assessed and deliberately left whole: `visual/capture.py` and
+   `visual/frames.py` are each one responsibility over shared plumbing that both halves
+   need, and `handles.py`, `runtime.py`, `connection.py` and `Manage-Accounts.ps1` are
+   single cohesive cores. Cohesion outranks the line count; a thin fragment is worse than
+   a long file.
 
 ### Forums, fixed at source
 

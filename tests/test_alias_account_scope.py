@@ -19,7 +19,7 @@ from types import SimpleNamespace
 import pytest
 
 from telegram_mcp import aliases, connection, runtime
-from telegram_mcp.tools import contacts, messages
+from telegram_mcp.tools import contact_aliases, messages
 
 
 @pytest.fixture(autouse=True)
@@ -69,9 +69,21 @@ def logins(monkeypatch):
                 return next(iter(clients.values()))
             return clients[account]
 
-        for module in (messages, contacts):
-            monkeypatch.setattr(module, "get_client", _get_client)
-            monkeypatch.setattr(module, "resolve_entity", _resolve)
+        # Discovered, not listed. A hand-written module tuple went stale the
+        # moment the alias tools moved out of `contacts` into their own module,
+        # and the symptom was a tool reaching the real client instead of the
+        # fake - which fails somewhere unrelated. Every tool module that binds
+        # these names by star-import gets both patched.
+        import importlib
+        import pkgutil
+
+        import telegram_mcp.tools as tools_pkg
+
+        for info in pkgutil.iter_modules(tools_pkg.__path__):
+            module = importlib.import_module(f"telegram_mcp.tools.{info.name}")
+            for name, replacement in (("get_client", _get_client), ("resolve_entity", _resolve)):
+                if hasattr(module, name):
+                    monkeypatch.setattr(module, name, replacement)
         return clients
 
     return configure
@@ -239,10 +251,10 @@ async def test_saving_without_an_account_uses_the_real_sole_label(logins, monkey
     """One login called `work` stored the invented label `default`, and every
     later lookup on `work` missed its own row."""
     logins("work")
-    monkeypatch.setattr(contacts, "get_marked_id", lambda entity: 999)
-    monkeypatch.setattr(contacts, "format_entity", lambda entity: {"name": "Andrey"})
+    monkeypatch.setattr(contact_aliases, "get_marked_id", lambda entity: 999)
+    monkeypatch.setattr(contact_aliases, "format_entity", lambda entity: {"name": "Andrey"})
 
-    await contacts.set_contact_alias(alias="андрей", chat_id="@andrey")
+    await contact_aliases.set_contact_alias(alias="андрей", chat_id="@andrey")
 
     assert runtime.load_aliases() == {
         ("work", "андрей"): {"id": 999, "name": "Andrey", "account": "work"}
@@ -255,7 +267,7 @@ async def test_listing_shows_only_the_asking_login(logins):
     _save("андрей", 111, "work")
     _save("борис", 222, "personal")
 
-    listed = json.loads(await contacts.list_contact_aliases(account="personal"))["results"]
+    listed = json.loads(await contact_aliases.list_contact_aliases(account="personal"))["results"]
 
     assert [row["id"] for row in listed] == [222]
 
@@ -265,7 +277,7 @@ async def test_deleting_cannot_reach_another_login_s_alias(logins):
     logins("work", "personal")
     _save("андрей", 111, "work")
 
-    result = await contacts.delete_contact_alias(alias="андрей", account="personal")
+    result = await contact_aliases.delete_contact_alias(alias="андрей", account="personal")
 
     assert "not found" in result
     assert runtime.apply_alias("андрей", account="work") == 111
@@ -281,7 +293,7 @@ async def test_deleting_removes_the_asking_login_s_row_only(logins):
         )
     )
 
-    await contacts.delete_contact_alias(alias="мама", account="personal")
+    await contact_aliases.delete_contact_alias(alias="мама", account="personal")
 
     assert runtime.apply_alias("мама", account="work") == 111
     assert runtime.apply_alias("мама", account="personal") == "мама"

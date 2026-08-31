@@ -118,9 +118,12 @@ def test_the_alias_write_does_not_run_on_the_event_loop():
     """`update_aliases` takes a cross-process file lock and polls it with
     `time.sleep` for up to ten seconds. Called straight from an `async def` body
     that stalls Telethon's socket and every concurrent tool call."""
-    from telegram_mcp.tools import contacts as contacts_mod
+    from telegram_mcp.tools import contact_aliases, contacts
 
-    source = inspect.getsource(contacts_mod)
+    # Both, because the alias tools moved out of `contacts` and the rule is
+    # about alias writes wherever they live - a guard that named one module
+    # would have gone quiet the moment they moved.
+    source = inspect.getsource(contacts) + inspect.getsource(contact_aliases)
 
     assert "return update_aliases(" not in source
     assert source.count("asyncio.to_thread(update_aliases") == 2
@@ -129,7 +132,8 @@ def test_the_alias_write_does_not_run_on_the_event_loop():
 def test_no_tool_in_these_modules_returns_a_raw_object_dump():
     """`str()` on a TLObject is always a full nested dump; the next one added
     fails here rather than in a transcript."""
-    from telegram_mcp.tools import contacts as contacts_mod
+    from telegram_mcp.tools import contact_aliases, contacts
 
     assert "str(result)" not in inspect.getsource(mod)
-    assert "str(result)" not in inspect.getsource(contacts_mod)
+    assert "str(result)" not in inspect.getsource(contacts)
+    assert "str(result)" not in inspect.getsource(contact_aliases)

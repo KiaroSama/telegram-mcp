@@ -2,6 +2,7 @@
 
 from telegram_mcp.tools.accounts import *
 from telegram_mcp.tools.contacts import *
+from telegram_mcp.tools.contact_aliases import *
 from telegram_mcp.tools.chats import *
 from telegram_mcp.tools.topics import *
 from telegram_mcp.tools.chat_state import *
