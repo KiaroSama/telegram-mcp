@@ -51,9 +51,34 @@ IDLE_BUDGET = 4.0
 # anything; and it has to stay UNDER the newline-free stretch, or the old
 # line-based pump finishes without timing out and the test stops proving
 # anything. Widening the stretch is what buys room on both edges.
-NEWLINE_FREE_SECONDS = 12.0
-NEWLINE_FREE_IDLE = 6.0
-HARNESS_TIMEOUT = 90
+#
+# 6s was raised from 4s for that reason and was STILL too tight. Measured on this
+# machine, `python -c "import pytest"` alone costs:
+#
+#     3.13  4.10s      3.14  6.09s
+#
+# and the child runs with `-q -s`, so pytest prints NOTHING until the test body
+# starts - the whole import is dead air on the pipe. On 3.14 the import alone
+# already exceeded the 6.0s budget, so the pump was called idle before the first
+# byte could exist. 3.13 passed on 1.9s of margin, which is not a pass so much as
+# a near miss; a busy CI runner erases that either way.
+#
+# So the budget is now set from the measurement plus room for a loaded runner,
+# not from what happened to work. The invariant that matters is unchanged and is
+# asserted below: the write stretch must stay comfortably LONGER than the idle
+# budget, or the test proves nothing.
+NEWLINE_FREE_SECONDS = 35.0
+NEWLINE_FREE_IDLE = 20.0
+HARNESS_TIMEOUT = 180
+
+# The whole point of the pair, stated where it cannot rot: if a future edit makes
+# the stretch shorter than the budget, the old line-based pump would finish
+# without ever tripping the idle clock and this test would pass against the very
+# bug it exists to catch.
+assert NEWLINE_FREE_SECONDS > NEWLINE_FREE_IDLE * 1.5, (
+    "the newline-free stretch must outlast the idle budget by a clear margin, "
+    "or the test stops proving that byte-level output counts as progress"
+)
 
 
 def _process_alive(pid: int) -> bool:
