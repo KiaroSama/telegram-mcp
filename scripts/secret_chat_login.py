@@ -109,6 +109,7 @@ async def _run(account: str) -> int:
         # Telegram asks for this even when the token is valid. It is the one
         # thing here a person still has to supply.
         print("\nThis account has two-step verification.")
+        sys.stdout.flush()
         password = getpass.getpass("Two-step verification password (not shown): ")
         if not password:
             print("Nothing entered; cancelled.")
@@ -130,13 +131,49 @@ async def _run(account: str) -> int:
     return 0
 
 
+async def _report_states() -> int:
+    """One `label=state` line per configured account, for a caller that is not a
+    person - the account manager reads this to show which halves are done.
+
+    Machine-readable on purpose: a menu that has to parse prose is a menu that
+    silently mis-reports the day the prose changes.
+    """
+    from telegram_mcp.connection import clients
+
+    if not tdjson_status()["available"]:
+        print("unavailable")
+        return 1
+    for label in sorted(clients):
+        client = TDLibClient(label)
+        try:
+            print(f"{label}={await client.start()}")
+        finally:
+            await client.close()
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "account",
+        nargs="?",
         help="The account label, matching the one the server uses (see list_accounts).",
     )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Print `label=state` for every configured account and exit.",
+    )
     args = parser.parse_args()
+
+    if args.status:
+        try:
+            return asyncio.run(_report_states())
+        except Exception as exc:  # pragma: no cover - a status probe must not raise
+            print(f"unavailable: {exc}")
+            return 1
+    if not args.account:
+        parser.error("an account label is required unless --status is given")
 
     try:
         return asyncio.run(_run(args.account))

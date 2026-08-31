@@ -400,7 +400,7 @@ to their own location, so they work from any directory and from a shortcut.
 | Script | What it does |
 |---|---|
 | `start-mcp.ps1` | Runs the server through `uv` without losing the terminal's colours or its TTY. Keeps a timestamped log per run by default, in `logs/` inside the private state directory - never beside the source - recording only this server's own diagnostics. Pass `-NoLogToFile` (or set `TELEGRAM_MCP_LAUNCHER_LOG=off`) for a run that leaves nothing on disk. |
-| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, or just generate a session string. Adding one also offers the second sign-in secret chats need (see below). |
+| `Manage-Accounts.ps1` | Menu for the accounts in `.env`: list, add, remove, rename, generate a session string, or finish an account for secret chats. The listing shows both halves per account, and every route that adds one offers the TDLib half (see below). |
 
 `Manage-Accounts.ps1` edits only the `TELEGRAM_SESSION_*` lines and leaves the rest of
 `.env` byte-for-byte alone — comments, ordering and every key it does not recognise.
@@ -476,7 +476,13 @@ session list gains an entry. That is the protocol, not a corner left uncut. An a
 with two-step verification is asked for its password once, because Telegram wants it even
 from a linked device.
 
-Accounts configured before this existed are finished the same way, still without a code:
+Both routes that add an account — "Add an account" and "Generate a session string only" —
+offer it, and **"Finish an account for secret chats"** (menu item 6) does it for one that is
+already configured, including every account added before this existed. "List configured
+accounts" shows both halves per account, so `secret chats: NOT finished` is visible without
+running anything.
+
+Outside the menu it is the same one command, still without a code:
 
 ```bash
 python scripts/secret_chat_login.py <label>

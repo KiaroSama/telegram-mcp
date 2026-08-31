@@ -459,6 +459,47 @@ try {
     if ($onNo) { throw 'A typed no was ignored.' }
     Write-Host 'ok  Enter accepts and a typed n declines'
 
+    # Every route that puts an account into .env must offer the TDLib half.
+    #
+    # This is the bug that made the feature look broken: the step was wired into
+    # `Add-Account` only, and "Generate a session string only" has the generator
+    # write TELEGRAM_SESSION_STRING_<LABEL> itself. An account could therefore
+    # arrive fully configured for Telethon having never passed through
+    # Add-Account, and eleven tools stayed dark with nothing saying why. Ten
+    # launcher logs recorded no add at all, which is what finally showed it.
+    if ($source -notmatch "'6' = 'Finish an account for secret chats'") {
+        throw 'There is no menu entry for finishing an existing account.'
+    }
+    if ($source -notmatch 'function Complete-SecretChatLogin') {
+        throw 'Complete-SecretChatLogin is gone; existing accounts cannot be repaired.'
+    }
+
+    $dispatch = [regex]::Match($source, '(?ms)switch \(\$choice\) \{.*?^        \}').Value
+    if (-not $dispatch) { throw 'Could not isolate the menu dispatch.' }
+    foreach ($entry in @('2', '5', '6')) {
+        $branch = [regex]::Match($dispatch, "(?ms)'$entry' \{.*?\n            \}|'$entry' \{[^\n]*\}").Value
+        if (-not $branch) { throw "Menu entry $entry has no dispatch branch." }
+    }
+    # 5 is the generator-only route. It has to finish the job as well, or the
+    # exact gap above reopens.
+    if ($dispatch -notmatch "(?ms)'5' \{.*?Complete-SecretChatLogin.*?\}") {
+        throw 'The generator-only route no longer offers the TDLib half - that is the original bug.'
+    }
+    if ($dispatch -notmatch "'6' \{ Complete-SecretChatLogin \}") {
+        throw 'Menu entry 6 does not run Complete-SecretChatLogin.'
+    }
+    Write-Host 'ok  both routes into .env offer the TDLib half, and 6 repairs an old account'
+
+    # A status probe attached to a listing must never take the listing down.
+    $probe = [regex]::Match($source, '(?ms)^function Get-SecretChatStates \{.*?^\}').Value
+    if ($probe -notmatch 'IsNullOrWhiteSpace\(\$PSScriptRoot\)') {
+        throw 'Get-SecretChatStates no longer tolerates a missing script root.'
+    }
+    if ($probe -notmatch 'catch') {
+        throw 'Get-SecretChatStates can throw, which would break Show-Accounts.'
+    }
+    Write-Host 'ok  the status probe degrades to unknown instead of breaking the list'
+
 
 }
 finally {

@@ -565,9 +565,31 @@ function Show-Accounts {
     }
     Write-Host ''
     Write-Host "Configured accounts ($($accounts.Count)):" -ForegroundColor Cyan
+    # Both halves, because "is this account actually usable" is the question the
+    # list is opened to answer, and the Telethon half alone leaves eleven tools
+    # dark without saying so.
+    $states = Get-SecretChatStates
+    $unfinished = @()
     foreach ($label in $accounts.Keys) {
         $note = if ($label -eq 'default') { '  (used when a tool is called without account=)' } else { '' }
         Write-Host ("  {0,-16} {1}{2}" -f $label, $accounts[$label], $note)
+        $state = if ($states.ContainsKey($label)) { $states[$label] } else { '' }
+        $summary = Get-SecretChatSummary -State $state
+        if ($state -eq 'authorizationStateReady') {
+            Write-Host ("  {0,-16} {1}" -f '', $summary) -ForegroundColor Green
+        }
+        else {
+            Write-Host ("  {0,-16} {1}" -f '', $summary) -ForegroundColor Yellow
+            $unfinished += $label
+        }
+    }
+    if ($unfinished.Count -gt 0) {
+        Write-Host ''
+        Write-Host "Not finished: $($unfinished -join ', ')" -ForegroundColor Yellow
+        # Write-Host, not Write-Hint: the rest of this listing paints directly,
+        # and Write-Hint needs colour state a caller that only wants the list
+        # has no reason to have set up.
+        Write-Host 'Choose "Finish an account for secret chats" - it needs no code.' -ForegroundColor Yellow
     }
     if ($accounts.Count -gt 1) {
         Write-Host ''
@@ -635,6 +657,90 @@ function Invoke-SessionGenerator {
         Write-Host 'Nothing was saved. Run it again once the problem above is resolved.'
     }
 }
+
+function Complete-SecretChatLogin {
+    <#
+      Finish an existing account's TDLib half from the menu.
+
+      `Add-Account` offers this at the end, but that is not the only way an
+      account gets into `.env`: "Generate a session string only" has the
+      generator write the variable itself, so an account can arrive fully
+      configured for Telethon having never passed through Add-Account. Every
+      such account - and every one added before this step existed - is repaired
+      from here.
+    #>
+    $accounts = Get-Accounts
+    if ($accounts.Count -eq 0) {
+        Write-Host 'No accounts are configured yet.' -ForegroundColor Yellow
+        return
+    }
+
+    $labels = @($accounts.Keys)
+    if ($labels.Count -eq 1) {
+        $label = $labels[0]
+        Write-Host ''
+        Write-Host "Only one account is configured: $label"
+    }
+    else {
+        Write-Host ''
+        Write-Host 'Configured accounts:' -ForegroundColor Cyan
+        foreach ($name in $labels) { Write-Host "  $name" }
+        $label = Read-Label -Prompt 'Which account'
+        if ($null -eq $label) { return }
+        if (-not $accounts.ContainsKey($label)) {
+            Write-Failure "No account called '$label' is configured."
+            return
+        }
+    }
+
+    $states = Get-SecretChatStates
+    if ($states[$label] -eq 'authorizationStateReady') {
+        Write-Host "'$label' is already finished - secret chats work for it." -ForegroundColor Green
+        return
+    }
+    Invoke-SecretChatLogin -Label $label
+}
+
+
+function Get-SecretChatStates {
+    <#
+      Which accounts have finished their TDLib half, as label -> state.
+
+      Read from the code rather than guessed from a file's existence: a TDLib
+      database can exist and hold a half-finished authorisation, which is
+      exactly the state this project spent an afternoon in.
+    #>
+    # Never throws. This is a status probe attached to a listing, and a listing
+    # that dies because a probe could not run is worse than one that says
+    # "unknown" - which is what an empty result renders as.
+    $states = @{}
+    if ([string]::IsNullOrWhiteSpace($PSScriptRoot)) { return $states }
+    $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { return $states }
+
+    Push-Location -LiteralPath $PSScriptRoot
+    try {
+        $lines = & $python (Join-Path 'scripts' 'secret_chat_login.py') '--status' 2>$null
+    }
+    catch { $lines = @() }
+    finally { Pop-Location }
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*([A-Za-z0-9_]+)=(\w+)\s*$') { $states[$Matches[1]] = $Matches[2] }
+    }
+    return $states
+}
+
+
+function Get-SecretChatSummary {
+    param([Parameter(Mandatory)] [AllowEmptyString()] [string] $State)
+    switch ($State) {
+        'authorizationStateReady' { return 'secret chats: ready' }
+        '' { return 'secret chats: unknown' }
+        default { return 'secret chats: NOT finished' }
+    }
+}
+
 
 function Invoke-SecretChatLogin {
     <#
@@ -897,6 +1003,7 @@ $script:MenuItems = [ordered] @{
     '3' = 'Remove an account'
     '4' = 'Rename an account'
     '5' = 'Generate a session string only'
+    '6' = 'Finish an account for secret chats'
 }
 
 function Show-Menu {
@@ -948,7 +1055,15 @@ try {
             '2' { Add-Account }
             '3' { Remove-Account }
             '4' { Rename-Account }
-            '5' { Invoke-SessionGenerator }
+            '5' {
+                Invoke-SessionGenerator
+                # The generator writes the session variable itself, so an
+                # account can arrive here having never passed through
+                # Add-Account and therefore never been offered its TDLib half.
+                # That is exactly how accounts ended up half-configured.
+                if ($script:GeneratorExitCode -eq 0) { Complete-SecretChatLogin }
+            }
+            '6' { Complete-SecretChatLogin }
             default { Write-Failure "Enter a menu number from 1 to $($script:MenuItems.Count), or exit." }
         }
         if ($script:Quitting) { break }
