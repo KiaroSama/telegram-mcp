@@ -238,16 +238,35 @@ def _render_qr(qr) -> None:
     print(hint("  Open Telegram > Settings > Devices > Link Desktop Device"))
     print()
     print(f"Or open this link on a device where you're logged in:\n  {qr.url}\n")
-    print(hint(f"Expires at: {qr.expires.strftime('%H:%M:%S')}"))
+    print(hint(f"Expires at: {_expiry_clock(qr)}"))
     print(hint("Waiting for you to scan..."))
+
+
+def _aware_expiry(qr):
+    """`qr.expires` as an aware datetime.
+
+    Telethon returns it in UTC. One place, because the countdown normalised it
+    and the printed clock did not, and the two disagreeing by the local offset
+    is exactly the bug below.
+    """
+    expires = qr.expires
+    return expires if expires.tzinfo is not None else expires.replace(tzinfo=timezone.utc)
+
+
+def _expiry_clock(qr) -> str:
+    """The expiry on the clock the person is actually looking at.
+
+    Printed straight, `qr.expires` shows UTC with nothing saying so: someone in
+    UTC+3:30 reads "Expires at: 14:32:47" while their own clock says 18:02, and
+    a perfectly good sixty-second countdown looks broken. The seconds were never
+    wrong - only this line was.
+    """
+    return _aware_expiry(qr).astimezone().strftime("%H:%M:%S")
 
 
 def _seconds_until_expiry(qr) -> float:
     """Seconds left before this QR token expires, with a small safety margin."""
-    expires = qr.expires
-    if expires.tzinfo is None:
-        expires = expires.replace(tzinfo=timezone.utc)
-    remaining = (expires - datetime.now(timezone.utc)).total_seconds()
+    remaining = (_aware_expiry(qr) - datetime.now(timezone.utc)).total_seconds()
     return max(1.0, remaining - 1.0)
 
 
