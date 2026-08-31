@@ -117,3 +117,51 @@ def test_the_published_port_stays_on_loopback():
         "already acknowledged in that file, so this prefix is the only thing keeping "
         "full Telegram account control off the network."
     )
+
+
+def test_the_persistence_example_does_not_mount_over_the_application():
+    """A session mount on /app hides the code it was meant to keep running.
+
+    The commented example is documentation people paste. It pointed at `/app`,
+    which is `WORKDIR` — uncommenting it replaced the installed application with
+    an empty host directory and the container started with nothing to run. The
+    audit that found it stayed open through four follow-up passes because every
+    other container check looked at the build context, the lockfile and the
+    published port, and none of them read the volume target.
+
+    Commented lines are checked on purpose: an example that only breaks once
+    someone follows it is worse than one that breaks in CI.
+    """
+    compose = COMPOSE.read_text(encoding="utf-8")
+
+    mounts = [
+        line.strip().lstrip("#").strip()
+        for line in compose.splitlines()
+        if ":/app" in line and line.strip().lstrip("#").strip().startswith("-")
+    ]
+
+    assert not mounts, (
+        f"docker-compose.yml offers {mounts}, which mounts over WORKDIR and hides the "
+        "application. Persist sessions at /data instead."
+    )
+
+
+def test_the_image_puts_sessions_outside_the_application_directory():
+    """The other half: /data has to be a real, writable, declared location.
+
+    Pointing the example at /data is only correct if the image actually creates
+    it, hands it to the unprivileged user that writes the session database, and
+    declares it — otherwise the mount lands somewhere root-owned and the first
+    write fails.
+    """
+    dockerfile = DOCKERFILE.read_text(encoding="utf-8")
+
+    assert "/data" in dockerfile, "the image never creates the session directory"
+    assert 'TELEGRAM_SESSION_NAME="/data/' in dockerfile, (
+        "TELEGRAM_SESSION_NAME does not point into /data, so a bare filename lands in "
+        "WORKDIR and the session is lost with every container replacement."
+    )
+    assert "appuser:appuser /app /data" in dockerfile, (
+        "/data is not owned by the account that runs the server, so the session "
+        "database cannot be written."
+    )

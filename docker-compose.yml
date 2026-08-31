@@ -30,9 +30,12 @@ services:
     # acknowledged above, which is the one edit in this file that needs thought.
     ports:
       - "127.0.0.1:8765:8765"
-    # Optional: Uncomment the following lines to mount a local directory
-    # for persisting the Telegram session file if NOT using TELEGRAM_SESSION_STRING.
-    # Replace './telegram_sessions' with your desired host path.
+    # Optional: uncomment to persist the Telegram session file across container
+    # replacements. Only needed if you are NOT using TELEGRAM_SESSION_STRING.
+    #
+    # The target is /data, never /app: mounting over /app hides the application
+    # itself and the container starts with no code to run. TELEGRAM_SESSION_NAME
+    # already points at /data in the image, so this needs no further config.
     # volumes:
-    #   - ./telegram_sessions:/app
+    #   - ./telegram_sessions:/data
     restart: unless-stopped

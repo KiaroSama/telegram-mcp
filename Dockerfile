@@ -36,17 +36,25 @@ COPY main.py sanitize.py ./
 COPY telegram_mcp ./telegram_mcp
 # COPY session_string_generator.py . # Optional: if needed within the container, otherwise can be run outside
 
+# Sessions live OUTSIDE /app so a persistence mount cannot cover the application.
+# Created here, before the user switch, so the bind-mount target already exists
+# and is owned by the account that has to write the session database.
+RUN mkdir -p /data
+
 # Create a non-root user and switch to it
-RUN adduser --disabled-password --gecos "" appuser && chown -R appuser:appuser /app
+RUN adduser --disabled-password --gecos "" appuser && chown -R appuser:appuser /app /data
 USER appuser
+
+VOLUME ["/data"]
 
 # Define environment variables needed by the application
 # These should be provided at runtime, not hardcoded (especially secrets)
 ENV TELEGRAM_API_ID=""
 ENV TELEGRAM_API_HASH=""
 # Specify one of the following at runtime:
-# Default session filename
-ENV TELEGRAM_SESSION_NAME="telegram_mcp_session"
+# Default session path. Absolute and under /data on purpose: a bare filename
+# would land in WORKDIR and be lost on every container replacement.
+ENV TELEGRAM_SESSION_NAME="/data/telegram_mcp_session"
 # Or provide the session string directly
 ENV TELEGRAM_SESSION_STRING=""
 
