@@ -174,22 +174,29 @@ def _refuse_unauthenticated_remote_bind(host: str) -> None:
     )
 
 
-def _configure_transport_security() -> None:
-    """Wire MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS into FastMCP's DNS-rebinding
-    protection, e.g. when the server sits behind a reverse proxy on a public
-    domain instead of only being reached via 127.0.0.1/localhost.
+def _transport_security():
+    """MCP_ALLOWED_HOSTS/MCP_ALLOWED_ORIGINS as DNS-rebinding protection, or None.
+
+    Needed when the server sits behind a reverse proxy on a public domain rather
+    than being reached only over 127.0.0.1/localhost.
+
+    Returned rather than assigned: under mcp 1.x this was `mcp.settings.
+    transport_security`, but 2.x dropped host/port/transport_security from
+    `settings` and made them parameters of the `run_*_async` calls. Handing the
+    value back keeps the "no hosts configured means no override" decision here,
+    where the environment is read.
     """
     raw_hosts = os.getenv("MCP_ALLOWED_HOSTS", "")
     allowed_hosts = [h.strip() for h in raw_hosts.split(",") if h.strip()]
     if not allowed_hosts:
-        return
+        return None
 
     from mcp.server.transport_security import TransportSecuritySettings
 
     raw_origins = os.getenv("MCP_ALLOWED_ORIGINS", "")
     allowed_origins = [o.strip() for o in raw_origins.split(",") if o.strip()]
 
-    mcp.settings.transport_security = TransportSecuritySettings(
+    return TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
         allowed_hosts=allowed_hosts,
         allowed_origins=allowed_origins,
@@ -220,13 +227,20 @@ async def _serve(transport: str) -> None:
         # Before the port is opened, not after: a refusal that arrives once the
         # socket is already listening has already been too late.
         _refuse_unauthenticated_remote_bind(host)
-        mcp.settings.host = host
-        mcp.settings.port = parse_port(os.getenv("MCP_PORT", "8765"), "MCP_PORT")
-        _configure_transport_security()
+        port = parse_port(os.getenv("MCP_PORT", "8765"), "MCP_PORT")
+        # 2.x takes these per-call. Only pass transport_security when the
+        # environment actually configured one: the parameter's own default is
+        # what applies otherwise, and forcing None over it would be a silent
+        # downgrade of whatever protection the SDK enables by default.
+        options = {"host": host, "port": port}
+        security = _transport_security()
+        if security is not None:
+            options["transport_security"] = security
         if transport == "http":
-            await mcp.run_streamable_http_async()
+            # `stateless_http` moved here from the server constructor in 2.x.
+            await mcp.run_streamable_http_async(stateless_http=True, **options)
         else:
-            await mcp.run_sse_async()
+            await mcp.run_sse_async(**options)
     else:
         # Use the asynchronous entrypoint instead of mcp.run()
         await mcp.run_stdio_async()

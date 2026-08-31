@@ -106,7 +106,7 @@ def test_every_tool_has_a_description_a_title_and_a_schema(registered_tools):
             for field, value in (
                 ("description", t.description),
                 ("title", t.annotations.title if t.annotations else None),
-                ("inputSchema", t.inputSchema),
+                ("input_schema", t.input_schema),
             )
             if not value
         ]
@@ -130,7 +130,7 @@ def test_a_read_only_tool_says_so_explicitly(registered_tools):
         t.name
         for t in registered_tools
         if getattr(getattr(tools_package, t.name, None), "__telegram_readonly__", None) is True
-        and not (t.annotations and t.annotations.readOnlyHint)
+        and not (t.annotations and t.annotations.read_only_hint)
     ]
 
     assert silent == [], f"routed read-only but not declared read-only: {silent}"
@@ -155,7 +155,7 @@ def test_the_annotation_and_the_router_agree_about_what_each_tool_does(registere
             continue  # not routed through with_account at all
         # None is not 'unset' here - MCP defines it as false, so it agrees with a
         # router that routes the tool as a write.
-        declared = bool(tool.annotations.readOnlyHint) if tool.annotations else False
+        declared = bool(tool.annotations.read_only_hint) if tool.annotations else False
         if declared is not routed_readonly:
             disagreements[tool.name] = {
                 "readOnlyHint": declared,
@@ -183,7 +183,7 @@ def test_a_destructive_tool_is_never_also_marked_read_only(registered_tools):
     contradictory = [
         t.name
         for t in registered_tools
-        if t.annotations and t.annotations.readOnlyHint and t.annotations.destructiveHint
+        if t.annotations and t.annotations.read_only_hint and t.annotations.destructive_hint
     ]
 
     assert contradictory == [], f"marked both read-only and destructive: {contradictory}"

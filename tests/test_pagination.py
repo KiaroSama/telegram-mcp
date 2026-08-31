@@ -44,7 +44,7 @@ def registered_tools():
 
 
 def _counts(tool):
-    properties = (tool.inputSchema or {}).get("properties", {}) or {}
+    properties = (tool.input_schema or {}).get("properties", {}) or {}
     return [
         name
         for name in properties
@@ -118,7 +118,7 @@ def _dummy(name, schema):
 
 
 def _call_kwargs(tool):
-    schema = tool.inputSchema or {}
+    schema = tool.input_schema or {}
     properties = schema.get("properties", {}) or {}
     kwargs = {
         name: _dummy(name, properties.get(name, {})) for name in schema.get("required", []) or []
@@ -162,7 +162,7 @@ async def _invoke(tool_name, count_param, value, registered_tools):
 def _refusal(result):
     """The refusal text, whichever shape the tool returns.
 
-    A tool that returns images is annotated `-> list` so FastMCP builds no output
+    A tool that returns images is annotated `-> list` so the server builds no output
     schema for it, and it reports a refusal as a one-element list. That is the
     documented shape, not an inconsistency - but this file only ever met
     str-returning tools until an image tool acquired a limit, so the assertion

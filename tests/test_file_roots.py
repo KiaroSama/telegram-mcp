@@ -12,8 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from mcp.shared.exceptions import McpError
-from mcp.types import ErrorData
+from mcp.shared.exceptions import MCPError
 
 import main
 from telegram_mcp import file_roots, runtime
@@ -102,9 +101,7 @@ def test_roots_unsupported_detection():
     assert runtime._is_roots_unsupported_error(AttributeError("missing list_roots")) is True
     assert runtime._is_roots_unsupported_error(AttributeError("other")) is False
     assert (
-        runtime._is_roots_unsupported_error(
-            McpError(ErrorData(code=-32000, message="not implemented"))
-        )
+        runtime._is_roots_unsupported_error(MCPError(code=-32000, message="not implemented"))
         is True
     )
     assert runtime._is_roots_unsupported_error(RuntimeError("boom")) is False

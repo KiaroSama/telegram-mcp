@@ -1,6 +1,6 @@
 """Peer photo MCP tools: index them, open one, or see them all at once."""
 
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 from telegram_mcp.contact_sheet import ContactSheetError, MAXIMUM_TILES, compose_contact_sheet
 from telegram_mcp.media_preview import _encode_one

@@ -51,7 +51,7 @@ from telegram_mcp.visual.images import (  # noqa: F401
     open_image_bytes,
 )
 
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 # One item's own share of the clock, when it is not running under a call ledger.
 PER_ITEM_SECONDS = FFMPEG_REQUEST_BUDGET_SECONDS

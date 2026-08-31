@@ -98,26 +98,30 @@ async def test_connect_authorized_client_allows_different_sessions_concurrently(
     assert second.connected is True
 
 
-class _FakeSettings:
-    def __init__(self):
-        self.host = None
-        self.port = None
-        self.transport_security = None
-
-
 class _FakeMcp:
+    """Records HOW the transport was started, not just that it was.
+
+    mcp 1.x took host/port/transport_security off `mcp.settings`, so the fake
+    carried a settings object and the assertions read it back. 2.x passes them
+    to `run_*_async`, which means the arguments ARE the configuration - a fake
+    that swallowed them would let a migration silently stop binding where it was
+    told and still pass.
+    """
+
     def __init__(self):
-        self.settings = _FakeSettings()
         self.ran = None
+        self.kwargs = {}
 
     async def run_stdio_async(self):
         self.ran = "stdio"
 
-    async def run_sse_async(self):
+    async def run_sse_async(self, **kwargs):
         self.ran = "sse"
+        self.kwargs = kwargs
 
-    async def run_streamable_http_async(self):
+    async def run_streamable_http_async(self, **kwargs):
         self.ran = "http"
+        self.kwargs = kwargs
 
 
 @pytest.mark.asyncio
@@ -175,8 +179,8 @@ async def test_serve_http_transports_bind_host_and_port(monkeypatch, transport):
     await runner._serve(transport)
 
     assert fake.ran == transport
-    assert fake.settings.host == "0.0.0.0"
-    assert fake.settings.port == 9000
+    assert fake.kwargs["host"] == "0.0.0.0"
+    assert fake.kwargs["port"] == 9000
 
 
 @pytest.mark.asyncio
@@ -189,8 +193,8 @@ async def test_serve_http_uses_default_host_and_port(monkeypatch):
     await runner._serve("http")
 
     assert fake.ran == "http"
-    assert fake.settings.host == "127.0.0.1"
-    assert fake.settings.port == 8765
+    assert fake.kwargs["host"] == "127.0.0.1"
+    assert fake.kwargs["port"] == 8765
 
 
 @pytest.mark.asyncio
@@ -202,7 +206,7 @@ async def test_serve_http_leaves_transport_security_unset_by_default(monkeypatch
 
     await runner._serve("http")
 
-    assert fake.settings.transport_security is None
+    assert "transport_security" not in fake.kwargs
 
 
 @pytest.mark.asyncio
@@ -214,7 +218,7 @@ async def test_serve_http_configures_allowed_hosts(monkeypatch):
 
     await runner._serve("http")
 
-    security = fake.settings.transport_security
+    security = fake.kwargs["transport_security"]
     assert security.enable_dns_rebinding_protection is True
     assert security.allowed_hosts == ["mcp.example.com", "localhost:8765"]
     assert security.allowed_origins == ["https://mcp.example.com"]

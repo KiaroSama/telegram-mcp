@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 from telethon.tl.types import Channel, Chat, User
 
@@ -14,7 +14,7 @@ def _tool_names(server):
 
 
 def _synthetic_mcp():
-    server = FastMCP("test")
+    server = MCPServer("test")
 
     @server.tool(annotations=ToolAnnotations(title="Read", readOnlyHint=True))
     def read_tool():
@@ -27,9 +27,96 @@ def _synthetic_mcp():
     return server
 
 
-def test_shared_server_uses_stateless_http_transport():
-    """A service restart must not invalidate long-lived Streamable HTTP clients."""
-    assert runtime.mcp.settings.stateless_http is True
+@pytest.mark.asyncio
+async def test_shared_server_uses_stateless_http_transport(monkeypatch):
+    """A service restart must not invalidate long-lived Streamable HTTP clients.
+
+    Under mcp 1.x this was a constructor argument and could be read back off
+    `settings`. 2.x takes it per call, so the only place the guarantee still
+    exists is the argument `_serve` passes - which is what this now asserts.
+    """
+    from telegram_mcp import runner
+
+    seen = {}
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setenv("MCP_TRANSPORT", "http")
+    monkeypatch.setattr(runner.mcp, "run_streamable_http_async", _capture)
+    await runner._serve("http")
+
+    assert seen["stateless_http"] is True
+    assert seen["host"] == "127.0.0.1"
+    assert seen["port"] == 8765
+
+
+@pytest.mark.asyncio
+async def test_transport_security_is_omitted_unless_configured(monkeypatch):
+    """Passing None over the SDK's own default would silently disable whatever
+    rebinding protection it ships with. Absent means absent."""
+    from telegram_mcp import runner
+
+    seen = {}
+
+    async def _capture(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.delenv("MCP_ALLOWED_HOSTS", raising=False)
+    monkeypatch.setattr(runner.mcp, "run_streamable_http_async", _capture)
+    await runner._serve("http")
+
+    assert "transport_security" not in seen
+
+    seen.clear()
+    monkeypatch.setenv("MCP_ALLOWED_HOSTS", "example.invalid")
+    await runner._serve("http")
+
+    assert seen["transport_security"].allowed_hosts == ["example.invalid"]
+    assert seen["transport_security"].enable_dns_rebinding_protection is True
+
+
+@pytest.mark.asyncio
+async def test_every_tool_result_is_stamped_as_user_data():
+    """The wiring, not just the helper.
+
+    `_annotate_for_user` was covered; the thing that INSTALLS it was not, and it
+    is the half that changed - mcp 2.x removed the `_mcp_server.request_handlers`
+    seam the old hook swapped. Images are included on purpose: an earlier version
+    tested `isinstance(block, TextContent)` and returned screenshots with nothing
+    said about them at all.
+    """
+    from mcp.types import CallToolResult, ImageContent, TextContent
+
+    result = CallToolResult(
+        content=[
+            TextContent(type="text", text="a message body"),
+            ImageContent(type="image", data="AA==", mimeType="image/png"),
+        ]
+    )
+
+    async def _call_next(_ctx):
+        return result
+
+    middleware = runtime._UserAudienceMiddleware()
+    returned = await middleware(object(), _call_next)
+
+    assert [block.annotations.audience for block in returned.content] == [["user"], ["user"]]
+
+
+def test_the_stamper_is_actually_installed_on_the_server():
+    """A middleware that exists and is never appended annotates nothing."""
+    assert any(
+        isinstance(m, runtime._UserAudienceMiddleware) for m in runtime.mcp.middleware
+    ), "the user-audience middleware is not in the server's chain"
+
+
+def test_installing_twice_does_not_stack_the_stamper():
+    before = len(runtime.mcp.middleware)
+
+    runtime._install_annotation_hook()
+
+    assert len(runtime.mcp.middleware) == before
 
 
 def test_get_exposed_tools_mode_defaults_to_all(monkeypatch):

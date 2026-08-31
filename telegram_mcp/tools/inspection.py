@@ -36,7 +36,7 @@ from telegram_mcp.tools.visual import safe_window_dict
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError, encode_image
 
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 # One call resolves at most this many custom emoji, since each one returns an image.
 MAX_CUSTOM_EMOJI_IDS = 10

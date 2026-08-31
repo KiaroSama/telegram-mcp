@@ -8,7 +8,7 @@ re-rendering anything on our side. Windows only.
 
 from telegram_mcp.runtime import *
 
-from mcp.server.fastmcp import Image
+from mcp.server.mcpserver import Image
 
 from telegram_mcp.message_view import display_name
 

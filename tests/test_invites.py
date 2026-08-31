@@ -139,7 +139,7 @@ def test_the_reading_tool_is_annotated_read_only_and_the_minting_tool_is_not():
     from telegram_mcp.runtime import mcp
 
     hints = {
-        tool.name: getattr(tool.annotations, "readOnlyHint", None)
+        tool.name: getattr(tool.annotations, "read_only_hint", None)
         for tool in mcp._tool_manager.list_tools()
         if tool.name in ("get_invite_link", "export_chat_invite")
     }

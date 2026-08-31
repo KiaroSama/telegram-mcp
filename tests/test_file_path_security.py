@@ -2,8 +2,7 @@ from pathlib import Path
 
 import pytest
 from mcp import types
-from mcp.shared.exceptions import McpError
-from mcp.types import ErrorData
+from mcp.shared.exceptions import MCPError
 
 # Patched and called on the module that OWNS these names. `main` used to keep
 # copying wrappers so a test could reach them through it; the wrappers existed
@@ -158,7 +157,7 @@ async def test_mcp_method_not_found_falls_back_to_server_allowlist(tmp_path, mon
     server_root.mkdir(parents=True)
 
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [server_root])
-    ctx = _FailingContext(McpError(ErrorData(code=-32601, message="Method not found")))
+    ctx = _FailingContext(MCPError(code=-32601, message="Method not found"))
 
     roots = await file_roots._get_effective_allowed_roots(ctx)
     assert roots == [server_root]

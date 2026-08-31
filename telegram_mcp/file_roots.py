@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import List, Optional
 from urllib.parse import unquote, urlparse
 
-from mcp.server.fastmcp import Context
-from mcp.shared.exceptions import McpError
+from mcp.server.mcpserver import Context
+from mcp.shared.exceptions import MCPError
 
 from telegram_mcp.handles import (
     DirHandle,
@@ -241,7 +241,7 @@ async def _get_effective_allowed_roots(ctx: Optional[Context]) -> List[Path]:
 
 
 def _is_roots_unsupported_error(error: Exception) -> bool:
-    if isinstance(error, McpError):
+    if isinstance(error, MCPError):
         error_code = getattr(getattr(error, "error", None), "code", None)
         error_message = (
             getattr(getattr(error, "error", None), "message", None) or str(error)

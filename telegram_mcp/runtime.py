@@ -20,9 +20,9 @@ from urllib.parse import unquote, urlparse
 
 # Third-party libraries
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP, Context
+from mcp.server.mcpserver import MCPServer, Context
 from mcp.types import Annotations, TextContent, ToolAnnotations
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 from telethon import TelegramClient, functions, types, utils
 from telethon.errors import AuthKeyDuplicatedError
 from telethon.sessions import StringSession
@@ -130,12 +130,15 @@ load_dotenv()
 # The shared HTTP service can be consumed by long-lived MCP clients. Stateless requests keep
 # those clients usable across server-process restarts instead of rejecting their next call
 # with "No valid session ID provided". Stdio transport remains unaffected.
-mcp = FastMCP("telegram", stateless_http=True)
+# `stateless_http` was a constructor argument under FastMCP; in mcp 2.x it is a
+# parameter of run_streamable_http_async, so it moved to `runner._serve`.
+mcp = MCPServer("telegram")
 
 # Annotate all tool results with audience=["user"] so MCP clients know
 # the content is user-generated data, not instructions for the model.
-# We wrap the low-level request handler (after FastMCP registers it) to inject
-# annotations into the final CallToolResult, preserving structured output.
+# Installed as server middleware so it runs for every tools/call, whatever the
+# transport, and injects annotations into the final CallToolResult while
+# preserving structured output.
 _USER_AUDIENCE = Annotations(audience=["user"])
 
 
@@ -159,20 +162,41 @@ def _annotate_for_user(content: list) -> list:
     return annotated
 
 
+class _UserAudienceMiddleware:
+    """Stamp every tool result as user data, on the way out.
+
+    Under mcp 1.x this reached into `mcp._mcp_server.request_handlers` and
+    replaced the `CallToolRequest` entry. 2.x removed `_mcp_server`; the
+    supported seam is the server's middleware chain, which every request passes
+    through regardless of transport. That is a better fit than it looks: the old
+    hook could only ever see the one handler it swapped, while middleware sees
+    the result whatever produced it.
+
+    The unwrapping is deliberately permissive. A result may arrive as a bare
+    `CallToolResult` or wrapped in a `ServerResult`, and this must annotate
+    either without caring which - a shape it does not recognise is passed
+    through untouched rather than dropped, because failing to annotate is a
+    smaller harm than swallowing a tool's answer.
+    """
+
+    async def __call__(self, ctx, call_next):
+        from mcp.types import CallToolResult
+
+        result = await call_next(ctx)
+
+        target = result
+        if not isinstance(target, CallToolResult):
+            target = getattr(result, "root", None)
+        if isinstance(target, CallToolResult) and target.content:
+            target.content = _annotate_for_user(target.content)
+        return result
+
+
 def _install_annotation_hook() -> None:
-    from mcp.types import CallToolRequest, ServerResult, CallToolResult
-
-    original_handler = mcp._mcp_server.request_handlers[CallToolRequest]
-
-    async def annotated_handler(req):
-        response = await original_handler(req)
-        if isinstance(response, ServerResult) and isinstance(response.root, CallToolResult):
-            content = response.root.content
-            if content:
-                response.root.content = _annotate_for_user(content)
-        return response
-
-    mcp._mcp_server.request_handlers[CallToolRequest] = annotated_handler
+    """Append the stamper to the middleware chain, exactly once."""
+    if any(isinstance(m, _UserAudienceMiddleware) for m in mcp.middleware):
+        return
+    mcp.middleware.append(_UserAudienceMiddleware())
 
 
 _install_annotation_hook()
@@ -222,7 +246,29 @@ def _get_exposed_tools_mode(value: Optional[str] = None) -> str:
     return f"{base_mode}{_EXPOSED_TOOLS_ALLOW_SEPARATOR}{','.join(allowlist)}"
 
 
-def _apply_exposed_tools_mode(server: FastMCP = mcp, mode: Optional[str] = None) -> list[str]:
+def _is_read_only(annotations) -> bool:
+    """Whether a tool declares itself read-only, under either SDK spelling.
+
+    This decides what `TELEGRAM_EXPOSED_TOOLS=read-only` KEEPS, so reading the
+    wrong attribute name is not cosmetic. mcp 1.x spelled the field
+    `readOnlyHint`; 2.x renamed it `read_only_hint` and kept the old spelling
+    only as a construction alias - so every `ToolAnnotations(readOnlyHint=True)`
+    in this codebase still builds, while `getattr(a, "readOnlyHint", False)`
+    silently returned the default for every tool. Read-only mode would have
+    stripped the entire registry.
+
+    Both names are accepted so the check cannot break again on whichever
+    spelling the installed SDK happens to use, and the default stays False:
+    a tool that does not clearly say it is read-only is not treated as one.
+    """
+    for attribute in ("read_only_hint", "readOnlyHint"):
+        value = getattr(annotations, attribute, None)
+        if value is not None:
+            return bool(value)
+    return False
+
+
+def _apply_exposed_tools_mode(server: MCPServer = mcp, mode: Optional[str] = None) -> list[str]:
     """Prune registered MCP tools according to the configured exposure mode."""
     selected_mode = _get_exposed_tools_mode() if mode is None else _get_exposed_tools_mode(mode)
     base_mode, allowlist = _split_exposed_tools_mode(selected_mode)
@@ -244,7 +290,7 @@ def _apply_exposed_tools_mode(server: FastMCP = mcp, mode: Optional[str] = None)
         if tool.name in allowed:
             continue
         annotations = getattr(tool, "annotations", None)
-        if not getattr(annotations, "readOnlyHint", False):
+        if not _is_read_only(annotations):
             server._tool_manager.remove_tool(tool.name)
             removed.append(tool.name)
     return removed
