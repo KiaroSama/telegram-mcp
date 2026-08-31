@@ -38,6 +38,7 @@ from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 from telegram_mcp.tdlib import (
     NotSignedIn,
+    account_label,
     TDLibError,
     TDLibUnavailable,
     database_dir_for,
@@ -65,23 +66,10 @@ def _unavailable(exc: Exception) -> str:
     return str(exc)
 
 
+# One rule, owned by the module that turns a label into a database directory.
+# Kept as a module-level name so tests patch this seam rather than tdlib's.
 def _account_label(account: Optional[str]) -> str:
-    """The account label TDLib stores a database under.
-
-    `get_client` resolves `None` to the sole client but hands back the client,
-    not its name, and TDLib is addressed by name. Same rule, same error text: a
-    missing account in multi-account mode is a question, not a default.
-    """
-    from telegram_mcp.connection import clients
-
-    if account is None:
-        if len(clients) == 1:
-            return next(iter(clients))
-        raise ValueError(f"Account is required. Available accounts: {', '.join(clients)}")
-    label = account.lower()
-    if label not in clients:
-        raise ValueError(f"Unknown account '{account}'. Available accounts: {', '.join(clients)}")
-    return label
+    return account_label(account)
 
 
 def _chat_record(chat: dict) -> dict:

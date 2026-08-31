@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **190** |
+| MCP tools registered | **192** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -373,10 +373,13 @@ sign-in through `scripts/secret_chat_login.py`, appearing as another device. The
 dependency is optional (`pip install -e .[secret]`); without it the other 181 tools
 are unaffected and `secret_chat_status` says which prerequisite is missing.
 
-Nine tools: `secret_chat_status`, `create_secret_chat`, `list_secret_chats`,
+Eleven tools. Nine for the chats themselves: `secret_chat_status`, `create_secret_chat`, `list_secret_chats`,
 `send_secret_message`, `send_secret_media`, `read_secret_messages`,
 `save_secret_media`, `set_secret_chat_timer`, `close_secret_chat`
-(`tools/secret_chats.py`, transport in `telegram_mcp/tdlib.py`).
+(`tools/secret_chats.py`). Two more use the same transport for a different reason —
+`set_admin_right` and `get_admin_rights_via_tdlib` (`tools/later_rights.py`) reach the admin
+rights Telethon's announced layer 227 cannot carry. Transport for all eleven is
+`telegram_mcp/tdlib.py`.
 
 ### Not in the plan
 

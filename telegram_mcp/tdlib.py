@@ -41,6 +41,7 @@ from telegram_mcp.settings import TELEGRAM_API_HASH, TELEGRAM_API_ID, state_dir
 
 __all__ = [
     "NotSignedIn",
+    "account_label",
     "TDLibClient",
     "TDLibError",
     "TDLibUnavailable",
@@ -125,6 +126,29 @@ def tdjson_status() -> dict:
     except Exception as exc:  # pragma: no cover - a broken build, not a missing one
         return {"available": False, "reason": f"tdjson is installed but unusable: {exc}"}
     return {"available": True, "tdlib_version": version}
+
+
+def account_label(account: Optional[str]) -> str:
+    """The account label a TDLib database is stored under.
+
+    `get_client` resolves `None` to the sole client but hands back the client,
+    not its name, and TDLib is addressed by name. Lives here rather than in a
+    tool module because this is the module that turns a label into a database
+    directory, and two copies of the rule would be two chances to disagree.
+
+    The import is deferred: `connection` builds real clients at import time, and
+    this module must stay importable without them.
+    """
+    from telegram_mcp.connection import clients
+
+    if account is None:
+        if len(clients) == 1:
+            return next(iter(clients))
+        raise ValueError(f"Account is required. Available accounts: {', '.join(clients)}")
+    label = account.lower()
+    if label not in clients:
+        raise ValueError(f"Unknown account '{account}'. Available accounts: {', '.join(clients)}")
+    return label
 
 
 def database_dir_for(account: str) -> Path:
