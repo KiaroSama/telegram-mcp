@@ -414,6 +414,23 @@ rights Telethon's announced layer 227 cannot carry. Transport for all eleven is
 transport for those rights alone, so the tool an agent reaches for first delivers
 them rather than reporting them lost.
 
+### Measured: `can_be_saved` is advisory
+
+Telegram marks media in a timer-armed secret chat `can_be_saved=false`, and TDLib
+reports it and then downloads the file anyway — measured on a live chat, 3638
+bytes written while the flag was false. The media is decrypted on the receiving
+device in order to be displayed, so the bytes are already there; the flag is
+Telegram asking a well-behaved client not to keep them, which a screenshot has
+always defeated.
+
+`save_secret_media` honours it by default and takes `override_sender_restriction`
+to keep the copy anyway — opt-in per call, never a setting, and reported as
+`sender_restriction_overridden` so it cannot read as an ordinary success. Two more
+facts from the same measurement shape it: downloading does **not** start the
+self-destruct countdown (`self_destruct_in` stayed 0; viewing starts it), and
+TDLib deletes its own copy when the message goes, so media under a timer is copied
+out of its database and the ephemeral path is reported separately.
+
 ### Not in the plan
 
 Unchanged from the table above: payments and Stars, password and two-step settings,
