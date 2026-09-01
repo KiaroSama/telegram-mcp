@@ -423,9 +423,10 @@ device in order to be displayed, so the bytes are already there; the flag is
 Telegram asking a well-behaved client not to keep them, which a screenshot has
 always defeated.
 
-`save_secret_media` honours it by default and takes `override_sender_restriction`
-to keep the copy anyway — opt-in per call, never a setting, and reported as
-`sender_restriction_overridden` so it cannot read as an ordinary success. Two more
+`save_secret_media` keeps the copy — a plain call saves, and
+`honour_sender_restriction=True` refuses instead. The result reports
+`sender_restriction_overridden` so a save under a restriction cannot read as an
+ordinary one. Two more
 facts from the same measurement shape it: downloading does **not** start the
 self-destruct countdown (`self_destruct_in` stayed 0; viewing starts it), and
 TDLib deletes its own copy when the message goes, so media under a timer is copied

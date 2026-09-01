@@ -632,30 +632,20 @@ async def read_secret_messages(chat_id: int, limit: int = 30, account: str = Non
         return log_and_format_error("read_secret_messages", e, chat_id=chat_id)
 
 
-# What the override is, in one place, so the docstring, the refusal and the
-# result cannot drift apart.
-#
 # `can_be_saved` is a POLICY flag, not cryptography, and this was MEASURED rather
 # than assumed: on a photo received in a secret chat with the chat timer armed,
 # `can_be_saved` was false and `downloadFile` answered anyway, writing 3638 bytes
 # into TDLib's own directory. The library does not enforce the flag - it reports
-# what Telegram asks a well-behaved client to do.
+# what Telegram asks a well-behaved client to do, and a screenshot has always
+# defeated it.
 #
-# Honouring it is the default and stays the default. The owner of an account may
-# switch that off for a message sent to them; a screenshot already does the same
-# thing. The reason it is opt-in PER CALL rather than a setting is the one real
-# difference: an agent can do it silently to everything that arrives.
-_OVERRIDE_NOTE = (
-    "The sender restricted saving and this call overrode that. can_be_saved=false is "
-    "Telegram asking a client not to keep a copy; it is not encryption, and the bytes were "
-    "already on this device in order to be displayed. The copy is yours to handle accordingly."
-)
-
+# So saving is the default here, by the owner's decision for their own account.
+# `honour_sender_restriction=True` refuses instead. The result carries one boolean
+# saying which happened, because a caller reading a path deserves to know whether
+# the sender had asked otherwise - that is the whole of the ceremony.
 _REFUSAL_NOTE = (
-    "The sender restricted saving, and this server honours that by default. Pass "
-    "override_sender_restriction=True to keep a copy anyway - the bytes are already on "
-    "this device, so the flag is a request rather than a lock, and overriding it is a "
-    "decision about someone else's message that this tool will not make on its own."
+    "The sender restricted saving and honour_sender_restriction=True was passed, so "
+    "nothing was fetched or kept."
 )
 
 
@@ -718,33 +708,27 @@ async def save_secret_media(
     chat_id: int,
     message_id: int,
     destination: str = None,
-    override_sender_restriction: bool = False,
+    honour_sender_restriction: bool = False,
     ctx: Context = None,
     account: str = None,
 ) -> str:
     """
     Keep a copy of media from a secret chat.
 
-    This is a WRITE, not a read: the sender chose a mechanism specifically
-    intended to stop copies being kept.
+    Saves. Telegram marks media in a timer-armed secret chat `can_be_saved=false`
+    and this keeps it anyway, which is the owner's call about a message sent to
+    them - the same thing a screenshot has always done. The result says
+    `sender_restriction_overridden: true` when that applied, so the two cases stay
+    distinguishable; pass `honour_sender_restriction=True` to refuse instead.
 
-    **By default the sender's choice is honoured.** Telegram reports
-    `can_be_saved` per message and a false one is refused here, not worked
-    around.
-
-    **`override_sender_restriction=True` keeps the copy anyway.** The flag is not
-    encryption: a secret chat's media is decrypted on this device in order to be
-    displayed, so the bytes are already here, and TDLib downloads them whether
-    the flag is set or not - measured, not assumed. Overriding it is a legitimate
-    thing for the owner of an account to do with a message sent to them, and is
-    what a screenshot already does. It is per-call, never a default or a setting,
-    because an agent can do it silently to everything that arrives - which is the
-    part a person with a screenshot cannot.
+    That flag is not encryption. A secret chat's media is decrypted on this device
+    in order to be displayed, so the bytes are already here, and TDLib downloads
+    them whether the flag is set or not - measured, not assumed.
 
     **A copy under a timer has to leave TDLib's directory to survive.** TDLib
     deletes its own copy when the message self-destructs, so a path inside its
     database is a save that evaporates. Media carrying a timer is therefore
-    copied to `destination` and that durable path is what comes back.
+    copied to `destination`, and that durable path is what `path` names.
 
     Downloading does NOT start the countdown - measured: `self_destruct_in`
     stayed 0 across the fetch. Viewing is what starts it.
@@ -754,8 +738,8 @@ async def save_secret_media(
         message_id: From `read_secret_messages`.
         destination: Where to put the durable copy - a path under the allowed
             roots. Defaults to `<first_root>/downloads/`.
-        override_sender_restriction: Keep the copy even when Telegram reports
-            `can_be_saved=false`.
+        honour_sender_restriction: Refuse when Telegram reports
+            `can_be_saved=false` instead of keeping the copy.
     """
     try:
         label = _account_label(account)
@@ -765,7 +749,7 @@ async def save_secret_media(
             {"@type": "getMessage", "chat_id": int(chat_id), "message_id": int(message_id)}
         )
         restricted = not found.get("can_be_saved", True)
-        if restricted and not override_sender_restriction:
+        if restricted and honour_sender_restriction:
             return format_tool_result(
                 {
                     "saved": False,
@@ -821,8 +805,10 @@ async def save_secret_media(
             "note": "The sender chose to have this disappear.",
         }
         if restricted:
+            # A fact, not a lecture: one boolean so a caller can tell the two
+            # cases apart. The reasoning lives in the docstring and the README,
+            # where it is read once instead of on every save.
             record["sender_restriction_overridden"] = True
-            record["warning"] = _OVERRIDE_NOTE
 
         # A timer means TDLib will delete its copy. Anything else can stay where
         # it is: copying every download would double the disk for nothing.
@@ -833,10 +819,7 @@ async def save_secret_media(
                 return copy_error
             record["path"] = copied
             record["tdlib_path"] = source_path
-            record["kept_because"] = (
-                "This message self-destructs, so TDLib deletes its own copy. The durable "
-                "copy is at `path`; `tdlib_path` will stop existing."
-            )
+            record["kept_because"] = "TDLib deletes `tdlib_path` when this message expires."
         else:
             record["path"] = source_path
 

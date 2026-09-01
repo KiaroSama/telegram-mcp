@@ -66,17 +66,14 @@ def _results(raw):
 
 @pytest.mark.asyncio
 async def test_a_message_the_sender_protected_is_not_downloaded_at_all(wire):
-    """The check comes BEFORE the transfer, so a refusal fetches nothing.
+    """With `honour_sender_restriction=True`, the check comes BEFORE the transfer,
+    so a refusal fetches nothing.
 
     This test used to justify the ordering by saying a download opens the message
     and starts the countdown. Measured against TDLib, that is false: fetching a
     timer-armed photo left `self_destruct_in` at 0, because VIEWING starts the
-    countdown, not downloading.
-
-    The ordering is still right for the plain reason - a tool that honours the
-    sender should not pull the bytes down first - and the correction matters
-    because the wrong reason would make `override_sender_restriction` look like
-    it destroys the message, which it does not.
+    countdown, not downloading. The ordering is still right for the plain reason
+    - a call that refuses should not pull the bytes down first.
     """
     client = wire(
         {
@@ -92,7 +89,11 @@ async def test_a_message_the_sender_protected_is_not_downloaded_at_all(wire):
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(
+        await sc.save_secret_media(
+            chat_id=1, message_id=5, honour_sender_restriction=True, account="acct"
+        )
+    )
 
     assert result["saved"] is False
     assert "can_be_saved" in result["reason"]
@@ -503,23 +504,28 @@ def _restricted_photo(with_timer=True):
 
 
 @pytest.mark.asyncio
-async def test_the_override_is_off_unless_asked_for(wire):
-    """The default is unchanged and stays unchanged: a restricted message is
-    refused and nothing is fetched. The refusal now NAMES the override, because a
-    capability the owner cannot discover is one they will work around by hand."""
+async def test_refusing_is_available_but_has_to_be_asked_for(wire):
+    """Both behaviours stay reachable. The owner chose saving as the default for
+    their own account; a caller that wants the polite one says so."""
     client = wire({"getMessage": _restricted_photo()})
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(
+        await sc.save_secret_media(
+            chat_id=1, message_id=5, honour_sender_restriction=True, account="acct"
+        )
+    )
 
     assert result["saved"] is False
-    assert "override_sender_restriction" in result["detail"]
+    assert "honour_sender_restriction" in result["detail"]
     assert "downloadFile" not in client.types(), "it fetched a message it refused"
 
 
 @pytest.mark.asyncio
-async def test_the_override_fetches_and_says_plainly_that_it_overrode(tmp_path, monkeypatch, wire):
-    """The point of the whole change, and the assertion that must never soften:
-    the result states the sender's restriction was overridden. A save that keeps
+async def test_a_restricted_message_saves_and_says_that_it_was_restricted(
+    tmp_path, monkeypatch, wire
+):
+    """Saving needs no argument - that is the owner's decision for their own
+    account. What must never soften is the one boolean: a save that keeps
     someone's disappearing photo while reporting an ordinary success is the one
     outcome this tool must not produce."""
     from telegram_mcp import file_roots
@@ -539,16 +545,10 @@ async def test_the_override_fetches_and_says_plainly_that_it_overrode(tmp_path, 
         }
     )
 
-    result = _results(
-        await sc.save_secret_media(
-            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
-        )
-    )
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["saved"] is True
     assert result["sender_restriction_overridden"] is True
-    assert "overrode" in result["warning"]
-    assert "not encryption" in result["warning"]
 
 
 @pytest.mark.asyncio
@@ -574,17 +574,13 @@ async def test_media_under_a_timer_is_copied_out_of_tdlibs_directory(tmp_path, m
         }
     )
 
-    result = _results(
-        await sc.save_secret_media(
-            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
-        )
-    )
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     kept = Path(result["path"])
     assert kept != tdlib_copy, "it handed back TDLib's own copy, which will be deleted"
     assert kept.read_bytes() == b"secret-photo-bytes", "the copy is not the media"
     assert result["tdlib_path"] == str(tdlib_copy), "the ephemeral path is not distinguished"
-    assert "stop existing" in result["kept_because"]
+    assert "deletes" in result["kept_because"]
 
 
 @pytest.mark.asyncio
@@ -666,10 +662,6 @@ async def test_the_byte_count_falls_back_to_the_file_when_tdlib_omits_it(
         }
     )
 
-    result = _results(
-        await sc.save_secret_media(
-            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
-        )
-    )
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["size_bytes"] == 10
