@@ -33,7 +33,13 @@ Whether the other side may keep a copy is reported, never assumed:
 
 from typing import Optional, Union
 
-from telegram_mcp.file_roots import _resolve_readable_file_path
+from telegram_mcp.file_roots import (
+    _open_verified_directory,
+    _resolve_readable_file_path,
+    _resolve_writable_file_path,
+    safe_suffix,
+)
+from telegram_mcp.handles import NAME_ATTEMPTS
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 from telegram_mcp.tdlib import (
@@ -141,25 +147,49 @@ def _message_record(msg: dict) -> dict:
     return record
 
 
-def _media_file_id(content: dict) -> Optional[int]:
-    """The downloadable file inside a message, whatever kind it is.
+def _media_file(content: dict) -> Optional[dict]:
+    """The downloadable file object inside a message, whatever kind it is.
 
     One place, because `save_secret_media` and the record builder must agree:
     a record advertising a `file_id` the saver cannot find is worse than no
     `file_id` at all.
+
+    Returns the whole TDLib `file`, not just its id, because the saver needs the
+    `local` block too - TDLib often already holds the bytes, and asking it to
+    fetch what it has is a wasted round trip.
     """
     kind = content.get("@type")
     if kind == "messagePhoto":
         sizes = content.get("photo", {}).get("sizes") or []
         if sizes:
-            return sizes[-1].get("photo", {}).get("id")
+            candidate = sizes[-1].get("photo")
+            return candidate if isinstance(candidate, dict) and "id" in candidate else None
     for key in ("voice_note", "video_note", "audio", "video", "document", "animation"):
         holder = content.get(key)
         if isinstance(holder, dict):
             for inner in (key.split("_")[0], "document", "video", "audio", "voice"):
                 blob = holder.get(inner)
                 if isinstance(blob, dict) and "id" in blob:
-                    return blob["id"]
+                    return blob
+    return None
+
+
+def _media_file_id(content: dict) -> Optional[int]:
+    """Just the id, for the record builder."""
+    found = _media_file(content)
+    return None if found is None else found.get("id")
+
+
+def _completed_local_path(file_object: Optional[dict]) -> Optional[str]:
+    """A path TDLib has already fully written, or None.
+
+    Read before asking for a download: measured, a secret-chat photo arrives with
+    `is_downloading_completed: false` and an empty path, so this is usually None
+    on first sight - but it is not always, and a hit skips a round trip.
+    """
+    local = (file_object or {}).get("local") or {}
+    if local.get("is_downloading_completed") and local.get("path"):
+        return local["path"]
     return None
 
 
@@ -602,30 +632,130 @@ async def read_secret_messages(chat_id: int, limit: int = 30, account: str = Non
         return log_and_format_error("read_secret_messages", e, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Save Secret Media", openWorldHint=True))
+# What the override is, in one place, so the docstring, the refusal and the
+# result cannot drift apart.
+#
+# `can_be_saved` is a POLICY flag, not cryptography, and this was MEASURED rather
+# than assumed: on a photo received in a secret chat with the chat timer armed,
+# `can_be_saved` was false and `downloadFile` answered anyway, writing 3638 bytes
+# into TDLib's own directory. The library does not enforce the flag - it reports
+# what Telegram asks a well-behaved client to do.
+#
+# Honouring it is the default and stays the default. The owner of an account may
+# switch that off for a message sent to them; a screenshot already does the same
+# thing. The reason it is opt-in PER CALL rather than a setting is the one real
+# difference: an agent can do it silently to everything that arrives.
+_OVERRIDE_NOTE = (
+    "The sender restricted saving and this call overrode that. can_be_saved=false is "
+    "Telegram asking a client not to keep a copy; it is not encryption, and the bytes were "
+    "already on this device in order to be displayed. The copy is yours to handle accordingly."
+)
+
+_REFUSAL_NOTE = (
+    "The sender restricted saving, and this server honours that by default. Pass "
+    "override_sender_restriction=True to keep a copy anyway - the bytes are already on "
+    "this device, so the flag is a request rather than a lock, and overriding it is a "
+    "decision about someone else's message that this tool will not make on its own."
+)
+
+
+async def _copy_out_of_tdlib(source_path, raw_destination, ctx):
+    """Copy TDLib's file to a durable path, or return an error string.
+
+    TDLib deletes its own copy when a self-destructing message goes, so a path
+    inside its database is a save that evaporates - which is the entire reason
+    this exists. The write follows the same sequence as `save_disappearing_media`
+    (resolve, open the directory, reserve the name, write durably, discard the
+    reservation on failure) because a copy kept from a timer is exactly the case
+    where a half-written file wearing the finished name is worst.
+    """
+    try:
+        data = Path(source_path).read_bytes()
+    except OSError as error:
+        reason = error.strerror or type(error).__name__
+        return None, f"TDLib's copy could not be read back: {reason}. Nothing was written."
+
+    suffix = safe_suffix(Path(source_path).suffix)
+    default_name = f"secret_{int(time.time())}{suffix}"
+    target, path_error = await _resolve_writable_file_path(
+        raw_path=raw_destination,
+        default_filename=default_name,
+        ctx=ctx,
+        tool_name="save_secret_media",
+    )
+    if path_error:
+        return None, path_error
+
+    async with _open_verified_directory(
+        path=target.parent, ctx=ctx, tool_name="save_secret_media"
+    ) as (parent, dir_error):
+        if dir_error:
+            return None, dir_error
+
+        reserved = parent.reserve_free_name(target.stem, target.suffix or suffix)
+        if reserved is None:
+            return None, (
+                f"{NAME_ATTEMPTS} names near {target.name} are already taken. "
+                "Pass destination to choose one."
+            )
+        try:
+            parent.write_file_durably(reserved, data)
+        except OSError as write_error:
+            parent.discard(reserved)
+            reason = write_error.strerror or type(write_error).__name__
+            return None, f"The copy could not be written: {reason}. Nothing was kept."
+        except BaseException:
+            parent.discard(reserved)
+            raise
+        return str(Path(parent.path) / reserved), None
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(title="Save Secret Media", openWorldHint=True, readOnlyHint=False)
+)
 @with_account(readonly=False)
 async def save_secret_media(
     chat_id: int,
     message_id: int,
+    destination: str = None,
+    override_sender_restriction: bool = False,
+    ctx: Context = None,
     account: str = None,
 ) -> str:
     """
-    Try to keep a copy of media from a secret chat, and report honestly if not.
+    Keep a copy of media from a secret chat.
 
-    This is a WRITE, not a read, for two reasons that both matter: downloading
-    self-destructing media opens it, which starts the countdown that destroys
-    it, and the sender chose a mechanism specifically intended to stop copies
-    being kept.
+    This is a WRITE, not a read: the sender chose a mechanism specifically
+    intended to stop copies being kept.
 
-    So this tool asks Telegram first. When `can_be_saved` is false it refuses
-    and says so rather than attempting a copy behind the sender's back. When it
-    is true the file is written into this account's own TDLib files directory —
-    the path is returned — and the result still states that the sender chose to
-    have it disappear.
+    **By default the sender's choice is honoured.** Telegram reports
+    `can_be_saved` per message and a false one is refused here, not worked
+    around.
+
+    **`override_sender_restriction=True` keeps the copy anyway.** The flag is not
+    encryption: a secret chat's media is decrypted on this device in order to be
+    displayed, so the bytes are already here, and TDLib downloads them whether
+    the flag is set or not - measured, not assumed. Overriding it is a legitimate
+    thing for the owner of an account to do with a message sent to them, and is
+    what a screenshot already does. It is per-call, never a default or a setting,
+    because an agent can do it silently to everything that arrives - which is the
+    part a person with a screenshot cannot.
+
+    **A copy under a timer has to leave TDLib's directory to survive.** TDLib
+    deletes its own copy when the message self-destructs, so a path inside its
+    database is a save that evaporates. Media carrying a timer is therefore
+    copied to `destination` and that durable path is what comes back.
+
+    Downloading does NOT start the countdown - measured: `self_destruct_in`
+    stayed 0 across the fetch. Viewing is what starts it.
 
     Args:
         chat_id: From `list_secret_chats`.
         message_id: From `read_secret_messages`.
+        destination: Where to put the durable copy - a path under the allowed
+            roots. Defaults to `<first_root>/downloads/`.
+        override_sender_restriction: Keep the copy even when Telegram reports
+            `can_be_saved=false`.
     """
     try:
         label = _account_label(account)
@@ -634,49 +764,83 @@ async def save_secret_media(
         found = await client.request(
             {"@type": "getMessage", "chat_id": int(chat_id), "message_id": int(message_id)}
         )
-        if not found.get("can_be_saved", True):
+        restricted = not found.get("can_be_saved", True)
+        if restricted and not override_sender_restriction:
             return format_tool_result(
                 {
                     "saved": False,
                     "reason": "Telegram reports can_be_saved=false for this message.",
-                    "detail": (
-                        "The sender restricted saving. This server does not work around "
-                        "that: the refusal is Telegram's and is passed through as-is."
-                    ),
+                    "detail": _REFUSAL_NOTE,
                 }
             )
 
-        file_id = _media_file_id(found.get("content", {}))
-        if file_id is None:
+        content = found.get("content", {})
+        media = _media_file(content)
+        if media is None:
             return "That message carries no downloadable media."
 
-        downloaded = await client.request(
-            {
-                "@type": "downloadFile",
-                "file_id": file_id,
-                "priority": 1,
-                "offset": 0,
-                "limit": 0,
-                "synchronous": True,
-            },
-            timeout=180,
-        )
-        local = downloaded.get("local", {})
-        if not local.get("is_downloading_completed"):
-            return format_tool_result(
-                {"saved": False, "reason": "The transfer did not complete before the timeout."}
+        # The copy TDLib may already hold, read BEFORE asking it to fetch. A
+        # secret-chat photo usually arrives undownloaded, so this is normally a
+        # miss - but when it hits it saves a round trip, and it costs nothing.
+        source_path = _completed_local_path(media)
+        size = None
+        if source_path is None:
+            downloaded = await client.request(
+                {
+                    "@type": "downloadFile",
+                    "file_id": media["id"],
+                    "priority": 1,
+                    "offset": 0,
+                    "limit": 0,
+                    "synchronous": True,
+                },
+                timeout=180,
             )
-        return format_tool_result(
-            {
-                "saved": True,
-                "path": local.get("path"),
-                "size_bytes": downloaded.get("size"),
-                "note": (
-                    "The sender chose to have this disappear. Opening it started any "
-                    "countdown it carried."
-                ),
-            }
-        )
+            local = downloaded.get("local", {})
+            if not local.get("is_downloading_completed"):
+                return format_tool_result(
+                    {"saved": False, "reason": "The transfer did not complete before the timeout."}
+                )
+            source_path, size = local.get("path"), downloaded.get("size")
+
+        if not size:
+            # TDLib reported no size for a secret-chat file - measured, it came
+            # back null - and a save that cannot say how many bytes it kept is
+            # not much of a receipt. The file itself always knows.
+            try:
+                size = Path(source_path).stat().st_size
+            except OSError:
+                size = None
+
+        record = {
+            "saved": True,
+            "size_bytes": size,
+            # In the RECORD, not only the metadata: a caller reading one result
+            # out of a list sees the sender's intent beside the path, which is
+            # the one fact that matters before keeping the copy.
+            "note": "The sender chose to have this disappear.",
+        }
+        if restricted:
+            record["sender_restriction_overridden"] = True
+            record["warning"] = _OVERRIDE_NOTE
+
+        # A timer means TDLib will delete its copy. Anything else can stay where
+        # it is: copying every download would double the disk for nothing.
+        under_timer = bool(found.get("self_destruct_in") or found.get("self_destruct_type"))
+        if under_timer:
+            copied, copy_error = await _copy_out_of_tdlib(source_path, destination, ctx)
+            if copy_error:
+                return copy_error
+            record["path"] = copied
+            record["tdlib_path"] = source_path
+            record["kept_because"] = (
+                "This message self-destructs, so TDLib deletes its own copy. The durable "
+                "copy is at `path`; `tdlib_path` will stop existing."
+            )
+        else:
+            record["path"] = source_path
+
+        return format_tool_result(record)
     except (NotSignedIn, TDLibUnavailable) as e:
         return _unavailable(e)
     except ValueError as e:

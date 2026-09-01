@@ -12,6 +12,7 @@ quietly defeat the sender's choice — so it is pinned from both directions here
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -65,11 +66,17 @@ def _results(raw):
 
 @pytest.mark.asyncio
 async def test_a_message_the_sender_protected_is_not_downloaded_at_all(wire):
-    """The check has to come BEFORE the transfer, not after.
+    """The check comes BEFORE the transfer, so a refusal fetches nothing.
 
-    Downloading opens the message, which starts the self-destruct countdown. A
-    tool that fetched first and then declined to keep the bytes would already
-    have destroyed the thing it declined to copy.
+    This test used to justify the ordering by saying a download opens the message
+    and starts the countdown. Measured against TDLib, that is false: fetching a
+    timer-armed photo left `self_destruct_in` at 0, because VIEWING starts the
+    countdown, not downloading.
+
+    The ordering is still right for the plain reason - a tool that honours the
+    sender should not pull the bytes down first - and the correction matters
+    because the wrong reason would make `override_sender_restriction` look like
+    it destroys the message, which it does not.
     """
     client = wire(
         {
@@ -454,3 +461,215 @@ async def test_a_per_message_timer_is_refused_with_the_one_that_works(wire, monk
     assert "set_secret_chat_timer" in answer
     assert "Nothing was sent" in answer
     assert "sendMessage" not in client.types(), "it sent anyway"
+
+
+# --------------------------------------------------------------------------
+# overriding can_be_saved, and surviving the timer
+# --------------------------------------------------------------------------
+
+
+def _restricted_photo(with_timer=True):
+    """What TDLib actually returns for a timer-armed secret photo.
+
+    Measured on a live chat: can_be_saved false, the countdown NOT started, and
+    the file undownloaded on arrival - `path` empty, `is_downloading_completed`
+    false - so the saver has to fetch it.
+    """
+    message = {
+        "@type": "message",
+        "id": 5,
+        "can_be_saved": False,
+        "content": {
+            "@type": "messagePhoto",
+            "photo": {
+                "sizes": [
+                    {
+                        "photo": {
+                            "id": 1248,
+                            "local": {"path": "", "is_downloading_completed": False},
+                        }
+                    }
+                ]
+            },
+        },
+    }
+    if with_timer:
+        message["self_destruct_type"] = {
+            "@type": "messageSelfDestructTypeTimer",
+            "self_destruct_time": 30,
+        }
+        message["self_destruct_in"] = 0.0
+    return message
+
+
+@pytest.mark.asyncio
+async def test_the_override_is_off_unless_asked_for(wire):
+    """The default is unchanged and stays unchanged: a restricted message is
+    refused and nothing is fetched. The refusal now NAMES the override, because a
+    capability the owner cannot discover is one they will work around by hand."""
+    client = wire({"getMessage": _restricted_photo()})
+
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+
+    assert result["saved"] is False
+    assert "override_sender_restriction" in result["detail"]
+    assert "downloadFile" not in client.types(), "it fetched a message it refused"
+
+
+@pytest.mark.asyncio
+async def test_the_override_fetches_and_says_plainly_that_it_overrode(tmp_path, monkeypatch, wire):
+    """The point of the whole change, and the assertion that must never soften:
+    the result states the sender's restriction was overridden. A save that keeps
+    someone's disappearing photo while reporting an ordinary success is the one
+    outcome this tool must not produce."""
+    from telegram_mcp import file_roots
+
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [tmp_path])
+    tdlib_copy = tmp_path / "tdlib-side.jpg"
+    tdlib_copy.write_bytes(b"secret-photo-bytes")
+
+    wire(
+        {
+            "getMessage": _restricted_photo(),
+            "downloadFile": {
+                "@type": "file",
+                "size": 18,
+                "local": {"is_downloading_completed": True, "path": str(tdlib_copy)},
+            },
+        }
+    )
+
+    result = _results(
+        await sc.save_secret_media(
+            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
+        )
+    )
+
+    assert result["saved"] is True
+    assert result["sender_restriction_overridden"] is True
+    assert "overrode" in result["warning"]
+    assert "not encryption" in result["warning"]
+
+
+@pytest.mark.asyncio
+async def test_media_under_a_timer_is_copied_out_of_tdlibs_directory(tmp_path, monkeypatch, wire):
+    """The technical heart of it. TDLib deletes its OWN copy when the message
+    self-destructs, so returning a path inside its database is a save that
+    evaporates - the caller would hold a filename for bytes that are already
+    gone. The durable copy is what `path` names."""
+    from telegram_mcp import file_roots
+
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [tmp_path])
+    tdlib_copy = tmp_path / "tdlib-side.jpg"
+    tdlib_copy.write_bytes(b"secret-photo-bytes")
+
+    wire(
+        {
+            "getMessage": _restricted_photo(),
+            "downloadFile": {
+                "@type": "file",
+                "size": 18,
+                "local": {"is_downloading_completed": True, "path": str(tdlib_copy)},
+            },
+        }
+    )
+
+    result = _results(
+        await sc.save_secret_media(
+            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
+        )
+    )
+
+    kept = Path(result["path"])
+    assert kept != tdlib_copy, "it handed back TDLib's own copy, which will be deleted"
+    assert kept.read_bytes() == b"secret-photo-bytes", "the copy is not the media"
+    assert result["tdlib_path"] == str(tdlib_copy), "the ephemeral path is not distinguished"
+    assert "stop existing" in result["kept_because"]
+
+
+@pytest.mark.asyncio
+async def test_media_with_no_timer_is_left_where_tdlib_put_it(tmp_path, monkeypatch, wire):
+    """No timer means TDLib keeps its copy, so a second one would double the disk
+    for nothing. Copying unconditionally is the easy mistake here."""
+    from telegram_mcp import file_roots
+
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [tmp_path])
+    tdlib_copy = tmp_path / "tdlib-side.jpg"
+    tdlib_copy.write_bytes(b"ordinary-bytes")
+
+    message = _restricted_photo(with_timer=False)
+    message["can_be_saved"] = True
+    wire(
+        {
+            "getMessage": message,
+            "downloadFile": {
+                "@type": "file",
+                "size": 14,
+                "local": {"is_downloading_completed": True, "path": str(tdlib_copy)},
+            },
+        }
+    )
+
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+
+    assert result["path"] == str(tdlib_copy)
+    assert "tdlib_path" not in result, "it copied a file that was not going to be deleted"
+    assert "sender_restriction_overridden" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_file_tdlib_already_holds_is_not_fetched_again(tmp_path, monkeypatch, wire):
+    """A completed local copy is used as-is. Measured, a secret photo usually
+    arrives undownloaded so this is normally a miss - but re-fetching what is
+    already on disk is a wasted round trip on a message that is expiring."""
+    from telegram_mcp import file_roots
+
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [tmp_path])
+    already = tmp_path / "already-there.jpg"
+    already.write_bytes(b"held-bytes")
+
+    message = _restricted_photo()
+    message["can_be_saved"] = True
+    message["content"]["photo"]["sizes"][0]["photo"]["local"] = {
+        "is_downloading_completed": True,
+        "path": str(already),
+    }
+    client = wire({"getMessage": message})
+
+    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+
+    assert "downloadFile" not in client.types(), "it re-fetched a file it already had"
+    assert Path(result["path"]).read_bytes() == b"held-bytes"
+
+
+@pytest.mark.asyncio
+async def test_the_byte_count_falls_back_to_the_file_when_tdlib_omits_it(
+    tmp_path, monkeypatch, wire
+):
+    """Measured live: TDLib answered a secret-chat download with no `size`, so the
+    result reported `size_bytes: null` - a receipt that cannot say how much it
+    kept. The file on disk always knows."""
+    from telegram_mcp import file_roots
+
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [tmp_path])
+    tdlib_copy = tmp_path / "tdlib-side.jpg"
+    tdlib_copy.write_bytes(b"0123456789")
+
+    wire(
+        {
+            "getMessage": _restricted_photo(),
+            "downloadFile": {
+                "@type": "file",
+                # No `size`, exactly as TDLib returned it.
+                "local": {"is_downloading_completed": True, "path": str(tdlib_copy)},
+            },
+        }
+    )
+
+    result = _results(
+        await sc.save_secret_media(
+            chat_id=1, message_id=5, override_sender_restriction=True, account="acct"
+        )
+    )
+
+    assert result["size_bytes"] == 10
