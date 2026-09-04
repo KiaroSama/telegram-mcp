@@ -33,11 +33,11 @@ def _identity(**overrides):
     values = {
         "name": "telegram-mcp",
         "version": "test-version",
-        "authors": ("chigwell, l1v0n1",),
+        "authors": ("Some Other Project",),
         "maintainers": (),
-        "urls": ("Homepage, https://github.com/chigwell/telegram-mcp",),
+        "urls": ("Homepage, https://github.com/example/telegram-mcp",),
         "summary": "Telegram integration for Claude via the Model Context Protocol",
-        "direct_url": _direct_url("https://github.com/chigwell/telegram-mcp.git", vcs="git"),
+        "direct_url": _direct_url("https://github.com/example/telegram-mcp.git", vcs="git"),
     }
     values.update(overrides)
     return install_guard.DistributionIdentity(**values)
@@ -119,8 +119,8 @@ def test_install_guard_allows_uv_editable_source_checkout_without_direct_url(
             self.metadata = Message()
             self.metadata["Name"] = "telegram-mcp"
             self.metadata["Version"] = "source-version"
-            self.metadata["Author"] = "chigwell, l1v0n1"
-            self.metadata["Project-URL"] = "Homepage, https://github.com/chigwell/telegram-mcp"
+            self.metadata["Author"] = "Some Other Project"
+            self.metadata["Project-URL"] = "Homepage, https://github.com/example/telegram-mcp"
 
         def read_text(self, _filename):
             return None

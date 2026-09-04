@@ -425,9 +425,8 @@ def log_and_format_error(
     # model politely hammering Telegram until the account is limited for hours.
     # So the seconds are named and the no-retry is explicit.
     #
-    # Ported from upstream chigwell/telegram-mcp (PR #204, issue #180); the
-    # placement here is beside the other two cases this function already treats
-    # as answers rather than faults.
+    # Placed beside the other two cases this function already treats as answers
+    # rather than faults.
     seconds = getattr(error, "seconds", None)
     if seconds is not None and type(error).__name__.startswith("FloodWait"):
         log_event(logging.WARNING, "Rate limited", tool=function_name, wait_seconds=int(seconds))

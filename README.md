@@ -63,14 +63,6 @@ answered* and *the answer is true* — and that gap is where an agent quietly ge
 - [Donate](#donate)
 - [Licence](#licence)
 
-## In a client
-
-![Telegram MCP in action](screenshots/1.png)
-
-![Telegram MCP Request](screenshots/2.png)
-
-![Telegram MCP Result](screenshots/3.png)
-
 ## What It Can Do
 
 The server registers **206 MCP tools**. That count is measured, not estimated — see
@@ -1115,9 +1107,10 @@ a licence already given cannot be withdrawn.
 
 ## Built on
 
-- [Telethon](https://github.com/LonamiWebs/Telethon)
+- [Telethon](https://github.com/LonamiWebs/Telethon) — the MTProto client
+- [TDLib](https://core.telegram.org/tdlib) — Telegram's own client library, for what Telethon's
+  announced layer cannot carry
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
-Portions of this codebase originated in [telegram-mcp](https://github.com/chigwell/telegram-mcp)
-by chigwell and l1v0n1, under the Apache License 2.0, and have been substantially modified and
-extended since. That attribution is recorded in [NOTICE](NOTICE).
+Prior-work attribution, which the Apache License requires this project to keep, is in
+[NOTICE](NOTICE).

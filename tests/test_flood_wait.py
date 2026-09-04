@@ -3,7 +3,7 @@
 An agent handed "an error occurred (GEN-ERR-123)" retries. Every retry inside a
 FloodWait window extends the penalty, so the one failure mode worth a dedicated
 test is a model politely hammering Telegram until the account is limited for
-hours. Ported from upstream chigwell/telegram-mcp (PR #204, issue #180).
+hours.
 """
 
 import pytest
