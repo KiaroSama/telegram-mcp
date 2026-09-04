@@ -1,27 +1,42 @@
 telegram-mcp
-Copyright (C) 2026 KiaroSama
+Copyright 2026 KiaroSama
 
-This program is free software: you can redistribute it and/or modify it under the
-terms of the GNU General Public License as published by the Free Software
-Foundation, either version 3 of the License, or (at your option) any later version.
-See LICENSE for the full text.
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use
+this file except in compliance with the License. You may obtain a copy of the
+License at
 
-This program is distributed in the hope that it will be useful, but WITHOUT ANY
-WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
-PARTICULAR PURPOSE. See the GNU General Public License for more details.
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed
+under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+CONDITIONS OF ANY KIND, either express or implied. See the License for the
+specific language governing permissions and limitations under the License.
 
 
 ATTRIBUTION OF PRIOR WORK
 
 Portions of this program originated in the 'telegram-mcp' project published by
-chigwell and l1v0n1 under the Apache License, Version 2.0, whose terms are at
-<http://www.apache.org/licenses/LICENSE-2.0>. This notice is retained in accordance
-with Section 4 of that licence. Those portions have been substantially modified and
-extended.
+chigwell and l1v0n1 under the Apache License, Version 2.0. This notice is
+retained in accordance with Section 4 of that licence. Those portions have been
+substantially modified and extended.
 
-The Apache License 2.0 permits that material to be included in a work licensed under
-GPLv3. The Apache Software Foundation states it directly: 'Apache 2 software can
-therefore be included in GPLv3 projects, because the GPLv3 license accepts our
-software into GPLv3 works.' The compatibility runs one way only, so this program as
-a whole is GPLv3 while the prior Apache-2.0 grant continues to cover the portions it
-originally covered.
+
+LICENCE HISTORY
+
+This project was published under the GNU GPL v3 or later between 2026-08-25 and
+2026-09-05, and is now under the Apache License 2.0 — the same licence as the
+prior work it derives from. Anyone who obtained a copy during that window keeps
+the GPL grant they received; the GPL is not revoked retroactively and cannot be.
+
+The relicence covers every part of the work:
+
+  * Code inherited from the prior project was always available under Apache 2.0,
+    and remains so.
+  * Everything written for this project after 2026-08-25 is the copyright of
+    KiaroSama, who is relicensing it here. No third party contributed
+    copyrightable material to this project under the GPL — the only other author
+    in that window is an automated dependency bot, whose changes are version
+    strings.
+
+A GPL-licensed copy of this project therefore exists and stays valid; this file
+records why the current licence differs from it.

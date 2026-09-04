@@ -10,10 +10,10 @@ readme = "README.md"
 authors = [
     {name = "KiaroSama"}
 ]
-license = "GPL-3.0-or-later"
+license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
 # "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
-# upload carrying it. That is deliberate and survives the move to GPLv3: the
+# upload carrying it. That is deliberate and survives every licence change: the
 # telegram-mcp name on PyPI belongs to a DIFFERENT project, and install_guard.py
 # already refuses a PyPI-installed copy at import. Publishing the source is a
 # separate decision from publishing a package - delete this line only when the
