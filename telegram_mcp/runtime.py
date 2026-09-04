@@ -419,6 +419,26 @@ def log_and_format_error(
             "username, or use an account that is a member."
         )
 
+    # A rate limit is an INSTRUCTION, not a failure to report and move on from.
+    # An agent handed a generic error code retries, and every retry inside the
+    # window extends the penalty - the failure mode this exists to prevent is a
+    # model politely hammering Telegram until the account is limited for hours.
+    # So the seconds are named and the no-retry is explicit.
+    #
+    # Ported from upstream chigwell/telegram-mcp (PR #204, issue #180); the
+    # placement here is beside the other two cases this function already treats
+    # as answers rather than faults.
+    seconds = getattr(error, "seconds", None)
+    if seconds is not None and type(error).__name__.startswith("FloodWait"):
+        log_event(logging.WARNING, "Rate limited", tool=function_name, wait_seconds=int(seconds))
+        if user_message:
+            return user_message
+        return (
+            f"Telegram is rate-limiting this account: it requires {int(seconds)} seconds "
+            "before this operation is repeated. Do NOT retry before then - each early "
+            "attempt extends the wait. Other accounts and other operations are unaffected."
+        )
+
     # Generate a consistent error code
     if isinstance(prefix, str) and prefix == "VALIDATION-001":
         # Special case for validation errors
