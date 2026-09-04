@@ -3,51 +3,77 @@
 </div>
 
 ![MCP Badge](https://badge.mcpx.dev)
-[![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
+[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
 [![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
 
-A Telegram integration for Claude, Cursor, and other MCP-compatible clients. It exposes Telegram account, chat, message, contact, media, folder, and admin operations through the [Model Context Protocol](https://modelcontextprotocol.io/) using [Telethon](https://docs.telethon.dev/).
+Drive a **real Telegram account** from an MCP client. Not a bot account — your account, with
+its chats, its channels, its admin rights and its history, exposed as tools an agent can call.
 
-**Free software under the GNU GPL v3 or later.** See [LICENSE](LICENSE). You may use, study,
-modify and redistribute it; anything you distribute that builds on it carries the same licence.
+**Apache License 2.0.** See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
-## 🤖 MCP in Action
+## What makes this one different
 
-Basic Telegram MCP usage in Claude:
+Plenty of things speak MTProto. What this server is actually about is the gap between *the API
+answered* and *the answer is true* — and that gap is where an agent quietly gets things wrong.
 
-![Telegram MCP in action](screenshots/1.png)
-
-Asking Claude to analyze chat history and send a response:
-
-![Telegram MCP Request](screenshots/2.png)
-
-Message sent successfully:
-
-![Telegram MCP Result](screenshots/3.png)
+- **Behaviour is measured, not assumed.** When Telegram does something surprising, it gets
+  reproduced against a live account and the finding goes in the code as a comment and in a test
+  as an assertion. A few examples, each of which had a wrong implementation first: Telegram
+  **silently drops** admin rights newer than the TL layer a client announces; a message written
+  with the new rich formatting arrives through MTProto **completely empty, with no error**; the
+  saved-GIF listing is a capped window and not a total; `can_be_saved` is advisory and TDLib
+  downloads regardless. None of that is in anyone's documentation.
+- **A tool that cannot do a thing says so.** The alternative — returning something plausible —
+  is worse than failing, because nothing downstream can tell. Refusals here name the reason and,
+  where one exists, the tool that does work.
+- **Two libraries, because one is not enough.** Telethon covers most of Telegram and is
+  archived at layer 227. Where that ceiling bites — secret chats, admin rights added since,
+  block-formatted messages — the request goes over **TDLib**, Telegram's own client library,
+  which ships with the project. See [docs/api-coverage.md](docs/api-coverage.md).
+- **Many accounts, one server.** Every tool takes `account=`, read-only tools can fan out across
+  all of them, and `.env` is re-read while the server runs, so adding or re-logging an account
+  needs no restart.
+- **The filesystem is closed by default.** No path tool works until allowed roots are configured,
+  and every read and write goes through a handle rather than a name that could be swapped
+  mid-operation.
 
 ## Contents
 
-- [What It Can Do](#what-it-can-do)
-- [Requirements](#requirements)
-- [Quick Start](#quick-start)
-- [MCP Client Configuration](#mcp-client-configuration)
-- [Windows launchers](#windows-launchers)
-- [Multi-Account Setup](#multi-account-setup)
-- [Device Identity](#device-identity)
-- [Proxy Support](#proxy-support)
-- [File Path Security](#file-path-security)
-- [Docker](#docker)
+- [Getting started](#getting-started)
+  - [Requirements](#requirements)
+  - [Quick Start](#quick-start)
+  - [MCP Client Configuration](#mcp-client-configuration)
+  - [Windows launchers](#windows-launchers)
+- [Running it](#running-it)
+  - [Multi-Account Setup](#multi-account-setup)
+  - [Device Identity](#device-identity)
+  - [Proxy Support](#proxy-support)
+  - [Docker](#docker)
+- [What it can reach](#what-it-can-do)
+  - [Visual and structured access](#visual-and-structured-access)
+  - [Content types beyond plain messages](#content-types-beyond-plain-messages)
+  - [Message Links](#message-links)
+- [Safety](#safety)
+  - [File Path Security](#file-path-security)
+  - [Security Notes](#security-notes)
 - [Development](#development)
-- [Security Notes](#security-notes)
 - [Troubleshooting](#troubleshooting)
-- [Visual and structured access](#visual-and-structured-access)
-- [Content types beyond plain messages](#content-types-beyond-plain-messages)
+- [Working on it](#working-on-it)
+- [Donate](#donate)
 - [Licence](#licence)
+
+## In a client
+
+![Telegram MCP in action](screenshots/1.png)
+
+![Telegram MCP Request](screenshots/2.png)
+
+![Telegram MCP Result](screenshots/3.png)
 
 ## What It Can Do
 
-The server registers **199 MCP tools**. That count is measured, not estimated — see
+The server registers **206 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 
@@ -61,8 +87,31 @@ server deliberately does not. The tools group into these areas:
   That flag is **not** encryption, and this was measured rather than assumed: on a photo received with the chat timer armed, `can_be_saved` was false and TDLib's `downloadFile` answered anyway. The media is decrypted on the receiving device in order to be displayed, so the bytes are already there — `can_be_saved` is Telegram asking a well-behaved client not to keep them, and a screenshot has always defeated it. Deciding that for your own account is the account owner's call; the result reports `sender_restriction_overridden: true` when it applied, so the two cases stay distinguishable.
 
   Two further measured facts shape it. Downloading does **not** start the self-destruct countdown — `self_destruct_in` stayed 0 across the fetch; viewing is what starts it. And TDLib deletes its own copy when the message goes, so a path inside its database is a save that evaporates: media under a timer is copied out to `destination` (default `<first_root>/downloads/`) and that durable path is what comes back, with the ephemeral one reported separately as `tdlib_path`.
+- **Invite links, the whole screen Telegram gives you:** `create_invite_link` mints a *named,
+  additional* link carrying any condition Telegram supports — an admin-only title, an expiry,
+  a cap on how many people may join, or a queue where every arrival waits for approval.
+  `edit_invite_link` changes those conditions later, `revoke_invite_link` kills a link (people
+  who already joined stay — revoking is not a removal), and `list_invite_links` reads them back
+  with `usage` against `usage_limit` so an exhausted link is visible rather than merely dead.
+  `list_join_requests` and `approve_join_request` work the approval queue.
+
+  Two behaviours are worth knowing before you call any of it. `create_invite_link` does **not**
+  touch the chat's primary link, unlike `export_chat_invite`, which replaces the primary and
+  locks out everyone still holding the old one. And on `edit_invite_link` an omitted argument
+  means *leave that condition alone* — because that is what Telegram's own request means — so
+  clearing an expiry or a cap is done by passing `0`, not by leaving it out.
+- **Communities:** `set_discussion_group` attaches a supergroup to a broadcast channel, which is
+  what turns channel posts into threads with comments; calling it with no group detaches it
+  again. Telegram enforces two structural rules here that arrive as unrelated error codes — the
+  channel must be a broadcast channel and the group must be a supergroup — so both are refused
+  by name instead, including the easy mistake of passing the two ids the wrong way round.
+- **Public and private:** `set_channel_username` moves a channel between the two. An empty
+  username removes the public address and makes it private; the freed name then becomes
+  claimable by anyone, including someone who would like to be mistaken for it, which is why the
+  tool says so and refuses to get there by an omitted argument.
 - **Tables and other rich blocks:** a message written with Telegram's newer rich formatting arrives through MTProto **completely empty** - no text, no entities, no media, and no error, because its body is a `messageRichMessage`, a content type that does not exist in the TL layer Telethon announces. Measured on a live message that renders as a bordered two-column table with premium emoji: `inspect_message` and `get_message_context` both reported `[empty]` and nothing was raised. `read_rich_message` reads the same message over TDLib and returns every block - a table as structured `rows` (each cell with its header flag and any colspan/rowspan) and as ready-made `markdown`. Nested formatting is flattened rather than dropped, so bold runs and a caption's link survive.
 - **Secret chats:** create an end-to-end encrypted chat, send text, photos and voice into it, read its history, arm its self-destruct timer, and close it. These nine tools do not run on Telethon, which never implemented MTProto 2.0 — they run on TDLib, Telegram's own client library. `tdjson` ships with the project, so for an account added through `Manage-Accounts.ps1` there is nothing extra to do: the session generator signs the account in to TDLib as well, in the same run, reusing the two-step password you have just typed rather than asking for it again. TDLib cannot read a Telethon session and offers no way to import one, so the account does appear as another device — that part is the protocol. `secret_chat_status` says what is missing for an account that arrived some other way, and `scripts/secret_chat_login.py <account>` finishes one by hand.
+- **Rate limits are an instruction, not an error.** When Telegram limits the account, the tool returns the number of seconds and an explicit do-not-retry rather than an error code — an agent handed a code retries, and every retry inside the window extends the penalty.
 - **Contacts:** list, search, add, delete, block, unblock, import, export, inspect direct chats, find recent contact interactions, and remember contacts by the names you actually use (see below).
 
 ### Remembered contacts
@@ -1057,8 +1106,12 @@ If this project helps you, donations are appreciated.
 
 ## Licence
 
-GNU General Public License v3.0 or later. See [LICENSE](LICENSE) for the licence text and
-[NOTICE](NOTICE) for the copyright and prior-work attribution.
+**Apache License 2.0.** See [LICENSE](LICENSE) for the text and [NOTICE](NOTICE) for the
+copyright, the prior-work attribution and the licence history.
+
+This project was GPL-3.0-or-later between 2026-08-25 and 2026-09-05 and is now Apache-2.0 — the
+same licence as the work it derives from. Anyone who took a copy under the GPL keeps that grant;
+a licence already given cannot be withdrawn.
 
 ## Built on
 

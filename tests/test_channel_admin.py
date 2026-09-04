@@ -439,3 +439,127 @@ async def test_setting_a_username_on_a_user_refuses_the_same_way(_wire):
 
     assert "channels and supergroups" in result
     assert client.requests == []
+
+
+# --- linking a discussion group (the "community" shape) ---------------------
+#
+# The link runs channel -> group and both sides have a structural requirement
+# Telegram enforces with unrelated error codes. Each refusal here is a sentence
+# instead, because the two ways to get it wrong look identical from a chat id.
+
+
+class _Recorder:
+    """Records the link requests. The suite's own _Client refuses anything it
+    does not know, which is right for it and wrong here."""
+
+    def __init__(self):
+        self.requests = []
+
+    async def __call__(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(updates=[])
+
+    def sent(self, name):
+        return next((r for r in self.requests if type(r).__name__ == name), None)
+
+
+def _supergroup(title="Ops Chat"):
+    return SimpleNamespace(id=1234, title=title, username=None, broadcast=False, megagroup=True)
+
+
+class _Peers:
+    """Resolves the channel and the group to different objects by id."""
+
+    def __init__(self, channel, group):
+        self.channel, self.group = channel, group
+
+    async def __call__(self, chat_id, _client):
+        return self.group if int(chat_id) == 1234 else self.channel
+
+
+@pytest.mark.asyncio
+async def test_linking_sends_both_sides_the_right_way_round(monkeypatch):
+    client = _Recorder()
+    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+
+    async def _ensure(_client):
+        return None
+
+    monkeypatch.setattr(mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(mod, "resolve_entity", _Peers(_channel(), _supergroup()))
+
+    answer = await mod.set_discussion_group(channel_id=99, group_id=1234, account="a")
+
+    sent = client.sent("SetDiscussionGroupRequest")
+    assert sent.broadcast.id == 99, "the broadcast side is not the channel"
+    assert sent.group.id == 1234
+    assert "Ops Chat" in answer
+
+
+@pytest.mark.asyncio
+async def test_omitting_the_group_detaches_rather_than_doing_nothing(monkeypatch):
+    """Telegram unlinks with InputChannelEmpty, not by omitting the field. A tool
+    that sent nothing would report success and change nothing."""
+    client = _Recorder()
+    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve(chat_id, _client):
+        return _channel()
+
+    monkeypatch.setattr(mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+
+    answer = await mod.set_discussion_group(channel_id=99, account="a")
+
+    sent = client.sent("SetDiscussionGroupRequest")
+    assert type(sent.group).__name__ == "InputChannelEmpty", "nothing was detached"
+    assert json.loads(answer)["results"][0]["detached"] is True
+
+
+@pytest.mark.asyncio
+async def test_passing_the_supergroup_as_the_channel_is_refused_by_name(monkeypatch):
+    """The likeliest mistake: the two arguments are both chat ids and swapping
+    them fails on the wire with something that does not mention the order."""
+    client = _Recorder()
+    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+
+    async def _ensure(_client):
+        return None
+
+    async def _resolve(chat_id, _client):
+        return _supergroup()
+
+    monkeypatch.setattr(mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+
+    answer = await mod.set_discussion_group(channel_id=1234, group_id=99, account="a")
+
+    assert "channel -> group" in answer
+    assert client.requests == [], "a reversed link went out anyway"
+
+
+@pytest.mark.asyncio
+async def test_a_basic_group_is_refused_with_the_step_that_fixes_it(monkeypatch):
+    """Telegram links SUPERGROUPS only. A client converts silently first; this
+    call does not, so the conversion is named rather than left as an error."""
+    client = _Recorder()
+    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+
+    async def _ensure(_client):
+        return None
+
+    basic = SimpleNamespace(id=1234, title="Old Group")
+
+    async def _resolve(chat_id, _client):
+        return basic if int(chat_id) == 1234 else _channel()
+
+    monkeypatch.setattr(mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+
+    answer = await mod.set_discussion_group(channel_id=99, group_id=1234, account="a")
+
+    assert "Convert it to a supergroup" in answer
+    assert client.requests == []

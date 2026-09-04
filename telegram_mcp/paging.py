@@ -57,6 +57,10 @@ LIMITS: dict[str, int] = {
     "list_topics": 200,
     "get_common_chats": 100,  # Telegram caps messages.getCommonChats at 100
     "get_participants": 1000,  # a member list is the one place four figures is normal
+    # Invite links and their queues: one small record each, and a chat rarely has
+    # many. Telegram caps the join-request importers request itself at 100.
+    "list_invite_links": 100,
+    "list_join_requests": 100,
     # Per-message detail: a request each, so the ceiling is what one screenful of
     # reasoning can actually use.
     "get_poll_voters": 200,

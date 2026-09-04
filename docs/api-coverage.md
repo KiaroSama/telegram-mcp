@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **199** |
+| MCP tools registered | **206** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -100,6 +100,8 @@ predicted.
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
 | Packs on the account: install and remove | `install_sticker_set`, `uninstall_sticker_set`, `get_sticker_sets(kind=...)` | `tools/stickers.py`, `tools/media.py` |
 | Saved GIFs | `list_saved_gifs`, `save_gif`, `unsave_gif` | `tools/saved_gifs.py` |
+| Invite links with conditions | `create_invite_link`, `edit_invite_link`, `revoke_invite_link`, `list_invite_links`, `list_join_requests`, `approve_join_request` | `tools/invite_links.py` |
+| Channel ↔ discussion group | `set_discussion_group` | `tools/channel_admin.py` |
 | Channel username (the identity gap) | `check_channel_username`, `set_channel_username` | `tools/channel_admin.py` |
 | Channel statistics | `get_channel_statistics` | `tools/channel_admin.py` |
 | Similar / recommended channels | `get_similar_channels` | `tools/channel_admin.py` |

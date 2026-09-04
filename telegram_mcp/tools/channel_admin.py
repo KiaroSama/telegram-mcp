@@ -663,3 +663,117 @@ async def get_similar_channels(
         return format_tool_result(records, metadata)
     except Exception as e:
         return log_and_format_error("get_similar_channels", e, chat_id=chat_id)
+
+
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set Discussion Group",
+        openWorldHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
+    )
+)
+@with_account(readonly=False)
+@validate_id("channel_id")
+async def set_discussion_group(
+    channel_id: Union[int, str],
+    group_id: Union[int, str] = None,
+    account: str = None,
+) -> str:
+    """
+    Attach a discussion group to a channel, or detach the one it has.
+
+    This is what Telegram's own UI calls making a channel into a community: every
+    post in the channel gains a comments thread, and the comments live as real
+    messages in the linked group. The two chats stay separate objects — the link
+    is a pointer, and removing it leaves both intact with their members and
+    history.
+
+    Both sides need this account to be an admin, and Telegram has two structural
+    requirements that are refused here by name rather than as an error code:
+    the channel must be a broadcast channel, and the group must be a
+    **supergroup** — a basic group has to be converted first, which Telegram does
+    automatically when you link it through a client but not through this call.
+
+    Args:
+        channel_id: The broadcast channel that gains the comments.
+        group_id: The supergroup to attach. **Omit it to DETACH** the current
+            one, which turns the comments off; existing comment threads stop
+            being reachable from the channel.
+    """
+    try:
+        cl = get_client(account)
+        await ensure_connected(cl)
+        channel = await resolve_entity(channel_id, cl)
+        wrong_kind = _not_a_channel(channel_id, channel)
+        if wrong_kind:
+            return wrong_kind
+        if getattr(channel, "megagroup", False):
+            return (
+                f"{channel_id} is a supergroup, not a broadcast channel. The discussion link "
+                "runs channel -> group; pass the CHANNEL as channel_id and the group as "
+                "group_id."
+            )
+
+        if group_id is None:
+            # InputChannelEmpty is Telegram's "no group", and it is the only way
+            # to unlink. Spelled out because passing the channel twice, or
+            # omitting the field, both fail with unrelated errors.
+            from telethon.tl.types import InputChannelEmpty
+
+            await cl(
+                functions.channels.SetDiscussionGroupRequest(
+                    broadcast=channel, group=InputChannelEmpty()
+                )
+            )
+            return format_tool_result(
+                [
+                    {
+                        "channel": display_name(getattr(channel, "title", "") or str(channel_id)),
+                        "linked_group": None,
+                        "detached": True,
+                    }
+                ],
+                {
+                    "note": (
+                        "Comments are off. The group still exists with its members and "
+                        "history; only the pointer from the channel is gone."
+                    )
+                },
+            )
+
+        group = await resolve_entity(group_id, cl)
+        # By attribute, not isinstance, for the same reason `_not_a_channel`
+        # does: what matters is what the peer IS to Telegram, and a supergroup
+        # and a broadcast channel share a class.
+        if getattr(group, "broadcast", False):
+            return (
+                f"{group_id} is a broadcast channel, not a group. A channel cannot be the "
+                "discussion side of another channel."
+            )
+        if not getattr(group, "megagroup", False):
+            return (
+                f"{group_id} is a basic group, and Telegram only links SUPERGROUPS as "
+                "discussion groups. Convert it to a supergroup first, then link it."
+            )
+
+        await cl(functions.channels.SetDiscussionGroupRequest(broadcast=channel, group=group))
+        return format_tool_result(
+            [
+                {
+                    "channel": display_name(getattr(channel, "title", "") or str(channel_id)),
+                    "linked_group": display_name(getattr(group, "title", "") or str(group_id)),
+                    "linked_group_id": getattr(group, "id", None),
+                }
+            ],
+            {
+                "note": (
+                    "Every post in the channel now has a comments thread, and the comments are "
+                    "real messages in the linked group. Pass no group_id to undo this."
+                )
+            },
+        )
+    except Exception as e:
+        return log_and_format_error(
+            "set_discussion_group", e, channel_id=channel_id, group_id=group_id
+        )
