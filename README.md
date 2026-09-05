@@ -854,6 +854,8 @@ telegram_mcp/runner.py        # application startup
 telegram_mcp/tools/           # tool modules grouped by domain
 telegram_mcp/message_view.py  # deep structured message view
 telegram_mcp/visual/          # Telegram Desktop capture and image/frame helpers
+                              #   capture.py runs inside the worker; capture_runner.py
+                              #   is the parent that spawns and bounds it
 sanitize.py                   # output sanitization helpers
 tests/                        # pytest suite, plus PowerShell suites for the launchers
 ```

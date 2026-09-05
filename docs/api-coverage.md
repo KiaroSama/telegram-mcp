@@ -292,6 +292,16 @@ the tree, which is the cost of having deferred them.
    blocks from its raw source, and the end-to-end test copies that ONE file into a
    sandbox and runs it. Single-file is a tested contract there, not an aesthetic.
 
+   **`capture.py` came back for the better cut on 2026-09-06**, 752 -> 590 plus
+   `visual/capture_runner.py`. The ctypes extraction was the weaker seam, taken only
+   because `tools/visual.py` imports two names straight out of `capture` and was off
+   limits at the time. With that file editable the real line was drawn: everything left
+   in `capture` runs INSIDE the worker subprocess, and `capture_runner` is the parent
+   that starts it, gives it a deadline and refuses an oversized answer. The moved code
+   reaches back through the `capture` MODULE rather than importing its names, because a
+   `from ... import` would freeze `MAX_CAPTURE_RESPONSE_BYTES` at import and quietly
+   defeat the test that patches it to prove the ceiling fires.
+
    The principle is unchanged - cohesion outranks the line count, and a thin fragment is
    worse than a long file. What changed is the answer to "is there a real layer in
    here", which is worth re-asking rather than settling once.
