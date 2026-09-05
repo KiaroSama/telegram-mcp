@@ -20,6 +20,8 @@ import sys
 from pathlib import Path
 
 import pytest
+
+from helpers_launcher import launcher_files
 from telethon import errors
 
 REPO = Path(__file__).resolve().parents[1]
@@ -319,7 +321,8 @@ LABEL_CASES = [
 _PROBE = """
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
-$source = Get-Content -LiteralPath $env:TGMCP_MANAGER -Raw
+$source = ($env:TGMCP_MANAGER -split ';' | ForEach-Object {
+    Get-Content -LiteralPath $_ -Raw }) -join "`n"
 $body = [regex]::Match($source, '(?ms)^function ConvertTo-Label \\{.*?^\\}')
 if (-not $body.Success) { throw 'ConvertTo-Label is gone from the account manager.' }
 . ([ScriptBlock]::Create($body.Value))
@@ -351,7 +354,10 @@ def test_the_account_manager_normalises_labels_exactly_as_the_package_does(gener
         timeout=120,
         env={
             **os.environ,
-            "TGMCP_MANAGER": str(REPO / "Manage-Accounts.ps1"),
+            # Every file the launcher is made of: `ConvertTo-Label` moved
+            # into lib/ when it was split, and pointing at the entry point
+            # alone would make the probe report the rule as "gone".
+            "TGMCP_MANAGER": ";".join(str(f) for f in launcher_files()),
             "TGMCP_LABELS": base64.b64encode(json.dumps(LABEL_CASES).encode("utf-8")).decode(
                 "ascii"
             ),

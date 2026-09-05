@@ -287,10 +287,26 @@ the tree, which is the cost of having deferred them.
    `runtime.py` 905 -> 662 (`errors.py`), `connection.py` 984 -> 757 (`session_files.py`
    and, earlier, `proxy.py`). Eleven modules became twenty-two in total.
 
-   `Manage-Accounts.ps1` (1152) stays whole, and now for a reason stronger than
-   cohesion: `tests/test_account_manager.ps1` loads it by regex-extracting function
-   blocks from its raw source, and the end-to-end test copies that ONE file into a
-   sandbox and runs it. Single-file is a tested contract there, not an aesthetic.
+   **`Manage-Accounts.ps1` was split on 2026-09-06**, 1152 -> 650 plus three
+   dot-sourced pieces: `account-manager/FileSafety.ps1` (private files, atomic writes, the
+   log), `account-manager/EnvFile.ps1` (reading and rewriting `.env`) and `account-manager/Console.ps1`
+   (the theme and the prompts).
+
+   It had been left whole because the single file was a TESTED contract, not an
+   aesthetic - the harness loads it by regex-extracting function blocks from its
+   raw source, and the end-to-end test copies it into a sandbox and runs it. That
+   is exactly what the split had to repair rather than route around: both
+   PowerShell suites and two Python tests now read the launcher as a UNIT (entry
+   point plus `account-manager/*.ps1`, discovered rather than listed), because a source regex
+   that matches nothing does not fail - it silently stops testing. Four
+   assertions were caught doing precisely that.
+
+   **The seam was chosen by where `$PSScriptRoot` is used.** That automatic
+   variable resolves against the file it is WRITTEN in, so a function that moved
+   into `account-manager/` and still used it would look for the venv at `account-manager/.venv` and fail
+   in a way no test names. Every function that resolves the project root - the
+   ones that call Python - therefore stayed in the entry point, and only the
+   three `$PSScriptRoot`-free regions moved.
 
    **`capture.py` came back for the better cut on 2026-09-06**, 752 -> 590 plus
    `visual/capture_runner.py`. The ctypes extraction was the weaker seam, taken only
@@ -421,7 +437,7 @@ That answers the three questions this section said had to be settled first, whic
 what makes it a real resolution rather than a shortcut:
 
 - **Where per-device keys live** — in TDLib's own database, one per account under
-  `state_dir()/tdlib/<account>`, never the shared Telethon session file.
+  `state_dir()/tdaccount-manager/<account>`, never the shared Telethon session file.
 - **What happens when a key is lost** — the chat's history is unrecoverable, which
   is why `TDLibClient.close` exists and is called on shutdown rather than left to
   process exit.

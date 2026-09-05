@@ -5,7 +5,37 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $scripts = @(
     (Join-Path $projectRoot 'start-mcp.ps1'),
     (Join-Path $projectRoot 'Manage-Accounts.ps1')
+) + @(
+    # The account manager dot-sources these, so a parse error in one is a broken
+    # launcher just the same - and they must be checked, not assumed.
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'account-manager') -Filter '*.ps1' -File |
+        Sort-Object Name | ForEach-Object { $_.FullName }
 )
+
+
+# A launcher is what a USER runs, which is not always one file. `start-mcp.ps1`
+# is self-contained; the account manager is its entry point plus the account-manager/ files
+# it dot-sources. The guarantees below belong to the launcher, so they are
+# checked against the whole unit - otherwise the split would move a safety
+# helper out of view and every assertion about it would quietly match nothing.
+$launcherUnits = @(
+    @{
+        Name  = 'start-mcp.ps1'
+        Files = @(Join-Path $projectRoot 'start-mcp.ps1')
+    },
+    @{
+        Name  = 'Manage-Accounts.ps1'
+        Files = @(Join-Path $projectRoot 'Manage-Accounts.ps1') + @(
+            Get-ChildItem -LiteralPath (Join-Path $projectRoot 'account-manager') -Filter '*.ps1' -File |
+                Sort-Object Name | ForEach-Object { $_.FullName }
+        )
+    }
+)
+
+function Get-UnitText {
+    param([Parameter(Mandatory)] $Unit)
+    return ($Unit.Files | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n"
+}
 
 foreach ($script in $scripts) {
     if (-not (Test-Path -LiteralPath $script -PathType Leaf)) {
@@ -24,7 +54,16 @@ foreach ($script in $scripts) {
 }
 
 $launcher = Get-Content -LiteralPath $scripts[0] -Raw
-$manager = Get-Content -LiteralPath $scripts[1] -Raw
+# The entry point PLUS everything it dot-sources. Reading only the entry point
+# was right while it was one file; after the split, `Read-SessionString` and the
+# .env writers live in account-manager/ and these assertions would match nothing - passing
+# for the wrong reason instead of failing.
+$manager = @(
+    (Join-Path $projectRoot 'Manage-Accounts.ps1')
+) + @(
+    Get-ChildItem -LiteralPath (Join-Path $projectRoot 'account-manager') -Filter '*.ps1' -File |
+        Sort-Object Name | ForEach-Object { $_.FullName }
+) | ForEach-Object { Get-Content -LiteralPath $_ -Raw } | Join-String -Separator "`n"
 if ($launcher -match '2>&1\s*\|') {
     throw 'Launcher must not pipe native output because that disables original terminal colors.'
 }
@@ -282,18 +321,18 @@ if ($manager -match '(?ms)^\s*\[IO\.File\]::WriteAllText\(\s*\r?\n\s*\$envPath')
 if ($manager -match 'Copy-Item[^\r\n]*\$envPath[^\r\n]*-Force') {
     throw 'A backup is taken with -Force, which silently replaces one taken the same second.'
 }
-foreach ($shipped in $scripts) {
-    $text = Get-Content -LiteralPath $shipped -Raw
+foreach ($unit in $launcherUnits) {
+    $text = Get-UnitText -Unit $unit
     # `logs/` beside the source lands inside the git checkout and inherits whatever
     # the repository directory grants; the state directory is the private one.
     if ($text -match "Join-Path \`$PSScriptRoot 'logs'") {
-        throw "$(Split-Path -Leaf $shipped) still logs beside its own source."
+        throw "$($unit.Name) still logs beside its own source."
     }
     $required = @(
         'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Test-OwnerOnlyAcl', 'Remove-StaleFiles')
     foreach ($name in $required) {
         if ($text -notmatch "function $name") {
-            throw "$(Split-Path -Leaf $shipped) has no $name."
+            throw "$($unit.Name) has no $name."
         }
     }
     # This used to demand the `/inheritance:r` flag, which asserted the shape of
@@ -302,16 +341,16 @@ foreach ($shipped in $scripts) {
     # required now is a protected list written whole, and an answer read back
     # off the file rather than taken from a return code.
     if ($text -notmatch 'SetAccessRuleProtection') {
-        throw "$(Split-Path -Leaf $shipped) does not write a protected DACL."
+        throw "$($unit.Name) does not write a protected DACL."
     }
     if ($text -notmatch 'return \(Test-OwnerOnlyAcl -Path \$Path\)') {
-        throw "$(Split-Path -Leaf $shipped) reports success without reading the file back."
+        throw "$($unit.Name) reports success without reading the file back."
     }
     # An INVOCATION, not the word: both files still describe the old approach in
     # prose, and a guard that cannot tell an explanation from a call is a guard
     # nobody can write documentation around.
     if ($text -match '(&\s+icacls|["'']icacls["''])') {
-        throw "$(Split-Path -Leaf $shipped) is back to editing the ACL with icacls."
+        throw "$($unit.Name) is back to editing the ACL with icacls."
     }
 }
 # The two launchers each carry their own copy of these four functions, and that
@@ -328,13 +367,14 @@ foreach ($shipped in $scripts) {
 $sharedFunctions = @(
     'Get-StateDirectory', 'Set-OwnerOnlyAcl', 'Test-OwnerOnlyAcl', 'Remove-StaleFiles')
 $shared = @{}
-foreach ($shipped in $scripts) {
-    $text = Get-Content -LiteralPath $shipped -Raw
+foreach ($unit in $launcherUnits) {
+    $text = Get-UnitText -Unit $unit
+    $shipped = $unit.Name
     $shared[$shipped] = @{}
     foreach ($name in $sharedFunctions) {
         $block = [regex]::Match($text, "(?ms)^function $name \{.*?^\}")
         if (-not $block.Success) {
-            throw "$(Split-Path -Leaf $shipped) declares $name but its body could not be extracted."
+            throw "$shipped declares $name but its body could not be extracted."
         }
         # Drop <# #> blocks, # comments and blank lines; keep the executable shape.
         $code = [regex]::Replace($block.Value, '(?s)<#.*?#>', '')
@@ -345,11 +385,11 @@ foreach ($shipped in $scripts) {
         ) -join "`n"
     }
 }
-$left, $right = $scripts
+$left, $right = $launcherUnits.Name
 foreach ($name in $sharedFunctions) {
     if ($shared[$left][$name] -ne $shared[$right][$name]) {
-        throw ("$name has drifted between $(Split-Path -Leaf $left) and " +
-               "$(Split-Path -Leaf $right). Apply the change to both, or give them " +
+        throw ("$name has drifted between $left and " +
+               "$right. Apply the change to both, or give them " +
                "different names so the difference is deliberate and visible.")
     }
 }

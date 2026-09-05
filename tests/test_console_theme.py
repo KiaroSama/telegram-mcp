@@ -13,8 +13,9 @@ import pytest
 
 from telegram_mcp import console_theme
 
+from helpers_launcher import launcher_source
+
 REPO = Path(__file__).resolve().parents[1]
-MANAGER = REPO / "Manage-Accounts.ps1"
 
 # Python name -> the key used in the PowerShell $script:Color table.
 SHARED = {
@@ -44,7 +45,7 @@ def colour_on(monkeypatch):
 
 
 def _powershell_palette():
-    source = MANAGER.read_text(encoding="utf-8")
+    source = launcher_source()
     start = source.index("$script:Color = @{")
     end = source.index("function Test-ColorSupport")
     return dict(re.findall(r'(\w+)\s*=\s*"\$script:Esc(\[[0-9;]+m)"', source[start:end]))

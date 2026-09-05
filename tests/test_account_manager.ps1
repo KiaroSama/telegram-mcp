@@ -9,11 +9,33 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $projectRoot = Split-Path -Parent $PSScriptRoot
+
+function Get-LauncherSource {
+    <#
+      The launcher is the entry point PLUS everything it dot-sources.
+
+      Every source-level assertion below goes through here on purpose. Reading
+      only `Manage-Accounts.ps1` was correct while it was one file; after the
+      split it would quietly stop covering whatever moved into `account-manager\`, and a
+      source assertion that matches nothing is a test that passes for the wrong
+      reason rather than one that fails.
+    #>
+    param([Parameter(Mandatory)] [string] $Root)
+
+    $files = @(Join-Path $Root 'Manage-Accounts.ps1') + @(
+        Get-ChildItem -LiteralPath (Join-Path $Root 'account-manager') -Filter '*.ps1' -File |
+            Sort-Object Name | ForEach-Object { $_.FullName }
+    )
+    return ($files | ForEach-Object { Get-Content -LiteralPath $_ -Raw }) -join "`n"
+}
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) ("tg-accounts-" + [guid]::NewGuid())
 [void] (New-Item -ItemType Directory -Path $sandbox)
 
 try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'Manage-Accounts.ps1') -Destination $sandbox
+    # The launcher dot-sources account-manager/*.ps1, so the sandbox is not a launcher
+    # without them - and the extraction below has to see their functions too.
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'account-manager') -Destination $sandbox -Recurse
 
     $envPath = Join-Path $sandbox '.env'
     $original = @(
@@ -29,7 +51,7 @@ try {
 
     # Load only the function definitions: run the file up to the point it starts
     # the menu, by extracting the function blocks.
-    $source = Get-Content -LiteralPath (Join-Path $sandbox 'Manage-Accounts.ps1') -Raw
+    $source = Get-LauncherSource -Root $sandbox
     $PSScriptRoot_shim = $sandbox
     $functions = [regex]::Matches($source, '(?ms)^function [\w-]+ \{.*?^\}')
     if ($functions.Count -lt 6) { throw "Expected the function blocks, found $($functions.Count)." }
@@ -158,7 +180,7 @@ $($functions.Value -join "`n`n")
     # source because the failure needs File.Copy itself to fail, which cannot be
     # arranged here without a real permission change on the test machine.
     $backupSource = [regex]::Match(
-        (Get-Content -LiteralPath (Join-Path $sandbox 'Manage-Accounts.ps1') -Raw),
+        (Get-LauncherSource -Root $sandbox),
         '(?ms)^function Backup-EnvFile \{.*?^\}').Value
     if ($backupSource -notmatch 'Test-Path[^
 ]*\$backup') {
@@ -403,6 +425,7 @@ $e2e = Join-Path ([IO.Path]::GetTempPath()) ("tg-accounts-e2e-" + [guid]::NewGui
 [void] (New-Item -ItemType Directory -Path $e2e)
 try {
     Copy-Item -LiteralPath (Join-Path $projectRoot 'Manage-Accounts.ps1') -Destination $e2e
+    Copy-Item -LiteralPath (Join-Path $projectRoot 'account-manager') -Destination $e2e -Recurse
     $e2eEnv = Join-Path $e2e '.env'
     $before = @('TELEGRAM_API_ID=1', 'TELEGRAM_SESSION_STRING_WORK=1AAAAAwork')
     [IO.File]::WriteAllLines($e2eEnv, $before, [Text.UTF8Encoding]::new($false))
@@ -432,7 +455,7 @@ try {
     # the step asks for nothing. What it must NOT do is grow a phone-and-code
     # prompt of its own - that would be the second code coming back.
 
-    $source = [IO.File]::ReadAllText((Join-Path $projectRoot 'Manage-Accounts.ps1'))
+    $source = Get-LauncherSource -Root $projectRoot
 
     if ($source -notmatch 'function Invoke-SecretChatLogin') {
         throw 'Adding an account no longer finishes it against TDLib.'
