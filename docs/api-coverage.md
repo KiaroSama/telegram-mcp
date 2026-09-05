@@ -215,7 +215,7 @@ assumed missing and is not. Nothing below needs building.
 
 | Operation | Tool |
 |---|---|
-| Create a channel | `create_channel` |
+| Create a channel, private or public | `create_channel` (an optional `username` makes it public; the name is checked BEFORE the chat exists) |
 | Create a group / community | `create_group`, then `enable_forum_topics` for topic mode |
 | Ban, unban, list bans | `ban_user`, `unban_user`, `get_banned_users` |
 | Block / unblock a user | `block_user`, `unblock_user`, `get_blocked_users` |
