@@ -521,11 +521,15 @@ class _DuplicatedKeyClient(_ConnectivityClient):
 
 @pytest.mark.asyncio
 async def test_force_reconnect_times_out_instead_of_hanging(monkeypatch):
+    """connect() never returns, so the only thing that can end this is the
+    timeout inside _force_reconnect. The outer wait_for is the test's OWN bound:
+    without it, losing that timeout would hang the suite for an hour instead of
+    failing it, and a hang reports as nothing at all."""
     client = _HangingConnectClient(connected=False, authorized=True)
     monkeypatch.setattr(connection, "_RECONNECT_TIMEOUT", 0.01)
 
     with pytest.raises(RuntimeError, match="timed out"):
-        await runtime._force_reconnect(client)
+        await asyncio.wait_for(runtime._force_reconnect(client), timeout=5)
 
 
 @pytest.mark.asyncio

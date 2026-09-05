@@ -93,11 +93,50 @@ PROTECTED_PATHS = (
 )
 
 
+# git can block for as long as it likes: a held `index.lock`, a credential
+# helper that prompts, a filesystem that stopped answering. A gate that hangs
+# reports nothing, so this one is bounded and fails instead of waiting.
+GIT_TIMEOUT_SECONDS = 60
+
+
+class ScanUnavailable(RuntimeError):
+    """The list of files to scan could not be established.
+
+    Distinct from "the list is empty", which is a legitimate answer - nothing is
+    staged. This means nothing was LOOKED at, and an unlooked-at tree is not a
+    clean one.
+    """
+
+
 def tracked_files(staged: bool) -> list:
+    """The files to scan, or a refusal.
+
+    This used to pass `check=False` and read stdout regardless. Every way git can
+    fail - not a repository, a locked index, git absent from PATH - produced empty
+    stdout, which became an empty file list, which scanned clean and exited 0. The
+    gate reported a pass having examined nothing.
+    """
     command = ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"]
     if not staged:
         command = ["git", "ls-files"]
-    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    printable = " ".join(command)
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=GIT_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as expired:
+        raise ScanUnavailable(
+            f"`{printable}` did not answer within {GIT_TIMEOUT_SECONDS}s"
+        ) from expired
+    except OSError as error:
+        raise ScanUnavailable(f"`{command[0]}` could not be run: {error}") from error
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "no error output"
+        raise ScanUnavailable(f"`{printable}` exited {result.returncode}: {detail}")
     return [line for line in result.stdout.splitlines() if line.strip()]
 
 
@@ -153,7 +192,18 @@ def main() -> int:
     parser.add_argument("paths", nargs="*", help="specific files (pre-commit passes these)")
     known = parser.parse_args()
 
-    paths = known.paths or tracked_files(known.staged)
+    try:
+        paths = known.paths or tracked_files(known.staged)
+    except ScanUnavailable as unavailable:
+        print(f"secret scan COULD NOT RUN: {unavailable}", file=sys.stderr)
+        print(file=sys.stderr)
+        print(
+            "Nothing was examined, so nothing is known to be clean. That is a "
+            "refusal rather than a pass: repair the checkout and run it again.",
+            file=sys.stderr,
+        )
+        return 1
+
     findings = scan(paths)
     if not findings:
         print(f"secret scan: {len(paths)} file(s) clean")

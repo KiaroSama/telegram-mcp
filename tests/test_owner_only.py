@@ -27,8 +27,16 @@ EVERYONE = "*S-1-1-0"
 USERS = "*S-1-5-32-545"
 
 
+# icacls is local and fast, but it can block on a locked file, a redirected
+# path or a scanner holding the handle. Unbounded, that stalls the whole suite
+# with nothing to point at; bounded, it fails as itself.
+_ICACLS_TIMEOUT = 60
+
+
 def _dacl(path) -> str:
-    return subprocess.run(["icacls", str(path)], capture_output=True, text=True).stdout
+    return subprocess.run(
+        ["icacls", str(path)], capture_output=True, text=True, timeout=_ICACLS_TIMEOUT
+    ).stdout
 
 
 def _seed(path, principal, rights):
@@ -36,6 +44,7 @@ def _seed(path, principal, rights):
         ["icacls", str(path), "/grant", f"{principal}:({rights})"],
         capture_output=True,
         text=True,
+        timeout=_ICACLS_TIMEOUT,
     )
     assert result.returncode == 0, f"could not seed {principal}: {result.stderr}"
 

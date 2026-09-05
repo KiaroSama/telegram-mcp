@@ -995,6 +995,9 @@ below are what a change has to pass.
    that data reaching a fork stays reachable there, and neither the owner nor GitHub
    Support can remove it from someone else's fork. A deliberate example value belongs in
    that script's `KNOWN_PLACEHOLDERS`, so a real secret in an example file still fails.
+   It also refuses when it cannot establish what to scan at all — git absent, a held
+   `index.lock`, no repository — because an empty file list used to read as a clean one
+   and pass. Nothing examined is not the same as nothing found.
 6. Every test command on this page already goes through the guarded runner, and so does
    CI and the pre-push hook — an unbounded run has no wall ceiling and no process-tree
    cleanup, so a hang cannot be proven cleaned up. This project drives ffmpeg, ffprobe and

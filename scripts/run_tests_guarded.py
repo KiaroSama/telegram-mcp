@@ -574,11 +574,19 @@ def _terminate_tree(process: subprocess.Popen, tree: Optional[Any]) -> None:
                 pass
         # taskkill /T walks the tree by PID, and covers the case where no job
         # object could be created at all.
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            capture_output=True,
-            check=False,
-        )
+        # Bounded, because this is the watchdog's last resort and a last resort
+        # that can block forever is not one. taskkill itself waits on the
+        # processes it signals, so a child wedged in an uninterruptible wait
+        # takes this call down with it.
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                capture_output=True,
+                check=False,
+                timeout=GRACE_SECONDS,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         process.poll()
         return
 
