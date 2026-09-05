@@ -128,9 +128,28 @@ def rebuild_entities(items: Optional[List[dict]], text: str, input_users: Option
             continue
 
         fields = {"offset": offset, "length": length}
+        malformed = None
         for source, target in ENTITY_FIELDS.items():
-            if source in item:
-                fields[target] = item[source]
+            if source not in item:
+                continue
+            value = item[source]
+            # A 64-bit id has to ARRIVE as a string - every tool here says so,
+            # because `5934007978150595964` sent as a JSON number comes back
+            # `5934007978150595584`. It then has to become an int again before
+            # Telethon packs it: handed a str, `struct.pack('<q', ...)` fails
+            # deep in serialisation with an error naming neither the field nor
+            # the entity. Measured: a whole message refused at
+            # `tlobject.py:__bytes__`, the log saying only `error len=35`.
+            if target in ("document_id", "user_id") and isinstance(value, str):
+                try:
+                    value = int(value)
+                except ValueError:
+                    malformed = f"{kind} has a non-numeric {source}: {value!r}"
+                    break
+            fields[target] = value
+        if malformed:
+            problems.append(malformed)
+            continue
 
         # `mention_name` is the one kind whose READ form is not its WRITE form.
         # Telegram returns `messageEntityMentionName`, carrying a bare user id;

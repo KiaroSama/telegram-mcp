@@ -266,3 +266,67 @@ def test_every_other_entity_kind_needs_no_resolver():
     )
 
     assert isinstance(built, list) and len(built) == 2
+
+
+# --- a 64-bit id arrives as a string and must leave as an int ----------------
+
+
+def test_a_custom_emoji_id_given_as_a_string_still_serialises():
+    """The shape every tool here asks callers to use, which this path refused.
+
+    `get_custom_emoji` and `replace_custom_emoji` both insist an id is passed as
+    a STRING, because `5934007978150595964` sent as a JSON number comes back
+    `5934007978150595584`. This builder took that string and handed it straight
+    to Telethon, where `struct.pack('<q', ...)` cannot pack a `str` - and the
+    failure surfaced from inside serialisation naming neither the field nor the
+    entity, as `error len=35` at `tlobject.py:__bytes__`. A whole message with
+    35 custom emoji was refused with nothing to point at.
+
+    Serialising is the assertion, not construction: building the object never
+    failed, only writing it to the wire did.
+    """
+    built = rebuild_entities(
+        [
+            {
+                "type": "custom_emoji",
+                "offset": 0,
+                "length": 2,
+                "custom_emoji_id": "5787526061231185877",
+            }
+        ],
+        "ab",
+    )
+
+    assert not isinstance(built, str), built
+    assert built[0].document_id == 5787526061231185877
+    assert bytes(built[0]), "the entity could not be serialised for the wire"
+
+
+def test_a_custom_emoji_id_given_as_an_int_is_unchanged():
+    """`inspect_message` reports the id as a number, so both forms must work."""
+    built = rebuild_entities(
+        [
+            {
+                "type": "custom_emoji",
+                "offset": 0,
+                "length": 2,
+                "custom_emoji_id": 5787526061231185877,
+            }
+        ],
+        "ab",
+    )
+
+    assert built[0].document_id == 5787526061231185877
+    assert bytes(built[0])
+
+
+def test_a_non_numeric_id_is_refused_by_name():
+    """Refusing has to say WHICH field, or the caller is back to the opaque
+    serialisation error this fix exists to remove."""
+    refused = rebuild_entities(
+        [{"type": "custom_emoji", "offset": 0, "length": 2, "custom_emoji_id": "not-a-number"}],
+        "ab",
+    )
+
+    assert isinstance(refused, str)
+    assert "custom_emoji_id" in refused and "not-a-number" in refused
