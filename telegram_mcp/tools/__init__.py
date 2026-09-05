@@ -35,6 +35,8 @@ from telegram_mcp.tools.later_rights import *
 from telegram_mcp.tools.rich_messages import *
 from telegram_mcp.tools.mini_apps import *
 from telegram_mcp.tools.invite_links import *
+from telegram_mcp.tools.quick_replies import *
+from telegram_mcp.tools.custom_emoji_edit import *
 from telegram_mcp.tools.polls import *
 from telegram_mcp.tools.stories import *
 from telegram_mcp.tools.channel_admin import *

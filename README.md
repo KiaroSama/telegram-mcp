@@ -65,7 +65,7 @@ answered* and *the answer is true* — and that gap is where an agent quietly ge
 
 ## What It Can Do
 
-The server registers **206 MCP tools**. That count is measured, not estimated — see
+The server registers **212 MCP tools**. That count is measured, not estimated — see
 [docs/api-coverage.md](docs/api-coverage.md), which also records what Telegram has that this
 server deliberately does not. The tools group into these areas:
 
@@ -109,6 +109,24 @@ server deliberately does not. The tools group into these areas:
   username removes the public address and makes it private; the freed name then becomes
   claimable by anyone, including someone who would like to be mistaken for it, which is why the
   tool says so and refuses to get there by an omitted argument.
+- **Swapping the premium emoji in a banner:** `inspect_custom_emoji` lists the custom-emoji
+  document ids a message carries and where each sits; `replace_custom_emoji` swaps one — or all
+  of them — for a new id and edits the message in place. The text is never retyped, so bold
+  runs, links and any emoji you did not target survive exactly as they were. That is the whole
+  reason it is a tool rather than "read it and send it again": a custom emoji is an entity with
+  a `document_id` pinned to a UTF-16 offset, and rebuilding the message by hand loses every
+  other entity with it. Omitting `old_document_id` replaces every custom emoji, which is right
+  for a banner built from one repeated emoji and wrong for a message mixing several — so the
+  result always says how many changed. **Pass ids as strings:** they exceed JSON's exact
+  integer range, and as numbers they arrive as a different emoji.
+- **Quick replies, the writing half:** `add_quick_reply` stores a message under a shortcut,
+  `read_quick_reply` lists what a shortcut holds, `rename_quick_reply` renames one and
+  `delete_quick_reply` removes either specific messages or the whole shortcut. Telegram has no
+  "create shortcut" method at all — a shortcut exists the moment a message is filed under its
+  name, which is an ordinary send addressed to your own account with a `quick_reply_shortcut`
+  flag. Nothing is delivered to anyone. The consequence worth knowing: **a misspelled name
+  makes a second shortcut instead of failing**, so the result says whether it created or
+  appended.
 - **Tables and other rich blocks:** a message written with Telegram's newer rich formatting arrives through MTProto **completely empty** - no text, no entities, no media, and no error, because its body is a `messageRichMessage`, a content type that does not exist in the TL layer Telethon announces. Measured on a live message that renders as a bordered two-column table with premium emoji: `inspect_message` and `get_message_context` both reported `[empty]` and nothing was raised. `read_rich_message` reads the same message over TDLib and returns every block - a table as structured `rows` (each cell with its header flag and any colspan/rowspan) and as ready-made `markdown`. Nested formatting is flattened rather than dropped, so bold runs and a caption's link survive.
 - **Secret chats:** create an end-to-end encrypted chat, send text, photos and voice into it, read its history, arm its self-destruct timer, and close it. These nine tools do not run on Telethon, which never implemented MTProto 2.0 — they run on TDLib, Telegram's own client library. `tdjson` ships with the project, so for an account added through `Manage-Accounts.ps1` there is nothing extra to do: the session generator signs the account in to TDLib as well, in the same run, reusing the two-step password you have just typed rather than asking for it again. TDLib cannot read a Telethon session and offers no way to import one, so the account does appear as another device — that part is the protocol. `secret_chat_status` says what is missing for an account that arrived some other way, and `scripts/secret_chat_login.py <account>` finishes one by hand.
 - **Rate limits are an instruction, not an error.** When Telegram limits the account, the tool returns the number of seconds and an explicit do-not-retry rather than an error code — an agent handed a code retries, and every retry inside the window extends the penalty.
