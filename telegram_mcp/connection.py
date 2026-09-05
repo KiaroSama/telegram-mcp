@@ -43,7 +43,7 @@ from telegram_mcp.settings import (
     StartupMessage,
     ValidationError,
 )
-from telegram_mcp.settings import _parse_bool_env, state_dir
+from telegram_mcp.settings import state_dir
 
 # Where log records go, and what they may contain, now lives next door: it is a
 # different job from reaching Telegram, and this file was carrying both. The
@@ -62,6 +62,18 @@ from telegram_mcp.log_setup import (  # noqa: F401  (re-exported)
 )
 from telegram_mcp.singleton import try_lock_exclusive
 
+# Proxy configuration moved next door: turning TELEGRAM_PROXY_* into Telethon
+# kwargs never touches a socket or a session, and this file was carrying both
+# jobs. Re-exported for the same reason log_setup's names are - `runtime` star
+# imports this module and `runner` imports parse_port from it.
+from telegram_mcp.proxy import (  # noqa: F401  (re-exported)
+    _PROXY_TYPES_ALL,
+    _PROXY_TYPES_SOCKS_HTTP,
+    _build_proxy_for_label,
+    _get_proxy_env,
+    parse_port,
+)
+
 # The installation, for the two things that still resolve against it: a session
 # file an older install left beside main.py, and the historic `script_dir` name
 # the tools re-export.
@@ -71,112 +83,6 @@ script_dir = os.path.dirname(package_dir)
 # ---------------------------------------------------------------------------
 # Multi-account configuration
 # ---------------------------------------------------------------------------
-
-
-_PROXY_TYPES_SOCKS_HTTP = {"socks5", "socks4", "http"}
-_PROXY_TYPES_ALL = _PROXY_TYPES_SOCKS_HTTP | {"mtproxy"}
-
-# TCP ports a socket can actually be reached on. 0 means "any free port" to
-# bind() and nothing at all to connect(), and the rest are simply out of range.
-_MIN_PORT = 1
-_MAX_PORT = 65535
-
-
-def parse_port(raw: str, variable: str) -> int:
-    """Parse a TCP port from configuration, refusing anything unreachable.
-
-    Shared by the proxy settings and the HTTP transport's ``MCP_PORT``: both
-    used to take the value on trust, so ``0``/``-1``/``70000`` were carried all
-    the way to the first connection attempt and surfaced there as an unrelated
-    socket error.
-    """
-    try:
-        port = int(raw)
-    except (TypeError, ValueError) as exc:
-        raise ValidationError(
-            f"{variable} must be an integer between {_MIN_PORT} and {_MAX_PORT}, got {raw!r}."
-        ) from exc
-    if not _MIN_PORT <= port <= _MAX_PORT:
-        raise ValidationError(
-            f"{variable} must be between {_MIN_PORT} and {_MAX_PORT}, got {port}."
-        )
-    return port
-
-
-def _get_proxy_env(name: str, label: str) -> Optional[str]:
-    """Resolve a TELEGRAM_PROXY_* env var with optional ``_<LABEL>`` suffix.
-
-    Per-account values override the unsuffixed defaults so a global proxy can
-    coexist with per-label overrides.
-    """
-    suffixed = os.getenv(f"TELEGRAM_PROXY_{name}_{label.upper()}")
-    if suffixed:
-        return suffixed
-    return os.getenv(f"TELEGRAM_PROXY_{name}") or None
-
-
-def _build_proxy_for_label(label: str) -> tuple[Optional[Any], Optional[Any]]:
-    """Return ``(proxy, connection)`` kwargs for ``TelegramClient`` for a label.
-
-    Reads ``TELEGRAM_PROXY_*`` env vars (with optional ``_<LABEL>`` suffix).
-    Returns ``(None, None)`` when no proxy is configured. Raises
-    :class:`ValidationError` for malformed configuration so the server fails
-    fast instead of silently bypassing the proxy.
-    """
-    proxy_type = _get_proxy_env("TYPE", label)
-    if not proxy_type:
-        return None, None
-
-    proxy_type = proxy_type.strip().lower()
-    if proxy_type not in _PROXY_TYPES_ALL:
-        raise ValidationError(
-            f"Invalid TELEGRAM_PROXY_TYPE '{proxy_type}'. "
-            f"Expected one of: {', '.join(sorted(_PROXY_TYPES_ALL))}."
-        )
-
-    host = _get_proxy_env("HOST", label)
-    port_raw = _get_proxy_env("PORT", label)
-    if not host or not port_raw:
-        raise ValidationError(
-            "TELEGRAM_PROXY_HOST and TELEGRAM_PROXY_PORT are required when "
-            "TELEGRAM_PROXY_TYPE is set."
-        )
-    port = parse_port(port_raw, "TELEGRAM_PROXY_PORT")
-
-    if proxy_type == "mtproxy":
-        secret = _get_proxy_env("SECRET", label)
-        if not secret:
-            raise ValidationError("TELEGRAM_PROXY_SECRET is required for mtproxy.")
-        try:
-            from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
-        except ImportError as exc:  # pragma: no cover - defensive guard
-            raise ValidationError(
-                "Telethon MTProxy connection class is unavailable; upgrade telethon."
-            ) from exc
-        return (host, port, secret), ConnectionTcpMTProxyRandomizedIntermediate
-
-    # SOCKS4/SOCKS5/HTTP via python-socks (Telethon's optional dependency).
-    try:
-        import python_socks  # noqa: F401
-    except ImportError as exc:
-        raise ValidationError(
-            f"Proxy type '{proxy_type}' requires the 'python-socks' package. "
-            "Install it with `pip install python-socks` or `uv sync --extra proxy`."
-        ) from exc
-
-    proxy: dict[str, Any] = {
-        "proxy_type": proxy_type,
-        "addr": host,
-        "port": port,
-        "rdns": _parse_bool_env(_get_proxy_env("RDNS", label), default=True),
-    }
-    username = _get_proxy_env("USERNAME", label)
-    password = _get_proxy_env("PASSWORD", label)
-    if username:
-        proxy["username"] = username
-    if password:
-        proxy["password"] = password
-    return proxy, None
 
 
 # --- File-based sessions -----------------------------------------------------
@@ -741,11 +647,41 @@ def refresh_accounts() -> list:
     return sorted(set(changed))
 
 
+def _account_label_of(key: str) -> Optional[str]:
+    """The account label an environment variable configures, or ``None``.
+
+    The same mapping :func:`_discover_accounts` applies, because :func:`_replaced`
+    has to select the same variables it does. It selected them by
+    ``key.upper().endswith(label.upper())``, which is wrong in both directions:
+    ``TELEGRAM_SESSION_STRING_NETWORK`` ends with ``WORK``, so re-logging in
+    `network` retired the live `work` client too - and the DEFAULT account's
+    variables carry no suffix at all, so nothing ever matched ``default`` and its
+    re-login was noticed, recorded as seen, and then silently ignored. That left
+    the server holding the session Telegram had just invalidated, which is the
+    exact AuthKeyUnregisteredError this module exists to prevent.
+    """
+    for prefix in _ACCOUNT_PREFIXES:
+        if not key.startswith(prefix):
+            continue
+        suffix = key[len(prefix) :]
+        # "" is TELEGRAM_SESSION_STRING/NAME; "S" is only the TELEGRAM_SESSION_STRINGS
+        # pool, which has no NAME counterpart. `_discover_accounts` reads all of
+        # these as the default account, and anything else as no account at all.
+        if suffix == "" or (suffix == "S" and prefix.endswith("STRING")):
+            return "default"
+        if suffix.startswith("_"):
+            try:
+                return normalise_account_label(suffix[1:]).lower()
+            except ValueError:
+                return None
+        return None
+    return None
+
+
 def _replaced(label: str, digests: dict) -> bool:
     """Whether this label's session value differs from the one in use."""
-    keys = [k for k in digests if k.upper().endswith(label.upper())] or []
-    before = {k: v for k, v in _env_digests.items() if k in keys}
-    after = {k: v for k, v in digests.items() if k in keys}
+    before = {k: v for k, v in _env_digests.items() if _account_label_of(k) == label}
+    after = {k: v for k, v in digests.items() if _account_label_of(k) == label}
     return before != after
 
 

@@ -179,8 +179,25 @@ def _contains_forbidden_path_patterns(raw_path: str) -> Optional[str]:
         return "Path must not be empty."
     if any(token in value for token in DISALLOWED_PATH_PATTERNS):
         return "Path contains disallowed wildcard/shell patterns."
-    if ".." in Path(value).parts:
+    candidate = Path(value)
+    if ".." in candidate.parts:
         return "Path traversal is not allowed."
+    # A colon separates a DRIVE and nothing else. Inside a component it names an
+    # NTFS alternate data stream, so `file_path="notes:hidden"` writes the bytes
+    # into a stream of `notes` and leaves a visible, EMPTY `notes` behind -
+    # measured: the folder listed one 0-byte file and the payload was not in it.
+    # `safe_suffix` already refuses this in the sender's extension and says why;
+    # the caller's own name reached `create_exclusive` unchecked, which is the
+    # same hole through the other door. Refused on every platform, as the
+    # extension rules above are, so one answer holds wherever the server runs.
+    parts = candidate.parts
+    if candidate.drive or candidate.root:
+        parts = parts[1:]
+    if any(":" in part for part in parts):
+        return (
+            "Path components must not contain ':' - on Windows that names an "
+            "alternate data stream rather than a file."
+        )
     return None
 
 

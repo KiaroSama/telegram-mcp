@@ -302,3 +302,41 @@ async def test_list_roots_unexpected_error_denies_without_opt_in(tmp_path, monke
     )
     assert status == runtime.ROOTS_STATUS_ERROR
     assert roots == []
+
+
+@pytest.mark.asyncio
+async def test_a_stream_name_is_refused_before_it_can_reach_the_disk(tmp_path, monkeypatch):
+    """`file_path="notes:hidden"` wrote an NTFS alternate data stream.
+
+    The colon does not name a file, it names a stream OF one: the bytes land in
+    `notes:hidden.bin` and the folder shows a single, visible, EMPTY `notes`.
+    Measured before the fix - one 0-byte file in the listing and the payload
+    nowhere a reader would look, with the reply reporting a path that describes
+    nothing on disk. `safe_suffix` already refuses this in the SENDER's
+    extension and says exactly why; the caller's own name reached
+    `create_exclusive` unchecked, which is the same hole through the other door.
+
+    Guarded in `_contains_forbidden_path_patterns`, so the READ gate refuses it
+    too rather than each caller remembering to.
+    """
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+
+    for raw in ("notes:hidden", "notes:hidden.bin", "sub/notes:hidden.bin"):
+        assert "':'" in (
+            runtime._contains_forbidden_path_patterns(raw) or ""
+        ), f"{raw!r} was not recognised as a stream name"
+
+    resolved, error = await file_roots._resolve_writable_file_path(
+        raw_path="notes:hidden",
+        default_filename="fallback.bin",
+        ctx=None,
+        tool_name="download_media",
+    )
+    assert resolved is None, f"a stream name resolved to {resolved}"
+    assert "':'" in error
+
+    # A drive letter is the one colon that IS a path separator, and refusing it
+    # would disable every absolute path on Windows.
+    assert runtime._contains_forbidden_path_patterns(str(root / "plain.bin")) is None

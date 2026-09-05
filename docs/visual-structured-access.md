@@ -558,6 +558,20 @@ the stream is VP9 — `-c:v` applies to every input, and the same path extracts 
 video notes. The measurement has the same trap as the bug: probing with the default
 decoder calls every VP9 file opaque, correct ones included.
 
+Two later findings closed the same promise from the other two directions, because
+"transparency survives" was only ever true on one path:
+
+* **The probe had to be told to look at video.** `ffprobe` returns every track in
+  container order, and the codec was read off the first one — so a VP9 WebM that
+  carries sound reported its AUDIO codec, `libvpx-vp9` was never named, and the
+  alpha went with it. The safeguard above was in place and simply not reached.
+  The probe now passes `-select_streams v`.
+* **The Pillow path threw alpha away outright.** Animated stickers that do not go
+  through ffmpeg were converted with a flat `convert("RGB")`, painting every clear
+  pixel black — while the single-frame path returned the same file with its
+  transparency intact. The two halves of one feature disagreed. Frames are now
+  converted to RGBA where the source has any alpha, and RGB only where it does not.
+
 ## Module layout
 
 The project no longer merges from the one it came from, so this list is no longer a

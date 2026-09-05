@@ -126,7 +126,18 @@ def animation(path: str, count: int, side: int, max_bytes: int, max_frames: int)
         for index, frame in enumerate(ImageSequence.Iterator(source)):
             if index not in indexes:
                 continue
-            data, meta = encode_image(frame.convert("RGB"), image_format="png", max_dimension=side)
+            # RGBA where the frame has any, RGB where it does not. A flat
+            # convert("RGB") threw the alpha away: a transparent animated sticker
+            # came back with every clear pixel painted black, silently, while
+            # `still` above returned the SAME file with its transparency intact.
+            # The ffmpeg branch of this feature names libvpx-vp9 for exactly this
+            # reason, so the two halves disagreed about the same promise.
+            transparent = frame.mode in ("RGBA", "LA", "PA") or "transparency" in frame.info
+            data, meta = encode_image(
+                frame.convert("RGBA" if transparent else "RGB"),
+                image_format="png",
+                max_dimension=side,
+            )
             produced += len(data)
             if produced > max_bytes:
                 raise _Refused(

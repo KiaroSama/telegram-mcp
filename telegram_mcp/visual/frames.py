@@ -351,6 +351,16 @@ def _probe(
             "ffprobe",
             "-v",
             "error",
+            # Video streams only. Without it `streams` is every track in the
+            # container in container order, and the codec below was taken off the
+            # first one - so a VP9 webm that happens to carry sound reported
+            # "opus", the `-c:v libvpx-vp9` in `_frames_with_ffmpeg` was not
+            # named, and the sticker's alpha was dropped with nothing reporting a
+            # problem. Measured on two files sharing one video stream: audio-first
+            # came back RGB and opaque, video-only came back RGBA. It also shrinks
+            # the reply, which is what MAX_PROBE_OUTPUT_BYTES exists to bound.
+            "-select_streams",
+            "v",
             "-show_entries",
             "format=duration:stream=avg_frame_rate,codec_name",
             "-of",
@@ -374,10 +384,10 @@ def _probe(
     rate = None
     codec = None
     for stream in payload.get("streams") or []:
-        # ffprobe reports a rational, e.g. "30000/1001". A still image reports
-        # "0/0", which must not become a division by zero.
         if codec is None:
             codec = stream.get("codec_name") or None
+        # ffprobe reports a rational, e.g. "30000/1001". A still image reports
+        # "0/0", which must not become a division by zero.
         numerator, _, denominator = str(stream.get("avg_frame_rate") or "").partition("/")
         try:
             top, bottom = float(numerator), float(denominator or 1)

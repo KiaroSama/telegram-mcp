@@ -352,8 +352,15 @@ class TDLibClient:
         try:
             result = await asyncio.wait_for(future, timeout=timeout)
         except asyncio.TimeoutError:
-            self._pending.pop(extra, None)
             raise TimeoutError(f"TDLib did not answer {obj['@type']} within {timeout:.0f}s")
+        finally:
+            # `finally`, not the timeout branch alone. `_handle_on_loop` removes an
+            # entry only when a reply arrives, and for a call nobody is waiting for
+            # one never does - so a CANCELLED request (an MCP client that hung up,
+            # a sibling in a gather that failed) left its future here for the life
+            # of a client that lives as long as the server. Same leak the timeout
+            # branch was already written to prevent, through the other door.
+            self._pending.pop(extra, None)
         if result.get("@type") == "error":
             raise TDLibError(result.get("code", 0), result.get("message", "unknown error"))
         return result

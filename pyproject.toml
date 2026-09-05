@@ -156,6 +156,7 @@ source = [
     "telegram_mcp.owner_only",
     "telegram_mcp.paging",
     "telegram_mcp.photo_source",
+    "telegram_mcp.proxy",
     "telegram_mcp.runner",
     "telegram_mcp.runtime",
     "telegram_mcp.safe_log",

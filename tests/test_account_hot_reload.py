@@ -45,11 +45,18 @@ def env_file(tmp_path, monkeypatch):
 
 
 def _discover(env):
-    """Label -> client, from the same variables the real discovery reads."""
+    """Label -> client, from the same variables the real discovery reads.
+
+    The unsuffixed variable is here because it is the single-account setup, and
+    the label it produces ("default") is the one `_replaced` used to be unable to
+    match at all.
+    """
     built = {}
     for key, value in (env or {}).items():
         if key.startswith("TELEGRAM_SESSION_STRING_") and value:
             built[key[len("TELEGRAM_SESSION_STRING_") :].lower()] = _Client(key)
+        elif key == "TELEGRAM_SESSION_STRING" and value:
+            built["default"] = _Client(key)
     return built
 
 
@@ -179,3 +186,45 @@ def test_the_fingerprint_of_an_unchanged_file_is_stable(env_file):
     path = env_file(["TELEGRAM_SESSION_STRING_ONE=aaa"])
 
     assert conn._env_fingerprint(str(path)) == conn._env_fingerprint(str(path))
+
+
+def test_a_re_login_of_the_default_account_replaces_its_client(env_file):
+    """The single-account setup, which is the common one and was the broken one.
+
+    `_replaced` selected an account's variables with `key.endswith(label)`, and
+    the default account's variable is the UNSUFFIXED `TELEGRAM_SESSION_STRING` -
+    which ends with nothing resembling "default". So the comparison ran over two
+    empty dicts, reported "unchanged", and `refresh_accounts` then recorded the
+    new digest as seen. The re-login was consumed and discarded in one call: the
+    server kept the session Telegram had just invalidated, and no later refresh
+    could ever notice - which is the AuthKeyUnregisteredError this module exists
+    to prevent.
+    """
+    _adopt(env_file, ["TELEGRAM_SESSION_STRING=aaa"])
+    stale = conn.clients["default"]
+
+    env_file(["TELEGRAM_SESSION_STRING=zzz"])
+    changed = conn.refresh_accounts()
+
+    assert "default" in changed, "the default account's re-login was not reported"
+    assert conn.clients["default"] is not stale, "the dead default session is still in use"
+    assert stale.disconnected, "the replaced default client was left holding its socket"
+    assert conn.refresh_accounts() == [], "the change was reported twice"
+
+
+def test_one_account_whose_label_ends_another_is_left_alone(env_file):
+    """`work` and `network`: a suffix match answers for the wrong account.
+
+    `TELEGRAM_SESSION_STRING_NETWORK`.endswith("WORK") is true, so re-logging in
+    `network` reported `work` as replaced too - retiring a live client and
+    dropping its connection for an edit that never touched it.
+    """
+    _adopt(env_file, ["TELEGRAM_SESSION_STRING_WORK=aaa", "TELEGRAM_SESSION_STRING_NETWORK=bbb"])
+    untouched = conn.clients["work"]
+
+    env_file(["TELEGRAM_SESSION_STRING_WORK=aaa", "TELEGRAM_SESSION_STRING_NETWORK=ccc"])
+    changed = conn.refresh_accounts()
+
+    assert changed == ["network"], f"only 'network' changed, but {changed} was reported"
+    assert conn.clients["work"] is untouched, "'work' was rebuilt by an edit to 'network'"
+    assert not untouched.disconnected, "'work' lost its connection to a neighbour's re-login"

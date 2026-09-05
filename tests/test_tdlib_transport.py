@@ -199,6 +199,30 @@ async def test_a_request_that_is_never_answered_times_out_and_stops_waiting(fake
 
 
 @pytest.mark.asyncio
+async def test_a_cancelled_request_takes_its_pending_entry_with_it(fake, tmp_path):
+    """The same leak as the timeout above, reached by cancellation instead.
+
+    Only the timeout branch cleaned up, so a call the caller stopped waiting for -
+    an MCP client that hung up, a sibling in a gather that raised - left its future
+    in `_pending` for ever: nothing else removes an entry except a reply arriving,
+    and for an abandoned request one never does. Measured: one entry per cancelled
+    call on a client that lives as long as the server.
+    """
+    client = await _started(fake, tmp_path)
+
+    pending = asyncio.ensure_future(client.request({"@type": "getChat"}, timeout=30))
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    assert client._pending, "the request never registered, so this proves nothing"
+
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+    assert client._pending == {}, "a cancelled call left its future behind"
+
+
+@pytest.mark.asyncio
 async def test_a_request_before_start_is_refused_clearly(fake, tmp_path):
     client = tdlib.TDLibClient("acct", database_dir=tmp_path / "db")
 
