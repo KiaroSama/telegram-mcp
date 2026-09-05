@@ -1,7 +1,7 @@
 # Contributing
 
 This is a Telegram MCP server: Telethon talks to Telegram, the MCP SDK's `MCPServer` exposes the tools to an
-MCP client. It is Apache-2.0, and what you contribute is under that licence too.
+MCP client. It is GPL-3.0-or-later, and what you contribute is under that licence too.
 
 ## Setup
 

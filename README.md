@@ -3,14 +3,14 @@
 </div>
 
 ![MCP Badge](https://badge.mcpx.dev)
-[![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue?style=flat-square)](LICENSE)
+[![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
 [![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
 
 Drive a **real Telegram account** from an MCP client. Not a bot account — your account, with
 its chats, its channels, its admin rights and its history, exposed as tools an agent can call.
 
-**Apache License 2.0.** See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+**GNU GPL v3 or later.** See [LICENSE](LICENSE) and [NOTICE](NOTICE).
 
 ## What makes this one different
 
@@ -1132,12 +1132,12 @@ If this project helps you, donations are appreciated.
 
 ## Licence
 
-**Apache License 2.0.** See [LICENSE](LICENSE) for the text and [NOTICE](NOTICE) for the
+**GNU GPL v3 or later.** See [LICENSE](LICENSE) for the text and [NOTICE](NOTICE) for the
 copyright, the prior-work attribution and the licence history.
 
-This project was GPL-3.0-or-later between 2026-08-25 and 2026-09-05 and is now Apache-2.0 — the
-same licence as the work it derives from. Anyone who took a copy under the GPL keeps that grant;
-a licence already given cannot be withdrawn.
+This project was Apache-2.0 between 2026-09-05 and 2026-09-06, and GPL-3.0-or-later before and
+after that. Anyone who took a copy under Apache-2.0 keeps that grant: a licence already given
+cannot be withdrawn, in either direction.
 
 ## Built on
 
@@ -1148,5 +1148,5 @@ a licence already given cannot be withdrawn.
   announced layer cannot carry
 - [Model Context Protocol](https://modelcontextprotocol.io/)
 
-Prior-work attribution, which the Apache License requires this project to keep, is in
+Prior-work attribution, which the prior work's Apache licence requires this project to keep, is in
 [NOTICE](NOTICE).

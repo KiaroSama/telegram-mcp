@@ -10,7 +10,7 @@ readme = "README.md"
 authors = [
     {name = "KiaroSama"}
 ]
-license = "Apache-2.0"
+license = "GPL-3.0-or-later"
 license-files = ["LICENSE", "NOTICE"]
 # "Private :: Do Not Upload" is not a registered trove prefix, so PyPI rejects any
 # upload carrying it. That is deliberate and survives every licence change: the
