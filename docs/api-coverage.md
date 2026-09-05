@@ -274,11 +274,27 @@ the tree, which is the cost of having deferred them.
    `messages_view.py`), `tools/events.py` 931 -> 668 (`events_store.py`) and
    `tools/contacts.py` 864 -> 655 (`contact_aliases.py` - the three alias tools own a
    local store, the other fourteen only read and write what Telegram holds). The files
-   still over 800 were assessed and deliberately left whole: `visual/capture.py` and
-   `visual/frames.py` are each one responsibility over shared plumbing that both halves
-   need, and `handles.py`, `runtime.py`, `connection.py` and `Manage-Accounts.ps1` are
-   single cohesive cores. Cohesion outranks the line count; a thin fragment is worse than
-   a long file.
+   still over 800 were assessed and left whole at the time: `visual/capture.py` and
+   `visual/frames.py` were read as one responsibility over shared plumbing, and
+   `handles.py`, `runtime.py`, `connection.py` and `Manage-Accounts.ps1` as single
+   cohesive cores.
+
+   **Re-examined 2026-09-05, and four of those five were wrong.** Each had a seam that
+   was a layer rather than a fragment: `frames.py` 956 -> 737 (`visual/decode_budget.py`
+   - what a decode may spend, which all three backends share and none of them owns),
+   `capture.py` 921 -> 752 (`visual/winapi.py` - the ctypes signature table),
+   `handles.py` 902 -> 790 (`syscalls.py` - the OS port the policy is tested against),
+   `runtime.py` 905 -> 662 (`errors.py`), `connection.py` 984 -> 757 (`session_files.py`
+   and, earlier, `proxy.py`). Eleven modules became twenty-two in total.
+
+   `Manage-Accounts.ps1` (1152) stays whole, and now for a reason stronger than
+   cohesion: `tests/test_account_manager.ps1` loads it by regex-extracting function
+   blocks from its raw source, and the end-to-end test copies that ONE file into a
+   sandbox and runs it. Single-file is a tested contract there, not an aesthetic.
+
+   The principle is unchanged - cohesion outranks the line count, and a thin fragment is
+   worse than a long file. What changed is the answer to "is there a real layer in
+   here", which is worth re-asking rather than settling once.
 
 ### Forums, fixed at source
 

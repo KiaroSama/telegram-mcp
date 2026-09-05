@@ -7,9 +7,15 @@ re-derive them.
 
 `TELEGRAM_EXPOSED_TOOLS` is the only lever an operator has for narrowing what an
 agent can do with their Telegram account. Its grammar is
-`read-only+<tool>,<tool>` parsed against literal tool names
-(`telegram_mcp/runtime.py:180-246`), and an unknown name aborts startup
-(`:237`). That abort is correct and must survive any change here.
+`read-only+<tool>,<tool>` parsed against literal tool names by
+`_get_exposed_tools_mode` and applied by `_apply_exposed_tools_mode`, both in
+`telegram_mcp/runtime.py`; an unknown name aborts startup from the
+`_EXPOSED_TOOLS_MODES` check inside the first. That abort is correct and must
+survive any change here.
+
+Named rather than cited by line: this file used to point at
+`runtime.py:180-246`, and the 2026-09-05 split of the error layer out of that
+module moved every one of those numbers.
 
 The question is whether a token like `+module:messages` or `+safe` should be
 allowed beside a literal name.
