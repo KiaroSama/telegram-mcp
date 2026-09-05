@@ -1,9 +1,15 @@
 """Connecting as an account: proxies, the session pool, discovery, reconnection.
 
-Split out of `test_runtime.py` when the code did the same. The subject is
-`telegram_mcp/connection.py`, and the patch seams are on THAT module - it owns the
-names its own functions read, so rebinding `runtime._build_client` would set a second
-name and change nothing.
+Split out of `test_runtime.py` when the code did the same. A patch seam goes on the
+module whose function READS it - a function looks a global up in its own module, so
+rebinding `runtime._build_client` would set a second name and change nothing.
+
+`connection.py` has since split again: `_build_client` and the session-file handling
+moved to `telegram_mcp/session_files.py` and are re-imported by `connection`. So
+`connection.TelegramClient` still exists and patching it still SUCCEEDS, while
+`_build_client` goes on reading `session_files.TelegramClient` - a green test over an
+unpatched constructor. `StringSession` and `_build_client` itself stay on
+`connection`, which is where `_discover_accounts` reads them.
 """
 
 import asyncio
@@ -12,7 +18,7 @@ import sys
 
 import pytest
 
-from telegram_mcp import connection, runtime
+from telegram_mcp import connection, runtime, session_files
 
 
 def _clear_session_env(monkeypatch):
@@ -37,7 +43,7 @@ def test_discover_accounts_supports_suffixed_and_default_sessions(monkeypatch):
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK", "work-session")
     monkeypatch.setenv("TELEGRAM_SESSION_NAME_PERSONAL", "personal.session")
     monkeypatch.setenv("TELEGRAM_SESSION_STRING", "default-session")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     # An object, not a string: that is what `StringSession` really returns, and
     # it is how a string session is told apart from a file-session NAME, which
     # gets resolved to a real location before Telethon sees it.
@@ -204,7 +210,7 @@ def test_discover_accounts_passes_proxy_kwargs_to_client(monkeypatch):
     monkeypatch.setenv("TELEGRAM_PROXY_HOST", "mtproxy.example")
     monkeypatch.setenv("TELEGRAM_PROXY_PORT", "443")
     monkeypatch.setenv("TELEGRAM_PROXY_SECRET", "ee0123456789abcdef")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
     accounts = runtime._discover_accounts()
@@ -224,7 +230,7 @@ def test_discover_accounts_passes_device_identity_kwargs_to_client(monkeypatch):
     monkeypatch.setenv("TELEGRAM_SESSION_STRING", "default-session")
     monkeypatch.setenv("TELEGRAM_DEVICE_MODEL", "Telegram MCP")
     monkeypatch.setenv("TELEGRAM_APP_VERSION", "3.1")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
     accounts = runtime._discover_accounts()
@@ -579,7 +585,7 @@ def test_build_proxy_rejects_a_port_outside_the_usable_range(monkeypatch, port):
 
 
 def _fake_client_env(monkeypatch):
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
 
@@ -650,7 +656,7 @@ def test_discovery_canonicalises_a_label_the_same_way_the_writers_do(monkeypatch
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK-2", "hyphen-session")
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_Second Account", "spaced-session")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
     accounts = runtime._discover_accounts()
@@ -667,7 +673,7 @@ def test_two_labels_that_normalise_to_one_account_are_refused(monkeypatch):
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK-2", "one")
     monkeypatch.setenv("TELEGRAM_SESSION_STRING_WORK_2", "two")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
     with pytest.raises(connection.ValidationError) as caught:
@@ -685,7 +691,7 @@ def test_a_label_the_canonical_rule_refuses_is_reported_not_registered(monkeypat
     """
     _clear_session_env(monkeypatch)
     monkeypatch.setenv("TELEGRAM_SESSION_STRING____", "unusable")
-    monkeypatch.setattr(connection, "TelegramClient", _FakeTelegramClient)
+    monkeypatch.setattr(session_files, "TelegramClient", _FakeTelegramClient)
     monkeypatch.setattr(connection, "StringSession", lambda value: f"StringSession:{value}")
 
     with pytest.raises(connection.ValidationError) as caught:

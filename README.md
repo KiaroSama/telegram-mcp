@@ -838,14 +838,18 @@ own. That is what `tests/test_tool_registry.py` guards.
 ```text
 main.py                       # historical entrypoint and compatibility exports
 telegram_mcp/settings.py      # environment configuration; the bottom of the import graph
-telegram_mcp/runtime.py       # shared MCP setup, validation, entity resolution, formatting
+telegram_mcp/runtime.py       # shared MCP setup, entity resolution, formatting
+telegram_mcp/errors.py        # error classes, refusal wording, id validation
 telegram_mcp/connection.py    # the session pool, account routing, reconnection
+telegram_mcp/session_files.py # session files on disk, and the client built over one
 telegram_mcp/proxy.py         # TELEGRAM_PROXY_* into Telethon kwargs; touches no socket
 telegram_mcp/file_roots.py    # allowed roots, and resolving a caller's path inside one
 telegram_mcp/handles.py       # file access bound to an open handle, not to a pathname
+telegram_mcp/syscalls.py      # the OS calls handles.py opens through, injectable in tests
 telegram_mcp/safe_log.py      # the only module allowed to write a log line
 telegram_mcp/paging.py        # one limit rule for every list and search tool
 telegram_mcp/aliases.py       # calling a contact what the operator calls them
+telegram_mcp/alias_store.py   # that name on disk: addressing, locking, protection
 telegram_mcp/runner.py        # application startup
 telegram_mcp/tools/           # tool modules grouped by domain
 telegram_mcp/message_view.py  # deep structured message view

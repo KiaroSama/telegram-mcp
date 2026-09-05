@@ -46,8 +46,15 @@ from pathlib import Path
 import pytest
 from telethon.sessions import SQLiteSession
 
-from telegram_mcp import connection, settings
+from telegram_mcp import connection, session_files, settings
 from telegram_mcp.owner_only import restrict_to_owner_strict, verify_owner_only
+
+# The session files and the client that opens them live in `session_files`
+# now; `connection` re-imports them, so calling through `connection` still
+# reaches the same function. PATCHING through it does not: a function looks a
+# global up in ITS OWN module, so a seam rebound on `connection` would be set
+# on a name nothing reads and the test would pass having tested nothing. Each
+# seam below therefore goes on the module whose function reads it.
 
 posix_modes_only = pytest.mark.skipif(
     os.name == "nt",
@@ -75,7 +82,7 @@ def test_a_bare_session_name_lands_in_the_private_state_directory(tmp_path, monk
     monkeypatch.chdir(tmp_path)
     # An empty stand-in for the installation directory, so the result does not
     # depend on whether this checkout has ever been used to run the server.
-    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
+    monkeypatch.setattr(session_files, "script_dir", str(tmp_path / "install"))
 
     resolved = connection.session_file_path("telegram_session")
 
@@ -107,7 +114,7 @@ def test_a_session_already_beside_the_installation_is_moved_somewhere_private(
     # directory is a separate fallback with its own test.
     install = tmp_path / "install"
     install.mkdir()
-    monkeypatch.setattr(connection, "script_dir", str(install))
+    monkeypatch.setattr(session_files, "script_dir", str(install))
     legacy = _real_session(install, name="telegram_session")
     (install / (legacy.name + "-wal")).write_bytes(b"pages")
 
@@ -130,7 +137,7 @@ def test_a_legacy_session_is_left_alone_when_a_managed_one_already_exists(tmp_pa
     monkeypatch.chdir(tmp_path)
     install = tmp_path / "install"
     install.mkdir()
-    monkeypatch.setattr(connection, "script_dir", str(install))
+    monkeypatch.setattr(session_files, "script_dir", str(install))
     legacy = _real_session(install, name="telegram_session")
     legacy.write_bytes(b"the-old-one")
     managed = settings.state_dir() / "telegram_session.session"
@@ -150,7 +157,7 @@ def test_a_legacy_session_that_cannot_be_moved_is_a_refusal(tmp_path, monkeypatc
     monkeypatch.chdir(tmp_path)
     install = tmp_path / "install"
     install.mkdir()
-    monkeypatch.setattr(connection, "script_dir", str(install))
+    monkeypatch.setattr(session_files, "script_dir", str(install))
     _real_session(install, name="telegram_session")
 
     def _refuse(self, target):
@@ -166,7 +173,7 @@ def test_the_extension_is_not_doubled(tmp_path, monkeypatch):
     """Telethon appends `.session` itself unless the name already ends in it."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
+    monkeypatch.setattr(session_files, "script_dir", str(tmp_path / "install"))
 
     resolved = connection.session_file_path("telegram_session.session")
 
@@ -389,8 +396,8 @@ def test_a_protection_failure_stops_the_account_from_starting(tmp_path, monkeypa
     protected serves Telegram requests out of a credential this process has just
     established is readable by somebody else."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(connection, "restrict_to_owner", lambda target: False)
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
+    monkeypatch.setattr(session_files, "restrict_to_owner", lambda target: False)
+    monkeypatch.setattr(session_files, "TelegramClient", lambda *a, **k: object())
 
     with pytest.raises(connection.SessionNotProtected):
         connection._build_client("work", "work")
@@ -399,8 +406,8 @@ def test_a_protection_failure_stops_the_account_from_starting(tmp_path, monkeypa
 def test_a_string_session_is_not_affected_by_the_file_checks(tmp_path, monkeypatch):
     """There is no file, so there is nothing to protect and nothing to refuse."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
-    monkeypatch.setattr(connection, "restrict_to_owner", lambda target: False)
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: "built")
+    monkeypatch.setattr(session_files, "restrict_to_owner", lambda target: False)
+    monkeypatch.setattr(session_files, "TelegramClient", lambda *a, **k: "built")
 
     assert connection._build_client(object(), "work") == "built"
 
@@ -409,7 +416,7 @@ def test_a_built_file_session_is_owner_only_end_to_end(tmp_path, monkeypatch):
     """The real constructor, the real database, the real DACL."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(connection, "script_dir", str(tmp_path / "install"))
+    monkeypatch.setattr(session_files, "script_dir", str(tmp_path / "install"))
 
     built = {}
 
@@ -420,7 +427,7 @@ def test_a_built_file_session_is_owner_only_end_to_end(tmp_path, monkeypatch):
         built["session"] = real
         return real
 
-    monkeypatch.setattr(connection, "TelegramClient", _client)
+    monkeypatch.setattr(session_files, "TelegramClient", _client)
 
     connection._build_client("work", "work")
     try:
@@ -519,9 +526,9 @@ def test_the_destination_is_private_before_a_legacy_session_is_moved_into_it(
         order.append("harden")
         return True
 
-    monkeypatch.setattr(connection, "harden_session_files", _harden)
-    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: order.append("adopt"))
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
+    monkeypatch.setattr(session_files, "harden_session_files", _harden)
+    monkeypatch.setattr(session_files, "adopt_legacy_session", lambda _path: order.append("adopt"))
+    monkeypatch.setattr(session_files, "TelegramClient", lambda *a, **k: object())
 
     connection._build_client("work", "work")
 
@@ -552,9 +559,9 @@ def test_a_refusal_after_the_constructor_closes_the_database(tmp_path, monkeypat
         def __init__(self, *a, **k):
             self.session = _Session()
 
-    monkeypatch.setattr(connection, "harden_session_files", _harden)
-    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: None)
-    monkeypatch.setattr(connection, "TelegramClient", _Client)
+    monkeypatch.setattr(session_files, "harden_session_files", _harden)
+    monkeypatch.setattr(session_files, "adopt_legacy_session", lambda _path: None)
+    monkeypatch.setattr(session_files, "TelegramClient", _Client)
 
     with pytest.raises(connection.SessionNotProtected):
         connection._build_client("work", "work")
@@ -571,9 +578,9 @@ def test_a_session_that_never_opened_does_not_turn_the_refusal_into_a_crash(tmp_
         calls.append(1)
         return len(calls) < 3
 
-    monkeypatch.setattr(connection, "harden_session_files", _harden)
-    monkeypatch.setattr(connection, "adopt_legacy_session", lambda _path: None)
-    monkeypatch.setattr(connection, "TelegramClient", lambda *a, **k: object())
+    monkeypatch.setattr(session_files, "harden_session_files", _harden)
+    monkeypatch.setattr(session_files, "adopt_legacy_session", lambda _path: None)
+    monkeypatch.setattr(session_files, "TelegramClient", lambda *a, **k: object())
 
     with pytest.raises(connection.SessionNotProtected):
         connection._build_client("work", "work")
