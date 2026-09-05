@@ -97,7 +97,15 @@ server deliberately does not. The tools group into these areas:
   again. Telegram enforces two structural rules here that arrive as unrelated error codes — the
   channel must be a broadcast channel and the group must be a supergroup — so both are refused
   by name instead, including the easy mistake of passing the two ids the wrong way round.
-- **Public and private:** `set_channel_username` moves a channel between the two. An empty
+- **Creating one, public or private:** `create_channel` takes an optional `username`, which is
+  the whole of what "public" means on Telegram — a chat with a `t.me/<name>` address is public
+  and one without is private. `channels.createChannel` cannot carry the name, so a public chat
+  is always made private and then renamed; the availability check therefore runs **before** the
+  chat exists, or a taken name would leave a stray channel behind that nobody asked for. If the
+  rename loses a race anyway, the result says the chat EXISTS, gives its id and points at
+  `set_channel_username` — rather than reading like a failure and prompting a second channel.
+  `megagroup=True` makes a supergroup instead of a broadcast channel.
+- **Public and private, later:** `set_channel_username` moves a channel between the two. An empty
   username removes the public address and makes it private; the freed name then becomes
   claimable by anyone, including someone who would like to be mistaken for it, which is why the
   tool says so and refuses to get there by an omitted argument.
