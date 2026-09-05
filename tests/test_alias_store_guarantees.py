@@ -18,7 +18,9 @@ import json
 
 import pytest
 
-from telegram_mcp import aliases as alias_mod
+# `restrict_to_owner` and `save_aliases` both moved into the store module;
+# patching `aliases` would now miss the caller that reads the name.
+from telegram_mcp import alias_store as alias_mod
 from telegram_mcp.aliases import (
     AliasStoreUnprotected,
     _reset_alias_cache,

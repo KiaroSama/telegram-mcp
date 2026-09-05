@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from telegram_mcp import aliases, runtime
+from telegram_mcp import alias_store, aliases, runtime
 
 # `os.chmod` on Windows toggles only the read-only flag: it cannot clear the read bit
 # and `st_mode` never reports 0o600, so these assert the platform rather than the code.
@@ -274,7 +274,9 @@ def test_legacy_install_dir_file_still_readable(monkeypatch, tmp_path):
     legacy.write_text(json.dumps({"старый": 42}), encoding="utf-8")
     monkeypatch.delenv("TELEGRAM_ALIASES_FILE", raising=False)
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "empty"))
-    monkeypatch.setattr(aliases, "_LEGACY_ALIASES_FILE", legacy)
+    # The legacy path moved with the migration that reads it; patching
+    # `aliases` would now miss the caller.
+    monkeypatch.setattr(alias_store, "_LEGACY_ALIASES_FILE", legacy)
 
     assert _ids(runtime.load_aliases()) == {"старый": 42}
 
