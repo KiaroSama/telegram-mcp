@@ -37,6 +37,12 @@ from telethon.errors import (
     FileReferenceInvalidError,
 )
 
+__all__ = [
+    "get_message_effect",
+    "list_message_effects",
+]
+
+
 # A file reference authorises one download and Telegram expires it on its own
 # schedule. The cure is always the same — fetch the object again from its source,
 # which for effects means the catalogue — and it must be told apart from ordinary

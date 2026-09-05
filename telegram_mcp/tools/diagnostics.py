@@ -8,6 +8,11 @@ for different people.
 from telegram_mcp import file_roots
 from telegram_mcp.runtime import *
 
+__all__ = [
+    "get_file_roots_status",
+]
+
+
 # What each status means to somebody trying to use `download_media`, and the one
 # concrete thing that changes it. The status strings are file_roots' own; the
 # advice is written here because file_roots must not know about tools.

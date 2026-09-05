@@ -291,6 +291,41 @@ class _WindowsTree:
             del self._handles[pid]
         return False
 
+    def survivors(self) -> list:
+        """``(pid, image name)`` for each descendant still running.
+
+        Added because a CI failure said only that "its process tree was still
+        alive", which names the symptom and not the culprit - and the culprit is
+        the whole question when the leak reproduces on one platform's runner and
+        nowhere else.
+
+        The handle is what makes the answer trustworthy. It was opened with
+        ``PROCESS_QUERY_LIMITED_INFORMATION``, which is exactly the right needed
+        to read the image path, and while it is held the PID cannot be recycled -
+        so this reports the process that actually leaked rather than whatever
+        later inherited its number.
+        """
+        try:
+            ctypes, kernel32, _, _, _ = _windows_job_types()
+            from ctypes import wintypes
+        except (OSError, AttributeError, ValueError):
+            return []
+
+        found = []
+        for pid, handle in list(self._handles.items()):
+            if kernel32.WaitForSingleObject(handle, 0) != _WAIT_TIMEOUT:
+                continue  # already exited
+            name = "?"
+            try:
+                size = wintypes.DWORD(260)
+                buffer = ctypes.create_unicode_buffer(size.value)
+                if kernel32.QueryFullProcessImageNameW(handle, 0, buffer, ctypes.byref(size)):
+                    name = buffer.value.rsplit("\\", 1)[-1]
+            except (OSError, AttributeError, ValueError):
+                pass
+            found.append((pid, name))
+        return found
+
     def terminate(self) -> None:
         """Kill each held descendant directly.
 
@@ -503,6 +538,51 @@ def _tree_alive(tree: Optional[Any]) -> bool:
             return True
 
     return tree.alive()
+
+
+def describe_survivors(tree: Optional[Any], limit: int = 8) -> str:
+    """A short, safe description of what is still running, or ``""``.
+
+    Only ever used to make a failure message specific. It must not raise and
+    must not stall: every lookup here is best-effort, and an empty string simply
+    means the message stays as generic as it was before.
+
+    Bounded on purpose - a runaway suite could leave hundreds of children, and a
+    failure message is not the place to print them all.
+    """
+    if tree is None:
+        return ""
+
+    found = []
+    if os.name == "nt":
+        try:
+            found = tree.survivors()
+        except (OSError, AttributeError, ValueError):
+            return ""
+    else:
+        # `tree` is the process group id. /proc is the cheap way to ask which
+        # processes are still in it; a platform without /proc simply says less.
+        try:
+            for entry in os.listdir("/proc"):
+                if not entry.isdigit():
+                    continue
+                try:
+                    with open(f"/proc/{entry}/stat", encoding="utf-8", errors="replace") as handle:
+                        fields = handle.read().rsplit(")", 1)
+                    if len(fields) != 2 or int(fields[1].split()[2]) != tree:
+                        continue
+                    found.append((int(entry), fields[0].split("(", 1)[-1]))
+                except (OSError, ValueError, IndexError):
+                    continue
+        except OSError:
+            return ""
+
+    if not found:
+        return ""
+    shown = ", ".join(f"{name}({pid})" for pid, name in found[:limit])
+    if len(found) > limit:
+        shown += f", and {len(found) - limit} more"
+    return shown
 
 
 def _run_is_over(parent_alive: bool, tree_alive: bool) -> bool:

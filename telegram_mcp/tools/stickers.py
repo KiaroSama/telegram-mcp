@@ -26,6 +26,18 @@ from telethon.tl.types import (
     InputStickerSetID,
 )
 
+__all__ = [
+    "STICKERS_PER_SET",
+    "add_sticker_to_set",
+    "inspect_sticker_set",
+    "install_sticker_set",
+    "move_sticker_in_set",
+    "remove_sticker_from_set",
+    "suggest_sticker_set_name",
+    "uninstall_sticker_set",
+]
+
+
 STICKERS_PER_SET = 200
 
 _NOT_IDEMPOTENT = (

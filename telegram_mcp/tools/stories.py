@@ -47,6 +47,17 @@ from telegram_mcp.message_view import (
 
 from telethon import functions, types
 
+__all__ = [
+    "PRIVACY_RULES",
+    "STORY_PERIODS",
+    "delete_story",
+    "get_stories",
+    "list_peer_stories",
+    "post_story",
+    "react_to_story",
+]
+
+
 # Who may see a posted story. Named rather than exposed as TL classes, and given no
 # default anywhere: "everyone" is a publication and has to be typed out.
 PRIVACY_RULES = {

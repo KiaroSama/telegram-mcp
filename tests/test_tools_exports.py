@@ -71,8 +71,23 @@ def test_no_tool_the_file_defines_is_missing_from_all(module):
 
 
 @pytest.mark.parametrize("module", DECLARING, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
-def test_everything_all_promises_is_actually_callable(module):
-    for name in module.__all__:
+def test_everything_all_promises_actually_exists(module):
+    """Existence, not callability.
+
+    `__all__` is the module's public API and several modules rightly publish
+    CONSTANTS through it - `stickers.STICKERS_PER_SET`, `stories.PRIVACY_RULES`,
+    `ephemeral.MAX_TTL_SECONDS`. An earlier version of this test demanded every
+    entry be callable and failed all of them for being well-formed; the real
+    breakage is a name `import *` cannot resolve.
+    """
+    missing = [name for name in module.__all__ if not hasattr(module, name)]
+    assert missing == [], f"{module.__name__}.__all__ names things it does not define: {missing}"
+
+
+@pytest.mark.parametrize("module", DECLARING, ids=lambda m: m.__name__.rsplit(".", 1)[-1])
+def test_every_tool_it_exports_is_callable(module):
+    """The tools specifically must be callable - a client dispatches them."""
+    for name in _tools_defined_in(module):
         assert callable(getattr(module, name, None)), f"{module.__name__}.{name} is not callable"
 
 

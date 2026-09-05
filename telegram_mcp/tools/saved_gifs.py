@@ -24,6 +24,15 @@ from telegram_mcp.message_view import display_name
 from telethon import functions
 from telethon.tl.types import InputDocument
 
+__all__ = [
+    "SAVED_GIFS_FREE_LIMIT",
+    "SAVED_GIFS_PREMIUM_LIMIT",
+    "list_saved_gifs",
+    "save_gif",
+    "unsave_gif",
+]
+
+
 # Telegram's cap on the saved-GIF row, and it is NOT one number: Premium doubles
 # it. Written as 200 first and corrected against a live account holding 400, which
 # is exactly the kind of "documented" constant that reads as authoritative and is

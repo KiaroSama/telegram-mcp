@@ -306,6 +306,16 @@ def test_a_grandchild_that_ignores_sigterm_is_still_killed(tmp_path):
     assert not _process_alive(pid), f"grandchild {pid} outlived the run"
     assert not marker.exists(), "the grandchild ran to completion"
 
+    # And the message has to NAME what leaked. A CI runner is exactly where
+    # nobody can go and look afterwards, so "the tree was still alive" - all
+    # this said when it fired on windows-latest - identifies the symptom and
+    # not the culprit.
+    output = result.stdout + result.stderr
+    assert (
+        "still running:" in output
+    ), f"the orphan message did not name the survivor:{chr(10)}{output}"
+    assert "python" in output.lower(), f"the survivor was not named:{chr(10)}{output}"
+
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows job objects")
 def test_a_grandchild_that_outlives_pytest_is_killed_on_windows(tmp_path):

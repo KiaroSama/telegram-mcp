@@ -35,6 +35,11 @@ from telegram_mcp.message_view import display_name
 from telethon import functions
 from telethon.tl.types import InputBotAppShortName
 
+__all__ = [
+    "open_mini_app",
+]
+
+
 # What Telegram is told this account is running on. A Mini App may lay itself
 # out for it, and some refuse a platform they do not support - so it names the
 # thing that actually renders the page here, a browser, rather than borrowing a

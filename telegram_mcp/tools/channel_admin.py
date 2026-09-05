@@ -32,6 +32,17 @@ from telegram_mcp.message_view import display_name
 
 from telethon import errors, functions, types, utils
 
+__all__ = [
+    "USERNAME_MAX_LENGTH",
+    "USERNAME_MIN_LENGTH",
+    "check_channel_username",
+    "get_channel_statistics",
+    "get_similar_channels",
+    "set_channel_username",
+    "set_discussion_group",
+]
+
+
 # Stated exactly because they can be: Telegram's own username form rules.
 # Everything else it enforces (reserved words, names sold through Fragment, how
 # many public channels one account may hold) is left to the server, which

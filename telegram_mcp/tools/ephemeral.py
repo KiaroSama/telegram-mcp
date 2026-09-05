@@ -48,6 +48,15 @@ from telegram_mcp.tools.inspection import require_explicit_account
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError
 
+__all__ = [
+    "MAX_TTL_SECONDS",
+    "VIEW_ONCE",
+    "list_disappearing_media",
+    "save_disappearing_media",
+    "send_disappearing_media",
+]
+
+
 # Only used when describe_media reports no extension: a voice note saved as .jpg
 # is a file nothing can open, so the suffix must come from the media either way.
 _MIME_EXTENSIONS = {

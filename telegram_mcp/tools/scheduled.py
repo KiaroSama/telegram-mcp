@@ -36,6 +36,15 @@ from telegram_mcp.tools.messages import _as_utc
 
 from telethon import errors, functions, types
 
+__all__ = [
+    "REPEAT_PERIODS",
+    "cancel_scheduled_message",
+    "edit_scheduled_message",
+    "list_scheduled_messages",
+    "schedule_message",
+]
+
+
 # Verified against the live server, not inferred from the field name.
 REPEAT_PERIODS = {"daily": 86400, "weekly": 604800}
 

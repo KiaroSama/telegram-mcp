@@ -43,6 +43,7 @@ from guarded_process import (  # noqa: F401  (re-exported)
     ContainmentFailed,
     GRACE_SECONDS,
     ORPHAN_GRACE_SECONDS,
+    describe_survivors,
     TIMEOUT_EXIT_CODE,
     _CREATE_SUSPENDED,
     _JOB_OBJECT_BASIC_ACCOUNTING,
@@ -255,10 +256,16 @@ def run(argv: list[str], wall_seconds: float, idle_seconds: float) -> int:
                 if parent_exited_at is None:
                     parent_exited_at = now
                 elif now - parent_exited_at > ORPHAN_GRACE_SECONDS:
+                    # Name the survivors. "The tree was still alive" identifies
+                    # the symptom and not the process, and this fires on a CI
+                    # runner where nobody can go and look afterwards.
+                    survivors = describe_survivors(tree)
                     reason = (
                         f"pytest exited but its process tree was still alive "
                         f"{ORPHAN_GRACE_SECONDS:.0f}s later"
                     )
+                    if survivors:
+                        reason += f" - still running: {survivors}"
                     break
             time.sleep(POLL_SECONDS)
 

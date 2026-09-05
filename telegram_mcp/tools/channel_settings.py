@@ -18,6 +18,15 @@ past the point where its responsibility is still one thing.
 
 from telegram_mcp.runtime import *
 
+__all__ = [
+    "set_join_request",
+    "set_join_to_send",
+    "set_participants_hidden",
+    "set_prehistory_hidden",
+    "set_signatures",
+    "set_view_forum_as_messages",
+]
+
 
 async def _require_channel(chat_id, cl):
     """The resolved entity, or a sentence explaining why it cannot be one.
