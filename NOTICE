@@ -15,10 +15,12 @@ retained in accordance with Section 4 of that licence, which continues to apply
 to those portions regardless of the licence on the combined work. They have been
 substantially modified and extended.
 
-Apache 2.0 is one-way compatible with GPLv3: Apache-licensed code may be
-combined into a GPLv3 work, and the result distributed under GPLv3. That is what
-this project is. The inherited portions also remain available from their own
-authors under Apache 2.0 — this licence does not and cannot change that.
+Apache 2.0 is one-way compatible with GPLv3. The Apache Software Foundation
+states it directly: "Apache 2 software can therefore be included in GPLv3
+projects, because the GPLv3 license accepts our software into GPLv3 works."
+The compatibility runs one way only, so this program as a whole is GPLv3, while
+the inherited portions remain available from their own authors under Apache 2.0
+— this licence does not and cannot change that.
 
 
 LICENCE HISTORY
