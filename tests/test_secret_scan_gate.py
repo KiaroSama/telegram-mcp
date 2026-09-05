@@ -94,9 +94,15 @@ def test_nothing_staged_is_still_a_legitimate_pass(monkeypatch):
 
 def test_the_gate_exits_nonzero_when_it_cannot_build_the_file_list(tmp_path):
     """End to end, through the entry point the pre-commit hook actually calls."""
+    # A KNOWN placeholder, not a novel credential shape. The scanner refused
+    # this very file on CI when it first became tracked - which is the gate
+    # working, and also the reason a new file is not covered locally: it is
+    # untracked, `git ls-files` cannot see it, so the first real scan of it
+    # happens after the commit. The content is incidental here anyway; the
+    # point of the test is that NOTHING gets scanned.
     leak = tmp_path / "leak.py"
     leak.write_text(
-        "TELEGRAM_API_HASH = 'deadbeefdeadbeefdeadbeefdeadbee1'",
+        "TELEGRAM_API_HASH = '0123456789abcdef0123456789abcdef'",
         encoding="utf-8",
     )
     environment = dict(os.environ, GIT_DIR=str(tmp_path / "no-such-git-dir"))
