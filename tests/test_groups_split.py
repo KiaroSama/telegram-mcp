@@ -1,4 +1,4 @@
-"""Guards for the groups.py -> groups/moderation/invites split.
+"""Guards for the groups.py -> groups/moderation/invites/admin_rights split.
 
 Two things can silently break when tools move between these modules: a tool can
 be dropped from a module's ``__all__`` (the package re-exports via
@@ -13,9 +13,9 @@ import pathlib
 
 import pytest
 
-from telegram_mcp.tools import groups, invites, moderation
+from telegram_mcp.tools import admin_rights, groups, invites, moderation
 
-MODULES = (groups, moderation, invites)
+MODULES = (groups, moderation, invites, admin_rights)
 
 # The full tool set that lived in groups.py before the split. Moving a tool
 # between these three modules is fine; losing one is not.

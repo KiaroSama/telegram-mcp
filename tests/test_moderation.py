@@ -15,8 +15,20 @@ import pytest
 import telethon
 from telethon.tl.types import ChatAdminRights, ChatBannedRights
 
-from telegram_mcp.tools import moderation as mod
-from telegram_mcp.tools.moderation import ban_user, promote_admin
+from telegram_mcp.tools import admin_rights, moderation as mod
+from telegram_mcp.tools.admin_rights import promote_admin
+from telegram_mcp.tools.moderation import ban_user
+
+# Bans and the admin-rights model are two modules now. A tool resolves a
+# seam from ITS OWN globals, so patching one module would miss the other.
+_MODULES = (mod, admin_rights)
+
+
+def _patch_both(monkeypatch, name, value):
+    for module in _MODULES:
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
+
 
 # Every restriction ban_user enables by hand (moderation.py:307-322).
 EVERY_RESTRICTION = (
@@ -78,7 +90,7 @@ def _wire(monkeypatch):
     def wire(client, chat=None, user=None):
         chat = chat if chat is not None else _chat()
         user = user if user is not None else _user()
-        monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+        _patch_both(monkeypatch, "get_client", lambda account=None: client)
 
         async def _ensure(_client):
             return None
@@ -87,8 +99,8 @@ def _wire(monkeypatch):
             # The tools resolve the chat first, then the user, each by its own id.
             return user if which == "u" else chat
 
-        monkeypatch.setattr(mod, "ensure_connected", _ensure)
-        monkeypatch.setattr(mod, "resolve_entity", _resolve)
+        _patch_both(monkeypatch, "ensure_connected", _ensure)
+        _patch_both(monkeypatch, "resolve_entity", _resolve)
         return client
 
     return wire

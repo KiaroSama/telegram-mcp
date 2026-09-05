@@ -31,7 +31,9 @@ from types import SimpleNamespace
 import pytest
 from telethon.tl.types import ChatAdminRights
 
-from telegram_mcp.tools import moderation as moderation_mod
+# The admin-rights model moved out of `moderation` into its own module; the
+# alias is kept so the assertions below still read as they did.
+from telegram_mcp.tools import admin_rights as moderation_mod
 
 # The two Telegram added after Telethon's final release.
 _LATER_THAN_TELETHON = {"manage_linked_peers", "manage_welcome_messages"}
@@ -335,7 +337,7 @@ async def test_a_session_too_new_to_promote_says_so_instead_of_looking_like_a_pe
     """
     import telethon
 
-    from telegram_mcp.tools import moderation as mod
+    from telegram_mcp.tools import admin_rights as mod
 
     class _Refuses:
         def is_connected(self):
@@ -386,7 +388,7 @@ async def test_a_right_telegram_declined_is_read_back_not_assumed_applied():
     """
     from telethon.tl.types import ChatAdminRights
 
-    from telegram_mcp.tools import moderation as mod
+    from telegram_mcp.tools import admin_rights as mod
 
     # What a broadcast channel actually returns for the request above.
     applied = ChatAdminRights(
@@ -441,7 +443,7 @@ async def test_a_failed_read_back_does_not_turn_an_applied_change_into_an_error(
     fail the call. If Telegram will not answer the read-back, the rights were
     still written - saying otherwise would be a worse lie than the one it
     replaced."""
-    from telegram_mcp.tools import moderation as mod
+    from telegram_mcp.tools import admin_rights as mod
 
     class _WontRead:
         async def __call__(self, request):

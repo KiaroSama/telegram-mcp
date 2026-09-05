@@ -22,6 +22,7 @@ from telethon.tl import functions, types
 
 from telegram_mcp.tools import folders as folders_mod
 from telegram_mcp.tools import messages as messages_mod
+from telegram_mcp.tools import messages_delete as delete_mod
 from telegram_mcp.tools import messages_queue as queue_mod
 from telegram_mcp.tools import messages_read as read_mod
 from telegram_mcp.tools import messages_state as state_mod
@@ -296,9 +297,9 @@ async def test_delete_messages_bulk_sends_the_peerless_request_outside_channels(
     account-global. Telethon's own `delete_messages` sends the same peerless
     request. This test pins the correct behaviour so the "fix" is not reapplied.
     """
-    client = wire_client(messages_mod, Recorder(), entity=RESOLVED)
+    client = wire_client(delete_mod, Recorder(), entity=RESOLVED)
 
-    await messages_mod.delete_messages_bulk(RAW_CHAT_ID, [1, 2, 3])
+    await delete_mod.delete_messages_bulk(RAW_CHAT_ID, [1, 2, 3])
 
     request = _last(client, functions.messages.DeleteMessagesRequest)
     assert request.id == [1, 2, 3]
@@ -306,7 +307,7 @@ async def test_delete_messages_bulk_sends_the_peerless_request_outside_channels(
 
 
 def test_the_delete_docstring_warns_that_ids_are_account_global():
-    doc = messages_mod.delete_messages_bulk.__doc__
+    doc = delete_mod.delete_messages_bulk.__doc__
     assert (
         "account-global" in doc or "account global" in doc
     ), "a caller cannot know the ids are not scoped to chat_id unless told"

@@ -7,11 +7,13 @@ from telegram_mcp.tools.chats import *
 from telegram_mcp.tools.topics import *
 from telegram_mcp.tools.chat_state import *
 from telegram_mcp.tools.messages import *
+from telegram_mcp.tools.messages_delete import *
 from telegram_mcp.tools.messages_read import *
 from telegram_mcp.tools.messages_state import *
 from telegram_mcp.tools.messages_queue import *
 from telegram_mcp.tools.groups import *
 from telegram_mcp.tools.moderation import *
+from telegram_mcp.tools.admin_rights import *
 from telegram_mcp.tools.invites import *
 from telegram_mcp.tools.media import *
 from telegram_mcp.tools.profile import *
@@ -31,6 +33,7 @@ from telegram_mcp.tools.buttons import *
 from telegram_mcp.tools.scheduled import *
 from telegram_mcp.tools.ephemeral import *
 from telegram_mcp.tools.secret_chats import *
+from telegram_mcp.tools.secret_messaging import *
 from telegram_mcp.tools.later_rights import *
 from telegram_mcp.tools.rich_messages import *
 from telegram_mcp.tools.mini_apps import *

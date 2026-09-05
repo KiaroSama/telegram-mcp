@@ -18,6 +18,18 @@ import pytest
 
 from telegram_mcp.tdlib import NotSignedIn, TDLibError, TDLibUnavailable
 from telegram_mcp.tools import secret_chats as sc
+from telegram_mcp.tools import secret_messaging as sm
+
+# The tools live in two modules now. A function looks a name up in ITS OWN
+# module globals, so a seam shared by both halves has to be patched in both
+# or the patch succeeds while missing the caller under test.
+_MODULES = (sc, sm)
+
+
+def _patch_both(monkeypatch, name, value):
+    for module in _MODULES:
+        if hasattr(module, name):
+            monkeypatch.setattr(module, name, value)
 
 
 class FakeTDLib:
@@ -44,12 +56,12 @@ def wire(monkeypatch):
 
     def _wire(answers=None):
         client = FakeTDLib(answers)
-        monkeypatch.setattr(sc, "_account_label", lambda account=None: "acct")
+        _patch_both(monkeypatch, "_account_label", lambda account=None: "acct")
 
         async def _client(label):
             return client
 
-        monkeypatch.setattr(sc, "secret_client", _client)
+        _patch_both(monkeypatch, "secret_client", _client)
         return client
 
     return _wire
@@ -90,7 +102,7 @@ async def test_a_message_the_sender_protected_is_not_downloaded_at_all(wire):
     )
 
     result = _results(
-        await sc.save_secret_media(
+        await sm.save_secret_media(
             chat_id=1, message_id=5, honour_sender_restriction=True, account="acct"
         )
     )
@@ -123,7 +135,7 @@ async def test_a_message_that_may_be_saved_is_downloaded_and_still_says_so(wire)
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["saved"] is True
     assert result["path"] == "C:/x/y.jpg"
@@ -133,8 +145,8 @@ async def test_a_message_that_may_be_saved_is_downloaded_and_still_says_so(wire)
 def test_can_be_saved_is_reported_as_telegram_sent_it():
     """Reported, never inferred. A secret chat does not imply False, and a
     missing field does not imply anything either - it is Telegram's default."""
-    protected = sc._message_record({"id": 1, "can_be_saved": False, "content": {}})
-    allowed = sc._message_record({"id": 2, "can_be_saved": True, "content": {}})
+    protected = sm._message_record({"id": 1, "can_be_saved": False, "content": {}})
+    allowed = sm._message_record({"id": 2, "can_be_saved": True, "content": {}})
 
     assert protected["can_be_saved"] is False
     assert allowed["can_be_saved"] is True
@@ -148,7 +160,7 @@ def test_can_be_saved_is_reported_as_telegram_sent_it():
 def test_a_running_countdown_is_distinguished_from_the_timer_it_started_from():
     """`self_destruct_in` is what is LEFT; the timer is how long it was. Folding
     them into one number would make an almost-expired message look untouched."""
-    record = sc._message_record(
+    record = sm._message_record(
         {
             "id": 3,
             "content": {"@type": "messagePhoto", "photo": {"sizes": []}},
@@ -167,7 +179,7 @@ def test_a_running_countdown_is_distinguished_from_the_timer_it_started_from():
 def test_an_untouched_disappearing_message_reports_no_countdown():
     """Nothing is running until it is opened, and reporting a countdown that has
     not started would make it look like the message was already read."""
-    record = sc._message_record(
+    record = sm._message_record(
         {
             "id": 3,
             "content": {"@type": "messagePhoto", "photo": {"sizes": []}},
@@ -192,7 +204,7 @@ def test_an_untouched_disappearing_message_reports_no_countdown():
 def test_the_downloadable_file_is_found_wherever_telegram_puts_it(content, expected):
     """`save_secret_media` and the record builder must agree about this, or a
     record advertises a file the saver cannot then find."""
-    assert sc._media_file_id(content) == expected
+    assert sm._media_file_id(content) == expected
 
 
 def test_the_largest_photo_size_is_the_one_offered():
@@ -203,7 +215,7 @@ def test_the_largest_photo_size_is_the_one_offered():
         "photo": {"sizes": [{"photo": {"id": 1}}, {"photo": {"id": 2}}, {"photo": {"id": 3}}]},
     }
 
-    assert sc._media_file_id(content) == 3
+    assert sm._media_file_id(content) == 3
 
 
 # --------------------------------------------------------------------------
@@ -216,7 +228,7 @@ async def test_a_per_message_timer_beyond_telegrams_limit_is_refused(wire, tmp_p
     """Refused here rather than sent wrong: the same lesson `ephemeral.py`
     already learned, where an over-long timer was silently dropped and the media
     arrived permanent."""
-    result = await sc.send_secret_media(
+    result = await sm.send_secret_media(
         chat_id=1, file_path=str(tmp_path / "x.jpg"), self_destruct_seconds=90, account="acct"
     )
 
@@ -229,7 +241,7 @@ async def test_text_carries_no_timer_of_its_own(wire):
     text request would be silently ignored, so it is not built."""
     client = wire({"sendMessage": {"@type": "message", "id": 12}})
 
-    await sc.send_secret_message(chat_id=1, message="hello", account="acct")
+    await sm.send_secret_message(chat_id=1, message="hello", account="acct")
 
     (sent,) = [r for r in client.requests if r["@type"] == "sendMessage"]
     assert sent["input_message_content"]["@type"] == "inputMessageText"
@@ -281,15 +293,15 @@ def test_a_missing_library_names_the_install_command():
 async def test_status_reports_the_login_step_rather_than_failing(monkeypatch):
     """A tool that raised here would leave the caller unable to tell an absent
     dependency from an unsigned-in account."""
-    monkeypatch.setattr(
-        sc, "tdjson_status", lambda: {"available": True, "tdlib_version": "1.8.67"}
+    _patch_both(
+        monkeypatch, "tdjson_status", lambda: {"available": True, "tdlib_version": "1.8.67"}
     )
-    monkeypatch.setattr(sc, "_account_label", lambda account=None: "acct")
+    _patch_both(monkeypatch, "_account_label", lambda account=None: "acct")
 
     async def _refuse(label):
         raise NotSignedIn(label, "authorizationStateWaitPhoneNumber")
 
-    monkeypatch.setattr(sc, "secret_client", _refuse)
+    _patch_both(monkeypatch, "secret_client", _refuse)
 
     result = _results(await sc.secret_chat_status(account="acct"))
 
@@ -299,8 +311,8 @@ async def test_status_reports_the_login_step_rather_than_failing(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_status_reports_the_install_step_when_the_library_is_absent(monkeypatch):
-    monkeypatch.setattr(
-        sc, "tdjson_status", lambda: {"available": False, "reason": "not installed"}
+    _patch_both(
+        monkeypatch, "tdjson_status", lambda: {"available": False, "reason": "not installed"}
     )
 
     result = _results(await sc.secret_chat_status(account="acct"))
@@ -322,7 +334,7 @@ def peer(monkeypatch):
         class _User:
             id = user_id
 
-        monkeypatch.setattr(sc, "get_client", lambda account=None: object())
+        _patch_both(monkeypatch, "get_client", lambda account=None: object())
 
         async def _connected(client):
             return None
@@ -330,8 +342,8 @@ def peer(monkeypatch):
         async def _resolve(reference, client):
             return _User()
 
-        monkeypatch.setattr(sc, "ensure_connected", _connected)
-        monkeypatch.setattr(sc, "resolve_entity", _resolve)
+        _patch_both(monkeypatch, "ensure_connected", _connected)
+        _patch_both(monkeypatch, "resolve_entity", _resolve)
         return user_id
 
     return _peer
@@ -408,10 +420,10 @@ async def test_the_file_goes_inside_the_wrapper_telegram_expects(wire, monkeypat
     async def _path(raw_path, ctx, tool_name):
         return sample, None
 
-    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    _patch_both(monkeypatch, "_resolve_readable_file_path", _path)
     client = wire({"sendMessage": {"@type": "message", "id": 5242881, "content": {}}})
 
-    await sc.send_secret_media(chat_id=-1999148344067, file_path=str(sample), account="acct")
+    await sm.send_secret_media(chat_id=-1999148344067, file_path=str(sample), account="acct")
 
     (sent,) = [r for r in client.requests if r["@type"] == "sendMessage"]
     photo = sent["input_message_content"]["photo"]
@@ -427,10 +439,10 @@ async def test_a_voice_note_is_wrapped_the_same_way(wire, monkeypatch, tmp_path)
     async def _path(raw_path, ctx, tool_name):
         return sample, None
 
-    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    _patch_both(monkeypatch, "_resolve_readable_file_path", _path)
     client = wire({"sendMessage": {"@type": "message", "id": 5242889, "content": {}}})
 
-    await sc.send_secret_media(
+    await sm.send_secret_media(
         chat_id=-1999148344067, file_path=str(sample), as_voice=True, account="acct"
     )
 
@@ -452,10 +464,10 @@ async def test_a_per_message_timer_is_refused_with_the_one_that_works(wire, monk
     async def _path(raw_path, ctx, tool_name):
         return sample, None
 
-    monkeypatch.setattr(sc, "_resolve_readable_file_path", _path)
+    _patch_both(monkeypatch, "_resolve_readable_file_path", _path)
     client = wire()
 
-    answer = await sc.send_secret_media(
+    answer = await sm.send_secret_media(
         chat_id=-1999148344067, file_path=str(sample), self_destruct_seconds=30, account="acct"
     )
 
@@ -510,7 +522,7 @@ async def test_refusing_is_available_but_has_to_be_asked_for(wire):
     client = wire({"getMessage": _restricted_photo()})
 
     result = _results(
-        await sc.save_secret_media(
+        await sm.save_secret_media(
             chat_id=1, message_id=5, honour_sender_restriction=True, account="acct"
         )
     )
@@ -545,7 +557,7 @@ async def test_a_restricted_message_saves_and_says_that_it_was_restricted(
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["saved"] is True
     assert result["sender_restriction_overridden"] is True
@@ -574,7 +586,7 @@ async def test_media_under_a_timer_is_copied_out_of_tdlibs_directory(tmp_path, m
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     kept = Path(result["path"])
     assert kept != tdlib_copy, "it handed back TDLib's own copy, which will be deleted"
@@ -606,7 +618,7 @@ async def test_media_with_no_timer_is_left_where_tdlib_put_it(tmp_path, monkeypa
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["path"] == str(tdlib_copy)
     assert "tdlib_path" not in result, "it copied a file that was not going to be deleted"
@@ -632,7 +644,7 @@ async def test_a_file_tdlib_already_holds_is_not_fetched_again(tmp_path, monkeyp
     }
     client = wire({"getMessage": message})
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert "downloadFile" not in client.types(), "it re-fetched a file it already had"
     assert Path(result["path"]).read_bytes() == b"held-bytes"
@@ -662,6 +674,6 @@ async def test_the_byte_count_falls_back_to_the_file_when_tdlib_omits_it(
         }
     )
 
-    result = _results(await sc.save_secret_media(chat_id=1, message_id=5, account="acct"))
+    result = _results(await sm.save_secret_media(chat_id=1, message_id=5, account="acct"))
 
     assert result["size_bytes"] == 10

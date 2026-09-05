@@ -18,7 +18,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram_mcp.tools import messages as mod
+from telegram_mcp.tools import messages_delete as mod
 
 
 class _Client:
