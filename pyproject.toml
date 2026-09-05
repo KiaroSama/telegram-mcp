@@ -39,7 +39,7 @@ dependencies = [
     "python-dotenv>=1.2.3",
     # UAX #29 grapheme clusters (\X) so truncation never splits a compound
     # character; a hand-rolled scan kept missing categories.
-    "regex>=2026.8.31",
+    "regex>=2026.9.3",
     "python-json-logger>=4.2.0",
     "qrcode>=8.2",
     "telethon>=1.44.0",
