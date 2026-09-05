@@ -535,3 +535,68 @@ def test_the_job_is_assigned_before_the_child_is_allowed_to_run():
     assert (
         suspended < contained < resumed
     ), "the child is started, or resumed, before the job holds it"
+
+
+# --- a claimed parent is not a proven one ------------------------------------
+
+
+windows_pids_only = pytest.mark.skipif(os.name != "nt", reason="Toolhelp parent pids are Win32")
+
+
+@windows_pids_only
+def test_a_process_older_than_the_root_is_not_adopted_as_its_descendant():
+    """The false leak this guard reported once on CI and could not reproduce.
+
+    Windows never clears `th32ParentProcessID` when a parent dies, and it recycles
+    pids quickly. So a process whose real parent is long gone can name OUR root as
+    its parent purely because the number came back around. Adopted blindly, it
+    keeps the tree "alive" after the run ends and is reported as a leak that never
+    happened - every test passing, the rerun green, nothing in the code wrong.
+
+    A child cannot predate its parent. This asserts that invariant over whatever
+    the live machine actually returns rather than over a mock, because it is the
+    exact property the filter exists to guarantee.
+    """
+    import guarded_process
+
+    root_started = guarded_process._started_at(os.getpid())
+    assert root_started, "could not read this process's own creation time"
+
+    for pid in guarded_process._descendant_pids(os.getpid()):
+        started = guarded_process._started_at(pid)
+        if started is None:
+            continue  # unreadable: adopted on purpose rather than missed
+        assert started >= root_started, (
+            f"pid {pid} started before this process did, so it cannot be a "
+            "descendant - a recycled parent pid was adopted"
+        )
+
+
+@windows_pids_only
+def test_a_real_child_is_still_discovered():
+    """The other half: the filter must not cost the guard its actual job."""
+    import guarded_process
+
+    # Blocks on stdin rather than on a clock, so it lives exactly as long as this
+    # test holds the pipe - no sleep to guess, and no race to lose on a slow box.
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import sys; sys.stdin.read()"],
+        stdin=subprocess.PIPE,
+    )
+    try:
+        assert child.pid in guarded_process._descendant_pids(
+            os.getpid()
+        ), "a real child was filtered out of the tree"
+    finally:
+        child.kill()
+        child.wait()
+
+
+@windows_pids_only
+def test_an_unreadable_creation_time_is_none_rather_than_a_guess():
+    """`_started_at` has three answers and the caller depends on the third being
+    distinguishable: a pid it cannot open is UNKNOWN, not zero."""
+    import guarded_process
+
+    assert guarded_process._started_at(os.getpid()) is not None
+    assert guarded_process._started_at(0x7FFFFFFE) is None

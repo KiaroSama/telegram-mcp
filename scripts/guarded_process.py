@@ -166,6 +166,15 @@ def _windows_job_types():
     kernel32.TerminateProcess.restype = wintypes.BOOL
     kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
 
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+
     kernel32.WaitForSingleObject.restype = wintypes.DWORD
     kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
 
@@ -354,6 +363,37 @@ class _WindowsTree:
             self.job = None
 
 
+def _started_at(pid: int) -> Optional[int]:
+    """When a process started, as a FILETIME integer, or ``None`` if unreadable.
+
+    `PROCESS_QUERY_LIMITED_INFORMATION` is enough for `GetProcessTimes` on Vista
+    and later, and it is a right this module already takes on descendants.
+    """
+    try:
+        ctypes, kernel32, _, _, _ = _windows_job_types()
+        from ctypes import wintypes
+
+        handle = kernel32.OpenProcess(_PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return None
+        try:
+            created, exited = wintypes.FILETIME(), wintypes.FILETIME()
+            in_kernel, in_user = wintypes.FILETIME(), wintypes.FILETIME()
+            if not kernel32.GetProcessTimes(
+                handle,
+                ctypes.byref(created),
+                ctypes.byref(exited),
+                ctypes.byref(in_kernel),
+                ctypes.byref(in_user),
+            ):
+                return None
+            return (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, AttributeError, ValueError):
+        return None
+
+
 def _descendant_pids(root_pid: int) -> list:
     """Every PID descended from ``root_pid``, via one process snapshot.
 
@@ -392,14 +432,37 @@ def _descendant_pids(root_pid: int) -> list:
         finally:
             kernel32.CloseHandle(snapshot)
 
+        # `th32ParentProcessID` IS NOT VALIDATED BY WINDOWS. It keeps pointing at
+        # a pid after that parent has died, and pids are recycled quickly - so an
+        # unrelated process whose real parent is long gone can name OUR root as
+        # its parent purely because the number was reused. Adopted blindly, it
+        # keeps the tree "alive" after the run ends and the guard reports a leak
+        # that never happened. Seen once on a Windows CI runner: every test
+        # passed, the tree was still alive five seconds later, and the identical
+        # commit was green on rerun.
+        #
+        # A child cannot be older than its parent, so the creation times settle
+        # it. Unknown times are adopted rather than dropped: failing to read a
+        # timestamp must not turn this into a leak detector that misses leaks.
         found: list = []
+        started: dict = {root_pid: _started_at(root_pid)}
         pending = [root_pid]
         while pending:
             current = pending.pop()
+            parent_started = started.get(current)
             for child in children.get(current, ()):
-                if child not in found and child != root_pid:
-                    found.append(child)
-                    pending.append(child)
+                if child in found or child == root_pid:
+                    continue
+                child_started = _started_at(child)
+                if (
+                    parent_started is not None
+                    and child_started is not None
+                    and child_started < parent_started
+                ):
+                    continue  # older than its claimed parent: a recycled pid
+                started[child] = child_started
+                found.append(child)
+                pending.append(child)
         return found
     except (OSError, AttributeError, ValueError):
         return []
