@@ -584,3 +584,34 @@ def test_a_session_that_never_opened_does_not_turn_the_refusal_into_a_crash(tmp_
 
     with pytest.raises(connection.SessionNotProtected):
         connection._build_client("work", "work")
+
+
+# --- the suite's own session must not land beside a real account --------------
+
+
+def test_the_suites_session_name_never_resolves_into_the_real_state_directory():
+    """The guard for a mistake that already happened.
+
+    A test reached a real Telethon constructor and wrote a GENUINE 256-bit auth
+    key into `<state_dir>/test_session.session`, sitting beside the operator's
+    own accounts. Deleting the file was not the fix - the login was live and had
+    to be terminated from Telegram.
+
+    The cause was that `TELEGRAM_SESSION_NAME` was a BARE name, and a bare name
+    resolves into the private state directory. The root `conftest.py` now hands
+    the suite an absolute path under a per-run temporary directory instead. This
+    pins that, so restoring the bare name fails here rather than quietly, next
+    to somebody's real session, a year from now.
+    """
+    configured = os.environ["TELEGRAM_SESSION_NAME"]
+    resolved = session_files.session_file_path(configured).resolve()
+    real_state = settings.state_dir().resolve()
+
+    assert Path(configured).is_absolute(), (
+        f"TELEGRAM_SESSION_NAME is bare ({configured!r}), so it resolves into the "
+        "private state directory where real accounts live"
+    )
+    assert (
+        real_state not in resolved.parents
+    ), f"the suite would write session files into {real_state}, beside real accounts"
+    assert resolved != real_state / "test_session.session"

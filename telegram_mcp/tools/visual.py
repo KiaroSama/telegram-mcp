@@ -17,9 +17,8 @@ from telegram_mcp.visual.capture import (
     CAPTURE_METHODS,
     DEFAULT_PROCESS_NAME,
     CaptureError,
-    capture_frames,
-    list_windows_bounded,
 )
+from telegram_mcp.visual.capture_runner import capture_frames, list_windows_bounded
 from telegram_mcp.visual.images import (
     IMAGE_FORMATS,
     MAX_IMAGE_DIMENSION,

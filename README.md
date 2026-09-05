@@ -1141,7 +1141,9 @@ a licence already given cannot be withdrawn.
 
 ## Built on
 
-- [Telethon](https://github.com/LonamiWebs/Telethon) — the MTProto client
+- [Telethon](https://codeberg.org/Lonami/Telethon) — the MTProto client. It lives on Codeberg
+  now, not GitHub, and v1 is described by its author as largely in maintenance mode: new
+  Telegram layers still land, bug fixes are welcome, additions are rare.
 - [TDLib](https://core.telegram.org/tdlib) — Telegram's own client library, for what Telethon's
   announced layer cannot carry
 - [Model Context Protocol](https://modelcontextprotocol.io/)

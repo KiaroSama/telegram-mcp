@@ -27,7 +27,7 @@ import time
 import pytest
 from PIL import Image
 
-from telegram_mcp.visual import bounded_process, capture, images
+from telegram_mcp.visual import bounded_process, capture, capture_runner, images
 from telegram_mcp.visual.capture import CaptureError
 
 pytestmark = pytest.mark.skipif(
@@ -226,7 +226,7 @@ def test_the_worker_refuses_once_the_response_ceiling_is_reached():
 
 HANGING_PRINTWINDOW = """
 import sys, time, json
-from telegram_mcp.visual import capture
+from telegram_mcp.visual import capture, capture_runner
 
 class _Hangs:
     def GetWindowDC(self, _hwnd):
@@ -269,11 +269,11 @@ def test_listing_the_windows_is_bounded_the_same_way(monkeypatch):
     hung Telegram blocks exactly as capturing one does - and a bound on only the
     capture leaves list_telegram_windows as the way to wedge the server."""
     created = _watch_children(monkeypatch)
-    monkeypatch.setattr(capture, "_capture_worker_command", _hanging_worker)
+    monkeypatch.setattr(capture_runner, "_capture_worker_command", _hanging_worker)
 
     started = time.monotonic()
     with pytest.raises(CaptureError, match="timed out"):
-        capture.list_windows_bounded(timeout=1.0)
+        capture_runner.list_windows_bounded(timeout=1.0)
 
     assert time.monotonic() - started < 30
     assert created and created[0].poll() is not None
@@ -281,11 +281,11 @@ def test_listing_the_windows_is_bounded_the_same_way(monkeypatch):
 
 def test_a_printwindow_that_never_returns_is_killed_rather_than_waited_out(monkeypatch):
     created = _watch_children(monkeypatch)
-    monkeypatch.setattr(capture, "_capture_worker_command", _hanging_worker)
+    monkeypatch.setattr(capture_runner, "_capture_worker_command", _hanging_worker)
 
     started = time.monotonic()
     with pytest.raises(CaptureError, match="timed out"):
-        capture.capture_frames(count=1, timeout=1.0)
+        capture_runner.capture_frames(count=1, timeout=1.0)
     elapsed = time.monotonic() - started
 
     assert elapsed < 30, f"the capture waited {elapsed:.1f}s for a bound of 1s"
@@ -297,7 +297,7 @@ async def test_cancelling_a_capture_terminates_it_rather_than_orphaning_it(monke
     from telegram_mcp.tools import visual as visual_tool
 
     created = _watch_children(monkeypatch)
-    monkeypatch.setattr(capture, "_capture_worker_command", _hanging_worker)
+    monkeypatch.setattr(capture_runner, "_capture_worker_command", _hanging_worker)
 
     task = asyncio.ensure_future(visual_tool._capture_encoded(None, "window", None, "png", 900))
     deadline = time.monotonic() + 30
@@ -339,7 +339,7 @@ def _stub_worker_frames(monkeypatch, count, width, height, tmp_path):
         f"sys.stdout.buffer.write(base64.b64decode(pathlib.Path({str(reply)!r}).read_text()))\n"
     )
     monkeypatch.setattr(
-        capture, "_capture_worker_command", lambda *a, **k: [sys.executable, "-c", script]
+        capture_runner, "_capture_worker_command", lambda *a, **k: [sys.executable, "-c", script]
     )
 
 
@@ -351,13 +351,13 @@ def test_eight_frames_at_native_resolution_are_refused_rather_than_returned(monk
     _stub_worker_frames(monkeypatch, count=8, width=900, height=900, tmp_path=tmp_path)
 
     with pytest.raises(CaptureError, match="response"):
-        capture.capture_frames(count=8, native=True, timeout=60.0)
+        capture_runner.capture_frames(count=8, native=True, timeout=60.0)
 
 
 def test_a_reasonable_multi_frame_request_still_comes_back(monkeypatch, tmp_path):
     _stub_worker_frames(monkeypatch, count=4, width=200, height=150, tmp_path=tmp_path)
 
-    window, frames = capture.capture_frames(count=4, timeout=60.0)
+    window, frames = capture_runner.capture_frames(count=4, timeout=60.0)
 
     assert window["hwnd"] == 1
     assert len(frames) == 4

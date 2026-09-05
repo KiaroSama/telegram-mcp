@@ -24,7 +24,10 @@ which is the point — the setting becomes part of the test rather than part of
 the machine.
 """
 
+import atexit
 import os
+import shutil
+import tempfile
 
 import dotenv
 
@@ -44,4 +47,34 @@ dotenv.load_dotenv = lambda *args, **kwargs: False
 # The three the import path genuinely requires, matching tests/conftest.py.
 os.environ.setdefault("TELEGRAM_API_ID", "12345")
 os.environ.setdefault("TELEGRAM_API_HASH", "dummy_hash")
-os.environ.setdefault("TELEGRAM_SESSION_NAME", "test_session")
+
+# A file-based session under a BARE name resolves into the real private state
+# directory - the same one a configured account uses. Any test that reaches a
+# real Telethon constructor then writes a GENUINE auth key there, under a name
+# the next run reopens. That is not hypothetical: a live login was found in
+# `test_session.session` sitting beside the operator's own accounts, and it had
+# to be terminated from Telegram rather than merely deleted from disk.
+#
+# An absolute name is honoured where it points (`session_files.session_file_path`),
+# so pointing the suite at a per-run temporary directory makes the same mistake
+# write somewhere disposable. `ignore_errors` on the way out because Windows
+# will not unlink a session SQLite file a leaked handle still holds - and a
+# failure to clean up must not fail the run.
+_TEST_SESSION_DIR = tempfile.mkdtemp(prefix="telegram-mcp-test-session-")
+atexit.register(shutil.rmtree, _TEST_SESSION_DIR, True)
+
+# The server REFUSES to open a session under a directory it cannot make
+# owner-only, and on Windows a fresh temp directory inherits the ACL of %TEMP%.
+# So harden it with the project's own helper rather than weaken the check: the
+# temp directory then carries the same guarantee the private state directory
+# does. `owner_only` imports nothing but the standard library, so this cannot
+# disturb the scrubbing above.
+from telegram_mcp.owner_only import restrict_to_owner_strict  # noqa: E402
+
+if not restrict_to_owner_strict(_TEST_SESSION_DIR):  # pragma: no cover - platform
+    raise RuntimeError(
+        f"could not make {_TEST_SESSION_DIR} owner-only, so the suite would be "
+        "writing session files somewhere world-readable - refusing to run"
+    )
+
+os.environ.setdefault("TELEGRAM_SESSION_NAME", os.path.join(_TEST_SESSION_DIR, "test_session"))
