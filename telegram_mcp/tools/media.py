@@ -43,6 +43,7 @@ async def send_file(
     file_path: Union[str, List[str]],
     caption: str = None,
     topic_id: Optional[int] = None,
+    send_as: Optional[Union[int, str]] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -55,6 +56,9 @@ async def send_file(
         caption: Optional caption for the file or media group.
         topic_id: Optional forum topic ID (from list_topics). Sends into that topic
             in a forum-enabled community/supergroup. Also works as reply_to for a message.
+        send_as: Post under a channel's identity rather than your own. The value
+            comes from `list_send_as` for THIS chat - Telegram decides which are
+            legal there and refuses anything else.
     """
     try:
         if isinstance(file_path, list):
@@ -63,6 +67,7 @@ async def send_file(
                 file_paths=file_path,
                 caption=caption,
                 topic_id=topic_id,
+                send_as=send_as,
                 ctx=ctx,
                 account=account,
             )
@@ -75,8 +80,16 @@ async def send_file(
             if path_error:
                 return path_error
             entity = await resolve_entity(chat_id, cl)
+            posting_as = await resolve_entity(send_as, cl) if send_as else None
             sent = await cl.send_file(
-                entity, source.handle, caption=caption, reply_to=topic_reply_to(topic_id)
+                entity,
+                source.handle,
+                caption=caption,
+                reply_to=topic_reply_to(topic_id),
+                # Omitted entirely when unused: passing `send_as=None` changes the
+                # call every existing caller makes, and an unused feature that
+                # alters the call is not unused.
+                **({"send_as": posting_as} if posting_as is not None else {}),
             )
             return _sent_result(sent, chat_id, f"File sent to chat {chat_id} from {source.path}.")
     except Exception as e:
@@ -95,6 +108,7 @@ async def _send_album(
     file_paths: List[str],
     caption: str = None,
     topic_id: Optional[int] = None,
+    send_as: Optional[Union[int, str]] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -115,8 +129,13 @@ async def _send_album(
             sources.append(source.handle)
 
         entity = await resolve_entity(chat_id, cl)
+        posting_as = await resolve_entity(send_as, cl) if send_as else None
         sent = await cl.send_file(
-            entity, sources, caption=caption, reply_to=topic_reply_to(topic_id)
+            entity,
+            sources,
+            caption=caption,
+            reply_to=topic_reply_to(topic_id),
+            **({"send_as": posting_as} if posting_as is not None else {}),
         )
         return _sent_result(
             sent, chat_id, f"Album sent to chat {chat_id} with {len(sources)} files."
