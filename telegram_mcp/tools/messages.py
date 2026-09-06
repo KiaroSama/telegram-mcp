@@ -291,6 +291,55 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
 
 
 @mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set Default Send As",
+        openWorldHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
+    )
+)
+@with_account(readonly=False)
+@validate_id("chat_id")
+async def set_default_send_as(
+    chat_id: Union[int, str], send_as: Union[int, str], account: str = None
+) -> str:
+    """
+    Make one identity the default for a chat, the way Telegram's own picker does.
+
+    Every later message goes out under it until it is changed again - including
+    messages sent by anything else using this account. Per-message `send_as` on
+    `send_message` overrides it without changing it.
+
+    Args:
+        chat_id: The chat the default applies IN.
+        send_as: The identity it applies TO, from `list_send_as` for that chat.
+            The two are different peers and Telegram accepts them either way
+            round, so a swap silently redefines a different chat's default.
+    """
+    try:
+        if send_as in (None, ""):
+            return (
+                "set_default_send_as needs an identity. Telegram has no 'unset': a chat always "
+                "has a current one, so pick the value for yourself from list_send_as instead."
+            )
+        cl = get_client(account)
+        entity = await resolve_entity(chat_id, cl)
+        identity = await resolve_entity(send_as, cl)
+        await cl(functions.messages.SaveDefaultSendAsRequest(peer=entity, send_as=identity))
+        return format_tool_result(
+            [{"chat_id": str(chat_id), "default_send_as": str(send_as), "saved": True}],
+            {
+                "note": (
+                    "Every later message in this chat goes out under that identity until it is "
+                    "changed again. `send_as` on a single send overrides it without changing it."
+                )
+            },
+        )
+    except Exception as e:
+        return log_and_format_error("set_default_send_as", e, chat_id=chat_id, send_as=send_as)
+
+
+@mcp.tool(
     annotations=ToolAnnotations(title="Send Message", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
@@ -751,6 +800,7 @@ async def reply_to_message(
 
 __all__ = [
     "list_send_as",
+    "set_default_send_as",
     "send_message",
     "copy_message",
     "forward_message",

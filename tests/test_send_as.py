@@ -216,3 +216,31 @@ async def test_send_file_carries_it(wire_client, tmp_path, monkeypatch):
     call = next((c for c in client.calls if c[0] == "send_file"), None)
     assert call is not None, "send_file never reached Telegram"
     assert call[2] is AS_CHANNEL
+
+
+# ------------------------------------------------------- the sticky default
+
+
+@pytest.mark.asyncio
+async def test_setting_the_default_addresses_both_peers(wire_client):
+    """Two peers, and mixing them up is the whole risk: `peer` is the chat the
+    default applies IN, `send_as` is the identity it applies TO. Telegram accepts
+    either order and the wrong one silently changes a different chat."""
+    client = wire_client(messages_mod, Recorder(_send_as_peers()), entity=AS_CHANNEL)
+
+    await messages_mod.set_default_send_as(RAW_CHAT_ID, "@mychannel")
+
+    request = _last(client, functions.messages.SaveDefaultSendAsRequest)
+    assert request.peer is AS_CHANNEL
+    assert request.send_as is AS_CHANNEL
+
+
+@pytest.mark.asyncio
+async def test_setting_the_default_refuses_an_empty_identity(wire_client):
+    """There is no "unset" in the API - Telegram always has a current identity -
+    so a blank argument is a caller mistake, not a way back to yourself."""
+    wire_client(messages_mod, Recorder(_send_as_peers()), entity=AS_CHANNEL)
+
+    refused = await messages_mod.set_default_send_as(RAW_CHAT_ID, "")
+
+    assert "list_send_as" in refused
