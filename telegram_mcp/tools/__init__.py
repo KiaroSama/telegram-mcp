@@ -27,6 +27,7 @@ from telegram_mcp.tools.channel_settings import *
 # modules above; the grouping is historic (they were once the only fork-authored
 # files) but the ordering still reflects the dependency direction.
 from telegram_mcp.tools.inspection import *
+from telegram_mcp.tools.media_inspection import *
 from telegram_mcp.tools.visual import *
 from telegram_mcp.tools.effects import *
 from telegram_mcp.tools.buttons import *

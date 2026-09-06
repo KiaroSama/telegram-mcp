@@ -587,6 +587,7 @@ telegram_mcp/button_view.py
 telegram_mcp/effect_catalog.py, telegram_mcp/media_transfer.py
 telegram_mcp/media_preview.py
 telegram_mcp/tools/visual.py, telegram_mcp/tools/inspection.py
+telegram_mcp/tools/media_inspection.py
 telegram_mcp/tools/effects.py, telegram_mcp/tools/buttons.py
 telegram_mcp/tools/scheduled.py, telegram_mcp/tools/ephemeral.py
 telegram_mcp/tools/polls.py, telegram_mcp/tools/stories.py
@@ -599,6 +600,11 @@ docs/visual-structured-access.md
 `text_fidelity.py` holds the string rules split out of `message_view.py`, `media_transfer.py`
 the bounded-download layer and `media_preview.py` the asset-preview layer — both split out of
 `tools/inspection.py`. All three are re-exported from their original modules, so no import moved.
+`tools/inspection.py` was itself split again: it keeps the tools that answer what the API SAYS
+about a message (`inspect_message`, `inspect_messages`) and `media_inspection.py` takes the four
+that turn bytes into a picture (`get_media_details`, `get_media_thumbnail`, `get_media_frames`,
+`get_custom_emoji`). The dependency runs one way and reaches `_get_message` THROUGH the module
+rather than importing the name, so a test patching it on `inspection` still reaches both halves.
 `scheduled.py` and `ephemeral.py` are the timed-message pair. The inherited tools can only *create* a
 plain scheduled message, so `scheduled.py` adds reading the queue back, editing it, cancelling
 it, and `schedule_repeat_period` — the field behind Telegram's recurring messages, whose two

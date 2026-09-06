@@ -96,6 +96,7 @@ predicted.
 | Stories: read, react, post | `list_peer_stories`, `get_stories`, `react_to_story`, `post_story` | `tools/stories.py` |
 | Saved messages: tags and saved dialogs | `list_saved_dialogs`, `get_saved_history`, `list_saved_tags`, `name_saved_tag` | `tools/saved.py` |
 | Quick-reply shortcuts | `list_quick_replies`, `send_quick_reply` | `tools/saved.py` |
+| Quick-reply editing | `add_quick_reply`, `read_quick_reply`, `edit_quick_reply`, `rename_quick_reply`, `delete_quick_reply` | `tools/quick_replies.py` |
 | Translation | `translate` | `tools/translation.py` |
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
 | Packs on the account: install and remove | `install_sticker_set`, `uninstall_sticker_set`, `get_sticker_sets(kind=...)` | `tools/stickers.py`, `tools/media.py` |
@@ -126,7 +127,7 @@ history rewrite here left the two with no merge base). Secret chats then took it
 
 ## The reads that could not be written back
 
-Eight surfaces where the server reported a fact and the tool that should act on
+Nine surfaces where the server reported a fact and the tool that should act on
 it could not express that fact. Each is a *pair*, so each is listed by what the
 reader already said and what the writer gained:
 
@@ -140,6 +141,7 @@ reader already said and what the writer gained:
 | `describe_reply_quote` reports `reply_quote.text`/`.offset` | nothing could send a partial quote | `quote_text`/`quote_offset` on `reply_to_message` |
 | `get_message_effect` resolves an id | nothing listed the catalogue | `list_message_effects` |
 | `get_custom_emoji` named an emoji's set by id | `inspect_sticker_set` took a short name only, and the id's `access_hash` was discarded before anyone saw it — so "which pack is this emoji from?" had no answer | `sticker_set_access_hash` on the reader, `set_id`/`access_hash` on the writer, and `sticker_set` / `sticker_set_title` / `sticker_set_link` resolved once per distinct set |
+| `add_quick_reply` has always taken `entities` | `read_quick_reply` published only `text`, so a shortcut holding a premium emoji read back as its bare fallback glyph and nothing could say WHICH emoji was stored — nor edit one in place | `entities` on the reader, and `edit_quick_reply`, since `messages.editMessage` takes a `quick_reply_shortcut_id` |
 
 The quote work turned up a defect rather than only a gap. `forum.topic_reply_to`
 returns an `InputReplyToMessage` for the one case it exists to serve — *reply to
