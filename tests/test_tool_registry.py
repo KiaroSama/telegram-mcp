@@ -231,3 +231,31 @@ def test_no_tool_promises_a_string_and_can_return_a_list():
         "these tools are annotated `-> str` but can return a list, which mcp 2.x "
         f"rejects at the output-schema check after the work is already done: {offenders}"
     )
+
+
+def test_no_tool_silently_swallows_an_argument_it_does_not_declare(registered_tools):
+    """An undeclared argument must be an ERROR, not a no-op.
+
+    JSON Schema defaults `additionalProperties` to true and pydantic defaults
+    `extra` to "ignore", so out of the box every tool here accepted any argument
+    a caller invented and discarded it without a word. Measured live against the
+    running server: `inspect_custom_emoji` takes `(chat_id, message_id, account)`
+    and a call passing `document_ids=[...]` plus `include_previews=False`
+    returned a full, cheerful, completely unfiltered result. The caller cannot
+    tell a honoured argument from an ignored one, which is worse than either
+    supporting it or rejecting it.
+
+    The guard is on the whole surface, not one tool: the fix is one line on the
+    SDK's shared argument base, and this is what fails if a version bump moves
+    it.
+    """
+    permissive = sorted(
+        tool.name
+        for tool in registered_tools
+        if (tool.input_schema or {}).get("additionalProperties") is not False
+    )
+
+    assert permissive == [], (
+        f"{len(permissive)} tool(s) accept undeclared arguments and discard them "
+        f"in silence: {permissive[:10]}"
+    )

@@ -173,6 +173,43 @@ def _server_version() -> str:
         return "0+unknown"
 
 
+def _reject_undeclared_arguments() -> bool:
+    """Make an argument no tool declares an ERROR instead of a silent no-op.
+
+    The SDK builds every tool's argument model from the function signature with
+    `create_model(__base__=ArgModelBase)`, and that base sets only
+    `arbitrary_types_allowed`. Pydantic then defaults `extra` to "ignore" and the
+    published schema carries no `additionalProperties`, which JSON Schema defaults
+    to true - so out of the box all 212 tools here accepted any argument a caller
+    invented and threw it away without a word.
+
+    That is not theoretical. `inspect_custom_emoji` takes `(chat_id, message_id)`,
+    and a live call adding `document_ids=[...]` and `include_previews=False`
+    returned a full, unfiltered result: the caller reads a plausible answer and
+    believes their filter was applied. A missing REQUIRED argument was already
+    reported properly, which makes the asymmetry worse - the caller learns that
+    arguments are checked, and is wrong about which ones.
+
+    One line, because the base is shared: subclasses are built when each tool
+    registers, which happens after this module finishes, so they inherit it. It
+    also fixes the published schema, since pydantic emits
+    `additionalProperties: false` for `extra="forbid"`.
+
+    Fails OPEN by design: a private SDK path that moves in a version bump must not
+    stop the server from starting. `tests/test_tool_registry.py` is what turns that
+    silence back into a red test.
+    """
+    try:
+        from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
+
+        ArgModelBase.model_config["extra"] = "forbid"
+        return True
+    except Exception:  # pragma: no cover - only on an incompatible SDK
+        return False
+
+
+STRICT_TOOL_ARGUMENTS = _reject_undeclared_arguments()
+
 # `stateless_http` was a constructor argument under FastMCP; in mcp 2.x it is a
 # parameter of run_streamable_http_async, so it moved to `runner._serve`.
 mcp = MCPServer("telegram", version=_server_version())
