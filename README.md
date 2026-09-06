@@ -119,6 +119,16 @@ server deliberately does not. The tools group into these areas:
   for a banner built from one repeated emoji and wrong for a message mixing several — so the
   result always says how many changed. **Pass ids as strings:** they exceed JSON's exact
   integer range, and as numbers they arrive as a different emoji.
+- **Choosing WHICH emoji, by looking at it:** the glyph in the text is a fallback character and
+  says nothing about the picture — in one live pack a `💳` is the PayPal logo, a `✅` a brand
+  mark, a `😒` the Discord logo — so a substitution decided from the character is a coin toss.
+  `scripts/emoji_studio.py` renders instead: `sheet` writes a labelled contact sheet of any
+  ids, `gif` an animated preview, `lines` numbers a message's lines with the emoji already on
+  each, and `nearest` ranks your own packs by VISUAL distance from a given emoji and writes a
+  comparison sheet to decide from. The ranking uses silhouette, spatial colour and edge
+  structure after normalising scale and position; `scripts/emoji_accuracy.py` scores it against
+  pairs that are already known to be correct. Frame choice is part of it: a `.tgs` legitimately
+  begins and ends transparent, so a preview that grabs frame 0 shows an empty box.
 - **Quick replies, the writing half:** `add_quick_reply` stores a message under a shortcut,
   `read_quick_reply` lists what a shortcut holds, `rename_quick_reply` renames one and
   `delete_quick_reply` removes either specific messages or the whole shortcut. Telegram has no
