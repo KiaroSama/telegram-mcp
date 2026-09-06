@@ -527,3 +527,60 @@ def test_every_startup_diagnostic_carries_the_marker():
     assert (
         "telegram-mcp" in launcher and "SERVER_LINE" in launcher
     ), "the launcher no longer allowlists the marker runner.py emits"
+
+
+@pytest.mark.asyncio
+async def test_http_issues_session_ids_by_default(monkeypatch):
+    """A restart has to be VISIBLE to the client, or its tool list goes stale.
+
+    Measured both ways on this server: stateless, the old session id still
+    answers 200 with the full tool list after a restart, so the client never
+    learns anything changed and goes on validating calls against the schema it
+    first saw. Stateful, it answers 404 "Session not found" - the one signal in
+    the protocol that makes a client re-initialise, which refetches the tools.
+    """
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+    monkeypatch.delenv("MCP_STATELESS_HTTP", raising=False)
+
+    await runner._serve("http")
+
+    assert fake.kwargs["stateless_http"] is False
+
+
+@pytest.mark.asyncio
+async def test_the_old_stateless_shape_is_still_reachable(monkeypatch):
+    """A restart has to be VISIBLE to the client, or its tool list goes stale.
+
+    Stateless HTTP was chosen so a client survives a server restart instead of
+    being told "No valid session ID provided". The cost only showed up once tools
+    started changing: the client caches `tools/list` at connect time, a restart
+    tells it nothing, and it then refuses calls the server now accepts - measured
+    live against a widened `inspect_sticker_set` and a newly added
+    `edit_quick_reply`.
+
+    A session id is the only thing in the protocol that makes a restart
+    observable: the sessions die with the process, the next request carries an id
+    the new process does not know, and the client re-initialises - which refetches
+    the tools. So the knob exists, and this is the test that it is wired to the
+    transport rather than merely parsed.
+    """
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+    monkeypatch.setenv("MCP_STATELESS_HTTP", "true")
+
+    await runner._serve("http")
+
+    assert fake.kwargs["stateless_http"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_unreadable_stateless_setting_keeps_the_safe_default(monkeypatch):
+    """A typo must not silently change the transport's shape."""
+    fake = _FakeMcp()
+    monkeypatch.setattr(runner, "mcp", fake)
+    monkeypatch.setenv("MCP_STATELESS_HTTP", "ture")
+
+    await runner._serve("http")
+
+    assert fake.kwargs["stateless_http"] is False

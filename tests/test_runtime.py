@@ -28,12 +28,26 @@ def _synthetic_mcp():
 
 
 @pytest.mark.asyncio
-async def test_shared_server_uses_stateless_http_transport(monkeypatch):
-    """A service restart must not invalidate long-lived Streamable HTTP clients.
+async def test_shared_server_makes_a_restart_visible_to_its_clients(monkeypatch):
+    """This assertion was the exact opposite until 2026-09-06, deliberately.
 
-    Under mcp 1.x this was a constructor argument and could be read back off
-    `settings`. 2.x takes it per call, so the only place the guarantee still
-    exists is the argument `_serve` passes - which is what this now asserts.
+    It used to read `stateless_http is True`, to guarantee that "a service restart
+    must not invalidate long-lived Streamable HTTP clients". That guarantee turned
+    out to be the bug. A client reads `tools/list` once, when it connects, and
+    caches it; a stateless restart tells it nothing, so it goes on validating
+    calls against the schema it first saw. Live: a widened `inspect_sticker_set`
+    and a newly added `edit_quick_reply` were refused by a client while the server
+    accepted the identical calls, and restarting fixed nothing because a stateless
+    restart has nothing to say.
+
+    Measured both ways on this server, one restart each: stateless, the old
+    session id still answered 200 with the full tool list; stateful, it answered
+    404 "Session not found" - the one signal in the protocol that makes a client
+    re-initialise, which refetches the tools.
+
+    So the guarantee is now the reverse: a restart IS visible, at the price of one
+    rejected call. `MCP_STATELESS_HTTP=true` restores the old shape for a
+    deployment that would rather have the old trade.
     """
     from telegram_mcp import runner
 
@@ -43,10 +57,11 @@ async def test_shared_server_uses_stateless_http_transport(monkeypatch):
         seen.update(kwargs)
 
     monkeypatch.setenv("MCP_TRANSPORT", "http")
+    monkeypatch.delenv("MCP_STATELESS_HTTP", raising=False)
     monkeypatch.setattr(runner.mcp, "run_streamable_http_async", _capture)
     await runner._serve("http")
 
-    assert seen["stateless_http"] is True
+    assert seen["stateless_http"] is False
     assert seen["host"] == "127.0.0.1"
     assert seen["port"] == 8765
 

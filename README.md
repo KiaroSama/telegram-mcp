@@ -397,6 +397,18 @@ For `http` and `sse`, the server binds `MCP_HOST`:`MCP_PORT` (default
 `127.0.0.1:8765`); the streamable HTTP endpoint is `/mcp`, the SSE endpoint is
 `/sse`.
 
+Streamable HTTP issues a session id, so **restarting the server is visible to its
+clients**. That matters because a client reads `tools/list` once, when it
+connects, and caches it: without a session id a restart tells it nothing, and it
+goes on validating calls against the schema it first saw — refusing a tool that
+was added or a parameter that became optional, with no error anywhere to explain
+it. With one, the ids die with the process, the next request is answered `404
+Session not found`, and the client re-initialises and refetches the tools. The
+price is one rejected call per restart.
+
+Set `MCP_STATELESS_HTTP=true` for the older behaviour, where a client survives a
+restart untouched and its tool list may silently go stale.
+
 DNS-rebinding protection is **on by default**, not off: the MCP SDK enables it
 because the server binds `127.0.0.1`, with an allow-list of `127.0.0.1:*`,
 `localhost:*` and `[::1]:*`. Setting `MCP_ALLOWED_HOSTS` replaces that default

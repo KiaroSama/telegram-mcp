@@ -203,6 +203,45 @@ def _transport_security():
     )
 
 
+def _stateless_http() -> bool:
+    """Whether the HTTP transport skips session ids. Default: no, it issues them.
+
+    Stateless was the original choice, so ONE long-lived process could hold the
+    shared Telethon session and still survive a restart: with no session id there
+    is nothing to invalidate, and a client's next call goes straight through
+    instead of being answered "No valid session ID provided".
+
+    That turned out to be the problem, not the feature. A client reads
+    `tools/list` when it connects and caches it. A stateless restart tells it
+    NOTHING, so it keeps validating calls against the schema it first saw - a
+    widened `inspect_sticker_set` and a newly added `edit_quick_reply` were both
+    refused by a client while the server accepted the identical calls, and no
+    number of restarts helped, because a stateless restart has nothing to say.
+
+    Measured on this server, same build, one restart each:
+
+      stateless=True   no session id issued; after the restart the old
+                       (absent) id still answers 200 with the full tool list
+      stateless=False  session id issued; after the restart it answers
+                       404 "Session not found"
+
+    That 404 is the whole point. It is the only thing in the protocol that makes
+    a restart observable, and the spec has the client re-initialise when it sees
+    one - which refetches the tools. The price is one rejected call per restart,
+    which is strictly better than a client that is silently wrong.
+
+    `MCP_STATELESS_HTTP=true` restores the old shape. Only an explicit,
+    recognised truth does: this is deliberately NOT `parse_bool_env`, whose
+    documented contract is that anything unrecognised is False - right for the
+    four switches that default to off, and exactly wrong here, where
+    `MCP_STATELESS_HTTP=ture` would silently change the transport.
+    """
+    raw = os.getenv("MCP_STATELESS_HTTP")
+    if raw is None:
+        return False
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 async def _serve(transport: str) -> None:
     """Run the MCP server on the selected transport.
 
@@ -238,7 +277,7 @@ async def _serve(transport: str) -> None:
             options["transport_security"] = security
         if transport == "http":
             # `stateless_http` moved here from the server constructor in 2.x.
-            await mcp.run_streamable_http_async(stateless_http=True, **options)
+            await mcp.run_streamable_http_async(stateless_http=_stateless_http(), **options)
         else:
             await mcp.run_sse_async(**options)
     else:
