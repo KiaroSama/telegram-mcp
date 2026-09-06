@@ -45,6 +45,7 @@ class _Client:
             "EditQuickReplyShortcutRequest",
             "DeleteQuickReplyShortcutRequest",
             "DeleteQuickReplyMessagesRequest",
+            "EditMessageRequest",
         ):
             return SimpleNamespace(updates=[])
         raise AssertionError(f"unexpected request {name}")
@@ -218,3 +219,95 @@ async def test_reading_a_shortcut_returns_the_ids_a_deletion_takes(wire):
     assert record["message_id"] == 10
     assert record["has_media"] is False
     assert "Thank you!" in record["text"]
+
+
+def _stored(message_id=1, text="سلام✅", entities=None):
+    """A quick-reply message as Telegram returns it."""
+    return SimpleNamespace(
+        id=message_id,
+        message=text,
+        media=None,
+        entities=entities if entities is not None else [],
+    )
+
+
+@pytest.mark.asyncio
+async def test_reading_a_quick_reply_reports_its_entities(wire):
+    """The reader could not see what the writer could send.
+
+    `add_quick_reply` has taken an `entities` list all along, and
+    `read_quick_reply` reported only `text` - so a shortcut holding a premium
+    emoji read back as the bare fallback glyph, and nothing in the package could
+    say which custom emoji a saved reply actually carried. The glyph is not the
+    emoji: `✅` in the text may be any premium document at all.
+    """
+    from telethon.tl.types import MessageEntityCustomEmoji
+
+    client = wire(
+        _Client(messages=[_stored(entities=[MessageEntityCustomEmoji(4, 1, 5776121630275149735)])])
+    )
+    del client
+
+    record = _record(await mod.read_quick_reply(1, account="a"))
+
+    assert record["entities"], "no entities reported"
+    emoji = [e for e in record["entities"] if e["type"] == "custom_emoji"]
+    assert len(emoji) == 1
+    # A string, always: through a JSON number this id becomes a DIFFERENT emoji.
+    assert emoji[0]["custom_emoji_id"] == "5776121630275149735"
+    assert emoji[0]["offset"] == 4
+    assert emoji[0]["length"] == 1
+
+
+@pytest.mark.asyncio
+async def test_a_quick_reply_with_no_formatting_reports_no_entities(wire):
+    """The ordinary case stays quiet rather than growing an empty key."""
+    wire(_Client(messages=[_stored(text="plain")]))
+
+    record = _record(await mod.read_quick_reply(1, account="a"))
+
+    assert "entities" not in record
+
+
+@pytest.mark.asyncio
+async def test_a_stored_reply_can_be_edited_in_place(wire):
+    """Editing, not delete-and-re-add.
+
+    `messages.editMessage` takes `quick_reply_shortcut_id`, so a stored reply can
+    be corrected where it is. Re-adding would mint a new message id and move the
+    reply to the end of the shortcut, which is a different thing from fixing one.
+    """
+    client = wire(_Client(messages=[_stored()]))
+
+    payload = json.loads(
+        await mod.edit_quick_reply(
+            shortcut_id=1,
+            message_id=1,
+            message="سلام✅",
+            entities=[
+                {"type": "custom_emoji", "offset": 4, "length": 1, "custom_emoji_id": "999"}
+            ],
+            account="a",
+        )
+    )
+
+    sent = client.sent("EditMessageRequest")
+    assert sent is not None, f"no edit was sent: {client.names()}"
+    assert sent.quick_reply_shortcut_id == 1
+    assert sent.id == 1
+    assert sent.message == "سلام✅"
+    assert sent.entities == [
+        {"type": "custom_emoji", "offset": 4, "length": 1, "custom_emoji_id": "999"}
+    ]
+    assert payload["results"][0]["edited"] is True
+
+
+@pytest.mark.asyncio
+async def test_editing_refuses_a_message_the_shortcut_does_not_hold(wire):
+    """A wrong id would otherwise be sent to Telegram to be refused there, and
+    the shortcut's own messages are already in hand to check against."""
+    wire(_Client(messages=[_stored(message_id=1)]))
+
+    refused = await mod.edit_quick_reply(shortcut_id=1, message_id=404, message="x", account="a")
+
+    assert "404" in refused
