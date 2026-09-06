@@ -486,9 +486,17 @@ async def _custom_emoji_preview(
         if short_name:
             record["sticker_set"] = short_name
         elif set_id is not None:
-            # Custom emoji reference their set by InputStickerSetID; the short
-            # name costs a separate GetStickerSet call per set, so report the ID.
+            # Custom emoji reference their set by InputStickerSetID, so the short
+            # name costs a separate GetStickerSet call per set - the caller
+            # resolves it once per DISTINCT set rather than once per emoji.
             record["sticker_set_id"] = set_id
+            # The access hash is what makes that call possible: it is bound to
+            # the set AND to this account, so it cannot be obtained anywhere
+            # else. Dropping it here left the id an opaque number and made
+            # "which pack is this from?" unanswerable with the tools in the box.
+            access_hash = getattr(sticker_set, "access_hash", None)
+            if access_hash is not None:
+                record["sticker_set_access_hash"] = access_hash
         if getattr(attribute, "w", None):
             record["width"], record["height"] = attribute.w, attribute.h
         # DocumentAttributeCustomEmoji only.

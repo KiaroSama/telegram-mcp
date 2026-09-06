@@ -363,3 +363,56 @@ async def test_an_unrecognised_id_blames_the_pairing_rather_than_the_name(_wire)
     assert "access_hash" in answer
     assert "123" in answer
     assert "short name" not in answer, "it blames a name the caller never gave"
+
+
+@pytest.mark.asyncio
+async def test_a_set_can_be_inspected_by_id_and_access_hash(_wire):
+    """A custom emoji names its set by ID, not by short name.
+
+    `get_custom_emoji` reports `sticker_set_id`, this tool accepted only
+    `short_name`, and nothing bridged the two - so "which pack is this emoji
+    from?" was unanswerable with the tools in the box. `_set_ref` already knew
+    how to build `InputStickerSetID`; only the signature was closed.
+    """
+    client = _wire(_Client({"GetStickerSetRequest": _set_result(short_name="ByIdPack")}))
+
+    payload = json.loads(
+        await inspect_sticker_set(set_id=7571364655164031375, access_hash=-42, account="a")
+    )
+
+    sent = client.sent("GetStickerSetRequest")
+    assert type(sent.stickerset).__name__ == "InputStickerSetID"
+    assert sent.stickerset.id == 7571364655164031375
+    assert sent.stickerset.access_hash == -42
+    assert payload["results"][0]["short_name"] == "ByIdPack"
+
+
+@pytest.mark.asyncio
+async def test_inspecting_a_set_reports_the_link_that_installs_it(_wire):
+    """The pack's address, which is the thing a human is actually asked for.
+
+    An emoji set installs from /addemoji and a sticker set from /addstickers;
+    the `emojis` flag on the set is the only thing that decides which, so the
+    link is built here rather than guessed by the caller.
+    """
+    emoji_set = _set_result(short_name="EmojiPack")
+    emoji_set.set.emojis = True
+    _wire(_Client({"GetStickerSetRequest": emoji_set}))
+    emoji = json.loads(await inspect_sticker_set("EmojiPack", account="a"))["results"][0]
+
+    _wire(_Client({"GetStickerSetRequest": _set_result(short_name="StickerPack")}))
+    sticker = json.loads(await inspect_sticker_set("StickerPack", account="a"))["results"][0]
+
+    assert emoji["link"] == "https://t.me/addemoji/EmojiPack"
+    assert sticker["link"] == "https://t.me/addstickers/StickerPack"
+
+
+@pytest.mark.asyncio
+async def test_inspecting_by_id_needs_both_halves(_wire):
+    """An access hash is bound to the set AND the account, so an id alone is
+    not a reference. Refusing by name beats Telegram's StickersetInvalidError."""
+    _wire(_Client())
+
+    refused = await inspect_sticker_set(set_id=123, account="a")
+
+    assert "access_hash" in refused

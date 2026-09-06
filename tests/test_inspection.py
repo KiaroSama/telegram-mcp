@@ -775,3 +775,129 @@ async def test_get_custom_emoji_never_exceeds_the_batch_budget(monkeypatch):
     assert isinstance(result, list), f"the batch failed outright: {result!r}"
     assert peak <= 3, f"{peak} previews ran at once, above the derived width"
     assert peak > 1, "the batch ran sequentially; concurrency was lost, not bounded"
+
+
+@pytest.mark.asyncio
+async def test_a_custom_emoji_reports_the_pack_it_came_from(monkeypatch):
+    """Which pack, by name and by link - not just an opaque set id.
+
+    `_custom_emoji_preview` read `stickerset.id` off the document attribute and
+    dropped the `access_hash` sitting beside it, then reported the bare id
+    because "the short name costs a separate GetStickerSet call per set". The
+    hash is what makes that call possible at all, and one call per DISTINCT set
+    is cheap next to the image bytes this tool already moves.
+    """
+    import json
+
+    from telegram_mcp.tools import inspection
+
+    def _emoji(document_id, set_id, access_hash):
+        return SimpleNamespace(
+            id=document_id,
+            mime_type="image/webp",
+            size=10,
+            attributes=[
+                SimpleNamespace(
+                    alt="😀",
+                    stickerset=SimpleNamespace(id=set_id, access_hash=access_hash),
+                )
+            ],
+        )
+
+    # Two emoji from ONE set: the set must be resolved once, not twice.
+    documents = [_emoji(1, 555, 99), _emoji(2, 555, 99)]
+    resolved = []
+
+    class _Client:
+        async def __call__(self, request):
+            name = type(request).__name__
+            if name == "GetCustomEmojiDocumentsRequest":
+                return documents
+            resolved.append(request.stickerset.id)
+            return SimpleNamespace(
+                set=SimpleNamespace(
+                    short_name="MyPack",
+                    title="My Pack",
+                    count=2,
+                    animated=False,
+                    videos=False,
+                    emojis=True,
+                    masks=False,
+                ),
+                documents=[],
+            )
+
+    async def _ensure(client):
+        return None
+
+    async def _preview(client, document, count, max_dimension, max_bytes, ledger=None):
+        return {
+            "document_id": document.id,
+            "sticker_set_id": 555,
+            "sticker_set_access_hash": 99,
+        }, []
+
+    monkeypatch.setattr(inspection, "get_client", lambda account=None: _Client())
+    monkeypatch.setattr(inspection, "ensure_connected", _ensure)
+    monkeypatch.setattr(inspection, "_custom_emoji_preview", _preview)
+
+    records = json.loads((await inspection.get_custom_emoji([1, 2], account="a"))[0])["results"]
+
+    assert resolved == [555], f"the shared set was resolved {len(resolved)} times"
+    assert records[0]["sticker_set"] == "MyPack"
+    assert records[0]["sticker_set_title"] == "My Pack"
+    assert records[0]["sticker_set_link"] == "https://t.me/addemoji/MyPack"
+    assert records[1]["sticker_set"] == "MyPack"
+
+
+@pytest.mark.asyncio
+async def test_an_unresolvable_pack_does_not_sink_the_emoji(monkeypatch):
+    """The picture is the point; the pack name is a bonus. A set that cannot be
+    resolved - deleted, or an access hash this account was never given - must
+    leave the record intact and say so."""
+    import json
+
+    from telegram_mcp.tools import inspection
+
+    document = SimpleNamespace(id=1, mime_type="image/webp", size=10, attributes=[])
+
+    class _Client:
+        async def __call__(self, request):
+            if type(request).__name__ == "GetCustomEmojiDocumentsRequest":
+                return [document]
+            raise RuntimeError("STICKERSET_INVALID")
+
+    async def _ensure(client):
+        return None
+
+    async def _preview(client, doc, count, max_dimension, max_bytes, ledger=None):
+        return {"document_id": doc.id, "sticker_set_id": 7, "sticker_set_access_hash": 8}, []
+
+    monkeypatch.setattr(inspection, "get_client", lambda account=None: _Client())
+    monkeypatch.setattr(inspection, "ensure_connected", _ensure)
+    monkeypatch.setattr(inspection, "_custom_emoji_preview", _preview)
+
+    record = json.loads((await inspection.get_custom_emoji([1], account="a"))[0])["results"][0]
+
+    assert record["document_id"] == 1
+    assert record["sticker_set_id"] == 7
+    assert "sticker_set" not in record
+    assert "STICKERSET_INVALID" in record["sticker_set_error"]
+
+
+@pytest.mark.asyncio
+async def test_the_set_access_hash_is_kept_not_discarded():
+    """The one-line half of the bridge, at the layer that reads the document."""
+    from telegram_mcp.tools.inspection import _custom_emoji_preview
+
+    document = SimpleNamespace(
+        id=1,
+        mime_type="",
+        size=0,
+        attributes=[SimpleNamespace(alt="😀", stickerset=SimpleNamespace(id=555, access_hash=99))],
+    )
+
+    record, _images = await _custom_emoji_preview(None, document, count=1, max_dimension=64)
+
+    assert record["sticker_set_id"] == 555
+    assert record["sticker_set_access_hash"] == 99

@@ -32,9 +32,12 @@ from telegram_mcp.media_preview import (  # noqa: F401  (re-exported for tests a
 )
 from telegram_mcp.message_view import deep_message_dict, describe_media, display_name
 from telegram_mcp.tools.messages import LINK_DOMAIN, message_to_dict
+from telegram_mcp.tools.stickers import set_link
 from telegram_mcp.tools.visual import safe_window_dict
 from telegram_mcp.visual.frames import MAX_FRAMES, FrameExtractionError
 from telegram_mcp.visual.images import MAX_IMAGE_DIMENSION, ImageError, encode_image
+
+from telethon.tl.types import InputStickerSetID
 
 from mcp.server.mcpserver import Image
 
@@ -610,6 +613,58 @@ async def get_media_frames(
         )
 
 
+async def _name_the_sets(cl, records: list) -> None:
+    """Fill in each record's pack: short name, title, and the install link.
+
+    A custom emoji references its set by `InputStickerSetID`, so the document
+    alone yields a bare number. Resolving it needs one `GetStickerSet` per set -
+    which is why this was skipped and only the id reported, leaving "which pack
+    is this emoji from?" unanswerable with the tools in the box.
+
+    Once per DISTINCT set, not once per emoji: a batch is usually one or two
+    packs, and the cost is trivial beside the image bytes this tool already
+    moves. Records are mutated in place, so their order is untouched.
+
+    Never raises. The picture is the point and the pack name is a bonus, so a
+    deleted set - or an access hash this account was never granted - leaves the
+    record intact and says so in `sticker_set_error`.
+    """
+    wanted = {
+        (record["sticker_set_id"], record["sticker_set_access_hash"])
+        for record in records
+        if record.get("sticker_set_id") is not None
+        and record.get("sticker_set_access_hash") is not None
+    }
+    if not wanted:
+        return
+
+    async def _one(reference):
+        set_id, access_hash = reference
+        try:
+            result = await cl(
+                functions.messages.GetStickerSetRequest(
+                    stickerset=InputStickerSetID(id=int(set_id), access_hash=int(access_hash)),
+                    hash=0,
+                )
+            )
+            info = getattr(result, "set", None)
+            short_name = getattr(info, "short_name", None)
+            if not short_name:
+                return reference, {"sticker_set_error": "Telegram returned a set with no name."}
+            return reference, {
+                "sticker_set": short_name,
+                "sticker_set_title": display_name(getattr(info, "title", "") or ""),
+                "sticker_set_link": set_link(short_name, bool(getattr(info, "emojis", False))),
+            }
+        except Exception as error:
+            return reference, {"sticker_set_error": f"{type(error).__name__}: {error}"}
+
+    found = dict(await asyncio.gather(*(_one(reference) for reference in wanted)))
+    for record in records:
+        reference = (record.get("sticker_set_id"), record.get("sticker_set_access_hash"))
+        record.update(found.get(reference) or {})
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Get Custom Emoji", openWorldHint=True, readOnlyHint=True)
 )
@@ -735,6 +790,7 @@ async def get_custom_emoji(
             record, previews = outcome
             records.append(record)
             images.extend(previews)
+        await _name_the_sets(cl, records)
         return [format_tool_result(records, {"requested_ids": ids}), *images]
     except ImageError as e:
         return str(e)

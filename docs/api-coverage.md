@@ -126,7 +126,7 @@ history rewrite here left the two with no merge base). Secret chats then took it
 
 ## The reads that could not be written back
 
-Seven surfaces where the server reported a fact and the tool that should act on
+Eight surfaces where the server reported a fact and the tool that should act on
 it could not express that fact. Each is a *pair*, so each is listed by what the
 reader already said and what the writer gained:
 
@@ -139,6 +139,7 @@ reader already said and what the writer gained:
 | `list_saved_tags` reports `custom_emoji_id` | `name_saved_tag` took an emoticon only, so a premium tag could not be named | a `custom_emoji_id` argument |
 | `describe_reply_quote` reports `reply_quote.text`/`.offset` | nothing could send a partial quote | `quote_text`/`quote_offset` on `reply_to_message` |
 | `get_message_effect` resolves an id | nothing listed the catalogue | `list_message_effects` |
+| `get_custom_emoji` named an emoji's set by id | `inspect_sticker_set` took a short name only, and the id's `access_hash` was discarded before anyone saw it — so "which pack is this emoji from?" had no answer | `sticker_set_access_hash` on the reader, `set_id`/`access_hash` on the writer, and `sticker_set` / `sticker_set_title` / `sticker_set_link` resolved once per distinct set |
 
 The quote work turned up a defect rather than only a gap. `forum.topic_reply_to`
 returns an `InputReplyToMessage` for the one case it exists to serve — *reply to
