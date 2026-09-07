@@ -203,7 +203,8 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
     guess it, so this is not a convenience: without it a caller cannot supply a
     valid value at all.
 
-    Telegram lists the account's CURRENT default first.
+    The `default` flag comes from the chat's own `default_send_as`, not from
+    the order of this list - Telegram does not sort by it.
 
     Args:
         chat_id: The chat the message would be sent to - NOT the channel you want
@@ -226,6 +227,21 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
                 "in a channel or megagroup where you administer a linked channel, and answered: "
                 f"{type(error).__name__}: {error}"
             )
+
+        # The CURRENT default, from the chat itself. `getSendAs` does not order
+        # its answer by it - that was a guess this tool shipped with, and a live
+        # run disproved it: Telegram accepted a SaveDefaultSendAs and the order
+        # came back unchanged. `ChannelFull.default_send_as` is the real field.
+        # Never fatal: an unreadable full chat costs the flag, not the listing.
+        default_peer = None
+        try:
+            full = await cl(functions.channels.GetFullChannelRequest(channel=entity))
+            default_peer = getattr(getattr(full, "full_chat", None), "default_send_as", None)
+        except Exception:  # pragma: no cover - a chat whose full form is refused
+            default_peer = None
+        default_id = (
+            telethon_utils.get_peer_id(default_peer) if default_peer is not None else None
+        )
 
         # Imported HERE, not at the top: `message_view` imports from this module,
         # and the module docstring above records that the cycle is broken by
@@ -254,7 +270,7 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
                 }
 
         records = []
-        for position, option in enumerate(getattr(answer, "peers", None) or []):
+        for option in getattr(answer, "peers", None) or []:
             peer = getattr(option, "peer", None)
             identifier = (
                 getattr(peer, "channel_id", None)
@@ -264,14 +280,25 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
             known = titles.get(int(identifier)) if identifier is not None else None
             records.append(
                 {
+                    # The MARKED id, which is the one everything that consumes it
+                    # can resolve. `getSendAs` answers with a raw
+                    # `PeerChannel(channel_id=...)`, and handing that straight back
+                    # to `set_default_send_as` fails with "this account cannot see
+                    # that chat" - a value produced by this very tool. A user id is
+                    # unmarked and `get_peer_id` leaves it that way.
+                    #
                     # A string for the same reason every id here is one: these
                     # exceed 2**53 and a JSON number turns one into another peer.
-                    "send_as": str(identifier),
+                    "send_as": str(telethon_utils.get_peer_id(peer)) if peer else None,
                     "kind": type(peer).__name__.replace("Peer", "").lower(),
                     "title": (known or {}).get("title"),
                     "username": (known or {}).get("username"),
                     "premium_required": bool(getattr(option, "premium_required", False)),
-                    "default": position == 0,
+                    "default": (
+                        default_id is not None
+                        and peer is not None
+                        and telethon_utils.get_peer_id(peer) == default_id
+                    ),
                 }
             )
         return format_tool_result(
@@ -299,7 +326,7 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
     )
 )
 @with_account(readonly=False)
-@validate_id("chat_id")
+@validate_id("chat_id", "send_as")
 async def set_default_send_as(
     chat_id: Union[int, str], send_as: Union[int, str], account: str = None
 ) -> str:
@@ -343,7 +370,7 @@ async def set_default_send_as(
     annotations=ToolAnnotations(title="Send Message", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
-@validate_id("chat_id")
+@validate_id("chat_id", "send_as")
 async def send_message(
     chat_id: Union[int, str],
     message: str,
@@ -707,7 +734,7 @@ async def edit_message(
     annotations=ToolAnnotations(title="Reply To Message", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
-@validate_id("chat_id")
+@validate_id("chat_id", "send_as")
 async def reply_to_message(
     chat_id: Union[int, str],
     message_id: int,

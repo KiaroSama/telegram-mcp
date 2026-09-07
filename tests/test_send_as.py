@@ -19,6 +19,10 @@ from telegram_mcp.tools import media as media_mod
 from telegram_mcp.tools import messages as messages_mod
 
 RAW_CHAT_ID = "@somechannel"
+# Telethon marks a channel peer as -(1000000000000 + id) - arithmetic, not the
+# string "-100" glued on front, which is what the first version of these tests
+# guessed. Written out so the rule is visible rather than a magic number.
+MARKED_CHANNEL = str(-(1000000000000 + 999))
 RESOLVED = types.InputPeerChannel(channel_id=4242, access_hash=7)
 AS_CHANNEL = types.InputPeerChannel(channel_id=999, access_hash=11)
 
@@ -72,11 +76,11 @@ def _send_as_peers(with_names=True):
 
 
 class Recorder:
-    def __init__(self, send_as_peers=None, fail_send_as=False):
+    def __init__(self, send_as_peers=None, default_send_as=None):
         self.sent = []
         self.calls = []
         self._peers = send_as_peers
-        self._fail = fail_send_as
+        self._default_send_as = default_send_as
 
     async def __call__(self, request):
         self.sent.append(request)
@@ -84,6 +88,25 @@ class Recorder:
             if self._peers is None:
                 raise ValueError("CHAT_ID_INVALID")
             return self._peers
+        if isinstance(request, functions.channels.GetFullChannelRequest):
+            # The default is deliberately NOT the first peer in `_send_as_peers`,
+            # because "first means default" is exactly the guess this replaced.
+            return types.messages.ChatFull(
+                full_chat=types.ChannelFull(
+                    id=4242,
+                    about="",
+                    read_inbox_max_id=0,
+                    read_outbox_max_id=0,
+                    unread_count=0,
+                    chat_photo=None,
+                    notify_settings=None,
+                    bot_info=[],
+                    pts=0,
+                    default_send_as=self._default_send_as,
+                ),
+                chats=[],
+                users=[],
+            )
         return True
 
     async def send_message(
@@ -132,12 +155,13 @@ async def test_list_send_as_reports_every_identity_and_flags_the_gated_ones(wire
     assert all(isinstance(r["send_as"], str) for r in records)
     # A bare peer id is unusable to a human: the title and username have to be
     # looked up out of the answer's own `chats`/`users`.
-    channel = next(r for r in records if r["send_as"] == "999")
+    channel = next(r for r in records if r["send_as"] == MARKED_CHANNEL)
     assert channel["title"] == "My Channel"
     assert channel["username"] == "mychannel"
     assert next(r for r in records if r["send_as"] == "1")["title"] == "Me"
     # An id the answer names nowhere still has to survive, without a title.
-    assert next(r for r in records if r["send_as"] == "777")["title"] is None
+    unnamed = str(-(1000000000000 + 777))
+    assert next(r for r in records if r["send_as"] == unnamed)["title"] is None
 
 
 @pytest.mark.asyncio
@@ -244,3 +268,101 @@ async def test_setting_the_default_refuses_an_empty_identity(wire_client):
     refused = await messages_mod.set_default_send_as(RAW_CHAT_ID, "")
 
     assert "list_send_as" in refused
+
+
+@pytest.mark.asyncio
+async def test_the_id_the_reader_gives_is_one_the_writer_can_use(wire_client):
+    """The reader/writer gap this feature nearly shipped with.
+
+    `getSendAs` answers with `PeerChannel(channel_id=2234487991)` - the RAW id.
+    `resolve_entity` needs the MARKED form, `-1002234487991`, and a raw channel id
+    resolves to nothing: the live test failed with "this account cannot see that
+    chat" while the value came from the tool's own output moments earlier. So the
+    reported id has to be the one that can be handed straight back.
+
+    A user id is unmarked and must stay that way, which is why this asserts both.
+    """
+    import json
+
+    wire_client(messages_mod, Recorder(_send_as_peers()), entity=RESOLVED)
+
+    records = json.loads(await messages_mod.list_send_as(RAW_CHAT_ID))["results"]
+
+    assert (
+        next(r for r in records if r["kind"] == "channel" and r["title"] == "My Channel")[
+            "send_as"
+        ]
+        == MARKED_CHANNEL
+    ), "a raw channel id cannot be resolved by anything that consumes it"
+    assert (
+        next(r for r in records if r["kind"] == "user")["send_as"] == "1"
+    ), "a user id is not marked, and marking it would break it"
+
+
+@pytest.mark.asyncio
+async def test_a_numeric_send_as_is_normalised_the_way_chat_id_is(monkeypatch):
+    """`send_as` arrives as a STRING and must be normalised before it is resolved.
+
+    `list_send_as` publishes every id as a string - they exceed 2**53 - so the
+    value handed back is `"-1001565431543"`, and this project's resolver treats a
+    string differently from the int. Live proof: `get_chat` resolved all four
+    forms while `set_default_send_as` refused the same values with "this account
+    cannot see that chat", because only the first goes through `@validate_id`.
+
+    This asserts on what the RESOLVER WAS ASKED, not on what it returned. The
+    shared `wire_client` fixture cannot see this bug at all - it hands back one
+    fixed entity whatever it is given, so a string and an int look identical
+    through it. A double that answers the same for both inputs cannot test the
+    difference between them.
+    """
+    asked = []
+
+    async def _resolve(value, client=None, account=None):
+        asked.append(value)
+        return AS_CHANNEL
+
+    async def _ensure(_client):
+        return None
+
+    monkeypatch.setattr(messages_mod, "get_client", lambda account=None: Recorder())
+    monkeypatch.setattr(messages_mod, "ensure_connected", _ensure)
+    monkeypatch.setattr(messages_mod, "resolve_entity", _resolve)
+
+    # By KEYWORD, which is how an MCP call always arrives: the JSON-RPC
+    # `arguments` object becomes kwargs. `@validate_id` reads kwargs ONLY and
+    # silently skips a positionally-passed argument, so calling it positionally
+    # here would test a path production never takes and report a failure that is
+    # not real.
+    await messages_mod.set_default_send_as(chat_id=RAW_CHAT_ID, send_as="-1001565431543")
+
+    assert -1001565431543 in asked, (
+        f"the resolver was asked {asked!r}; a numeric send_as must arrive as an int, "
+        "the way @validate_id delivers chat_id"
+    )
+
+
+@pytest.mark.asyncio
+async def test_the_default_comes_from_the_chat_not_from_the_list_order(wire_client):
+    """`getSendAs` does not put the current default first, and saying it does was
+    a guess this tool shipped with.
+
+    Proven live: `set_default_send_as` returned OK, Telegram accepted the write,
+    and the order coming back was unchanged. The authoritative field is
+    `ChannelFull.default_send_as`, so that is what the flag reads.
+    """
+    import json
+
+    wire_client(
+        messages_mod,
+        Recorder(_send_as_peers(), default_send_as=types.PeerChannel(channel_id=999)),
+        entity=RESOLVED,
+    )
+
+    records = json.loads(await messages_mod.list_send_as(RAW_CHAT_ID))["results"]
+
+    flagged = [r for r in records if r["default"]]
+    assert len(flagged) == 1, f"exactly one default expected, got {flagged}"
+    assert flagged[0]["send_as"] == MARKED_CHANNEL, (
+        "the flag followed list order instead of the chat's own default_send_as"
+    )
+    assert records[0]["default"] is False, "the first entry is not automatically the default"

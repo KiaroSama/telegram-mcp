@@ -37,7 +37,7 @@ class _DownloadTooLarge(Exception):
 
 @mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
 @with_account(readonly=False)
-@validate_id("chat_id")
+@validate_id("chat_id", "send_as")
 async def send_file(
     chat_id: Union[int, str],
     file_path: Union[str, List[str]],
