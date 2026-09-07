@@ -239,9 +239,7 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
             default_peer = getattr(getattr(full, "full_chat", None), "default_send_as", None)
         except Exception:  # pragma: no cover - a chat whose full form is refused
             default_peer = None
-        default_id = (
-            telethon_utils.get_peer_id(default_peer) if default_peer is not None else None
-        )
+        default_id = telethon_utils.get_peer_id(default_peer) if default_peer is not None else None
 
         # Imported HERE, not at the top: `message_view` imports from this module,
         # and the module docstring above records that the cycle is broken by

@@ -362,7 +362,7 @@ async def test_the_default_comes_from_the_chat_not_from_the_list_order(wire_clie
 
     flagged = [r for r in records if r["default"]]
     assert len(flagged) == 1, f"exactly one default expected, got {flagged}"
-    assert flagged[0]["send_as"] == MARKED_CHANNEL, (
-        "the flag followed list order instead of the chat's own default_send_as"
-    )
+    assert (
+        flagged[0]["send_as"] == MARKED_CHANNEL
+    ), "the flag followed list order instead of the chat's own default_send_as"
     assert records[0]["default"] is False, "the first entry is not automatically the default"
