@@ -387,3 +387,31 @@ def test_an_export_without_the_table_is_empty_not_an_error(tmp_path):
     """Only copied emoji have a row - about 800 of 6739 - so a miss means "not
     copied", never "not present"."""
     assert emoji_packs.source_map(_export(tmp_path, {"p": [("1", "a")]})) == {}
+
+
+def test_a_missing_ffmpeg_is_named_and_tells_you_to_install_it(tmp_path, monkeypatch):
+    """Folding these into a bare `skipped` count is how a `.webm` emoji that WAS
+    the right answer stayed invisible while the run looked clean."""
+    root = _export(tmp_path, {"p": [("1", "a"), ("2", "b")]})
+    (root / emoji_packs.THUMBS / "2.webp").unlink()
+    (root / emoji_packs.THUMBS / "2.webm").write_bytes(b"video")
+    monkeypatch.setattr(emoji_packs, "ffmpeg_path", lambda: None)
+    entries, _ = emoji_packs.read_catalogue(root)
+
+    _stored, counts = emoji_packs.refresh({}, entries, _fingerprint)
+
+    assert counts["skipped"] == 1
+    assert len(counts["problems"]) == 1
+    note = counts["problems"][0]
+    assert "ffmpeg" in note and "install" in note.lower()
+    assert "1 emoji" in note, "the count of affected emoji is the actionable part"
+
+
+def test_no_ffmpeg_note_when_there_is_no_webm_to_read(tmp_path, monkeypatch):
+    """A warning that fires when nothing is affected is one people learn to skip."""
+    monkeypatch.setattr(emoji_packs, "ffmpeg_path", lambda: None)
+    entries, _ = emoji_packs.read_catalogue(_export(tmp_path, {"p": [("1", "a")]}))
+
+    _stored, counts = emoji_packs.refresh({}, entries, _fingerprint)
+
+    assert counts["problems"] == []

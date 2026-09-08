@@ -236,10 +236,18 @@ def refresh(stored, entries, fingerprint):
     """
     added = updated = unchanged = skipped = 0
     problems = []
+    no_ffmpeg = 0
 
     for emoji_id, entry in entries.items():
         thumb = entry["thumb"]
-        if thumb is None or (thumb.suffix == ".webm" and not ffmpeg_path()):
+        if thumb is not None and thumb.suffix == ".webm" and not ffmpeg_path():
+            # Counted separately so the reason is SAID. Silently folding these
+            # into `skipped` is how a `.webm` emoji that was the right answer
+            # stayed invisible to `nearest` while the run looked clean.
+            no_ffmpeg += 1
+            skipped += 1
+            continue
+        if thumb is None:
             skipped += 1
             continue
         was = stored.get(emoji_id)
@@ -272,6 +280,14 @@ def refresh(stored, entries, fingerprint):
     ]
     for key in gone:
         del stored[key]
+
+    if no_ffmpeg:
+        problems.append(
+            f"{no_ffmpeg} emoji have only a .webm thumbnail and ffmpeg is not on PATH, "
+            "so they were skipped and `nearest` can never offer them. Install it "
+            "(winget install Gyan.FFmpeg / apt install ffmpeg / brew install ffmpeg) "
+            "and re-run this command - only those emoji will be read."
+        )
 
     return stored, {
         "added": added,
