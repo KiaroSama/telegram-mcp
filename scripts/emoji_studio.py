@@ -26,12 +26,14 @@ import argparse
 import base64
 import io
 import json
+import os
 import sys
 import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from emoji_compose import best_frame, describe_lines  # noqa: E402
+import emoji_packs  # noqa: E402
 import emoji_vision  # noqa: E402
 
 DEFAULT_URL = "http://127.0.0.1:18765/mcp"
@@ -178,6 +180,52 @@ def contact_sheet(images, order, labels=None, columns=8, cell=84, out=None):
     return sheet
 
 
+# -------------------------------------------------------- pictures and packs
+
+
+class Pictures:
+    """Emoji pictures, from the local export where it has them, else Telegram.
+
+    The export answers instantly and offline for the owner's own packs, which is
+    almost every question asked here; Telegram still answers for an id from
+    somebody else's pack, which is exactly the case `nearest` exists to serve.
+    The Studio - and its handshake - is built only if that fallback is reached.
+    """
+
+    def __init__(self, make_studio, root=None):
+        self._make_studio, self._studio = make_studio, None
+        self.entries = {}
+        if root is not None:
+            self.entries, problems = emoji_packs.read_catalogue(root)
+            for problem in problems:
+                print(f"packs: {problem}", file=sys.stderr)
+
+    @property
+    def studio(self):
+        if self._studio is None:
+            self._studio = self._make_studio()
+        return self._studio
+
+    def get(self, ids, size=96):
+        ids = [str(i) for i in ids]
+        out, remote = {}, []
+        for emoji_id in ids:
+            entry = self.entries.get(emoji_id)
+            thumb = entry["thumb"] if entry else None
+            if thumb is not None and thumb.suffix == ".webp":
+                out[emoji_id] = emoji_packs.open_picture(thumb)
+            else:
+                remote.append(emoji_id)
+        if remote:
+            out.update(self.studio.images(remote, size=size))
+        return out
+
+    def glyph(self, emoji_id):
+        """The fallback character, when the export already knows it."""
+        entry = self.entries.get(str(emoji_id))
+        return (entry or {}).get("glyph")
+
+
 # -------------------------------------------------------------- subcommands
 
 
@@ -185,13 +233,26 @@ def _studio(args):
     return Studio(url=args.url, account=args.account)
 
 
+def _pictures(args):
+    """A picture source, wired to the export when one was named or configured."""
+    root = None
+    if getattr(args, "packs_dir", None) or os.environ.get(emoji_packs.ENV_VAR):
+        root = emoji_packs.find_root(getattr(args, "packs_dir", None))
+    return Pictures(lambda: _studio(args), root)
+
+
 def cmd_sheet(args):
-    studio = _studio(args)
+    pictures = _pictures(args)
     ids = [i.strip() for i in args.ids.split(",") if i.strip()]
-    pictures = studio.images(ids, size=args.size)
-    facts = studio.meta(ids)
-    labels = {i: f"{(facts.get(i) or {}).get('placeholder', '?')} {i[-6:]}" for i in ids}
-    contact_sheet(pictures, ids, labels, columns=args.columns, out=args.out)
+    images = pictures.get(ids, size=args.size)
+    # Only an id the export does not know costs a round trip for its glyph.
+    unknown = [i for i in ids if i not in pictures.entries]
+    facts = pictures.studio.meta(unknown) if unknown else {}
+    labels = {
+        i: f"{pictures.glyph(i) or (facts.get(i) or {}).get('placeholder', '?')} {i[-6:]}"
+        for i in ids
+    }
+    contact_sheet(images, ids, labels, columns=args.columns, out=args.out)
     print(args.out)
 
 
@@ -221,9 +282,13 @@ def cmd_gif(args):
 
 def cmd_index(args):
     """Fingerprint a pack once. Everything `nearest` does afterwards is local."""
-    studio = _studio(args)
     cache = Path(args.cache)
     stored = json.loads(cache.read_text(encoding="utf-8")) if cache.exists() else {}
+
+    if args.packs_dir or not args.packs:
+        return _index_from_packs(args, cache, stored)
+
+    studio = _studio(args)
     for short_name in args.packs.split(","):
         short_name = short_name.strip()
         if not short_name:
@@ -243,6 +308,35 @@ def cmd_index(args):
     print(f"{len(stored)} fingerprints -> {cache}")
 
 
+def _index_from_packs(args, cache, stored):
+    """Re-index from the Emoji Mapper export. Offline, and cheap to repeat.
+
+    This is the command to run after the export changes: it stats each
+    thumbnail, fingerprints only what moved, and forgets what the export no
+    longer has. `--rebuild` forces the lot when the fingerprint itself changes.
+    """
+    root = emoji_packs.find_root(args.packs_dir)
+    entries, problems = emoji_packs.read_catalogue(root)
+    for problem in problems:
+        print(f"packs: {problem}", file=sys.stderr)
+    if args.rebuild:
+        stored = {k: v for k, v in stored.items() if v.get("src") != "packs"}
+
+    print(f"{root}: {len(entries)} emoji in {len({e['pack'] for e in entries.values()})} packs")
+    stored, counts = emoji_packs.refresh(stored, entries, emoji_vision.fingerprint)
+    for problem in counts["problems"]:
+        print(f"packs: {problem}", file=sys.stderr)
+
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    cache.write_text(json.dumps(stored), encoding="utf-8")
+    print(
+        f"added {counts['added']}, updated {counts['updated']}, "
+        f"unchanged {counts['unchanged']}, removed {counts['removed']}, "
+        f"skipped {counts['skipped']}"
+    )
+    print(f"{len(stored)} fingerprints -> {cache}")
+
+
 def cmd_nearest(args):
     """Rank the owner's own emoji by how much they LOOK like a given one.
 
@@ -252,33 +346,41 @@ def cmd_nearest(args):
     evidence. So this always writes a comparison sheet: query on the left, top
     candidates to its right, and the choice is made by looking at it.
     """
-    studio = _studio(args)
+    source = _pictures(args)
     cache = Path(args.cache)
     if not cache.exists():
         raise SystemExit(f"No fingerprints at {cache}. Run `index` first.")
     stored = json.loads(cache.read_text(encoding="utf-8"))
 
-    query = studio.images([args.id], size=args.size).get(str(args.id))
+    query = source.get([args.id], size=args.size).get(str(args.id))
     if query is None:
-        raise SystemExit(f"Telegram returned no picture for {args.id}.")
+        raise SystemExit(f"No picture for {args.id}, locally or from Telegram.")
     target = emoji_vision.fingerprint(query)
     ranked = emoji_vision.rank(target, stored, k=args.k, exclude={str(args.id)})
 
     top = [k for _d, k in ranked]
-    pictures = studio.images(top, size=args.size)
+    pictures = source.get(top, size=args.size)
     pictures[str(args.id)] = query
     order = [str(args.id)] + top
     labels = {str(args.id): "QUERY"}
     for distance, key in ranked:
+        # Distance and id only: the cell is ~14 characters wide and the default
+        # bitmap font has no emoji, so a glyph here draws as an empty box. The
+        # glyph, pack and link go to the terminal below, where they render.
         labels[key] = f"{distance:.3f} {key[-6:]}"
     contact_sheet(pictures, order, labels, columns=len(order), out=args.out)
     for score, key in ranked:
         parts = emoji_vision.distance(target, stored[key], breakdown=True)
+        entry = stored[key]
+        where = entry.get("title") or entry.get("pack", "?")
+        glyph = entry.get("glyph") or ""
         print(
-            f"{score:.4f}  {key}  ({stored[key]['pack']})  "
+            f"{score:.4f}  {key}  {glyph} ({where})  "
             f"silhouette={parts['silhouette']:.3f} colour={parts['colour']:.3f} "
             f"structure={parts['structure']:.3f}"
         )
+        if entry.get("link"):
+            print(f"          {entry['link']}")
     print(args.out)
 
 
@@ -301,7 +403,16 @@ def main(argv=None):
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    def packs_dir(target):
+        """Subcommand-level so `index --packs-dir X` reads the way it is typed."""
+        target.add_argument(
+            "--packs-dir",
+            default=None,
+            help=f"Emoji Mapper export directory (default: ${emoji_packs.ENV_VAR})",
+        )
+
     sheet = sub.add_parser("sheet", help="contact sheet of the given ids")
+    packs_dir(sheet)
     sheet.add_argument("--ids", required=True, help="comma separated")
     sheet.add_argument("--out", default="sheet.png")
     sheet.add_argument("--size", type=int, default=96)
@@ -317,13 +428,19 @@ def main(argv=None):
     gif.set_defaults(func=cmd_gif)
 
     index = sub.add_parser("index", help="fingerprint packs for `nearest`")
-    index.add_argument("--packs", required=True, help="comma separated short names")
+    packs_dir(index)
+    index.add_argument(
+        "--packs",
+        default=None,
+        help="comma separated short names, asked of Telegram; omit to use the export",
+    )
     index.add_argument("--size", type=int, default=64)
     index.add_argument("--frames", type=int, default=3)
     index.add_argument("--rebuild", action="store_true")
     index.set_defaults(func=cmd_index)
 
     nearest = sub.add_parser("nearest", help="visually closest emoji in your packs")
+    packs_dir(nearest)
     nearest.add_argument("--id", required=True)
     nearest.add_argument("--k", type=int, default=8)
     nearest.add_argument("--size", type=int, default=96)
