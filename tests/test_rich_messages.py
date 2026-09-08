@@ -258,3 +258,48 @@ def test_an_unknown_rich_text_wrapper_still_yields_its_words():
 def test_flattening_never_raises_on_a_shape_it_has_not_met():
     for odd in (None, "", [], {}, {"@type": "richTextPlain"}, 7):
         assert isinstance(rm._flatten(odd), str)
+
+
+def test_a_premium_emoji_in_a_rich_block_is_not_dropped():
+    """`richTextCustomEmoji`, NOT `richTextIcon` - and the difference cost a
+    wrong conclusion. One real message carried 23 of these and came back with
+    every one missing, which read as "rich messages cannot hold premium emoji";
+    they hold them perfectly well, and two send syntaxes that had been declared
+    broken turned out to have worked all along."""
+    node = {
+        "@type": "richTextCustomEmoji",
+        "custom_emoji_id": "5814678646908003214",
+        "alternative_text": "👍",
+    }
+
+    rendered = rm._flatten(node)
+
+    assert "👍" in rendered, "the fallback glyph is the only text the emoji has"
+    assert "5814678646908003214" in rendered, "without the id the emoji is not reproducible"
+
+
+def test_a_custom_emoji_nested_in_bold_inside_a_cell_survives():
+    """The real shape: emoji sit inside `richTexts` beside `richTextBold` runs,
+    so a branch that only handles the top level still loses them."""
+    cell = {
+        "@type": "richTexts",
+        "texts": [
+            {"@type": "richTextBold", "text": {"@type": "richTextPlain", "text": "Chatgpt plus "}},
+            {
+                "@type": "richTextCustomEmoji",
+                "custom_emoji_id": "5472246178617765188",
+                "alternative_text": "🎨",
+            },
+        ],
+    }
+
+    rendered = rm._flatten(cell)
+
+    assert "Chatgpt plus" in rendered
+    assert "5472246178617765188" in rendered
+
+
+def test_an_inline_document_is_still_reported_as_an_icon():
+    """`richTextIcon` is a sticker or image, not an emoji - it has no glyph and
+    no id to give back, so naming it stays the honest answer."""
+    assert rm._flatten({"@type": "richTextIcon"}) == "[icon]"

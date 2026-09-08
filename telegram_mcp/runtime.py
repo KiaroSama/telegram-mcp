@@ -437,11 +437,17 @@ async def account_is_premium(client) -> bool:
     return bool(getattr(me, "premium", False))
 
 
-def make_rich_input(parse_mode: str, text: str):
-    """Build the InputRichMessage payload for a rich parse mode."""
+def make_rich_input(parse_mode: str, text: str, rtl: Optional[bool] = None):
+    """Build the InputRichMessage payload for a rich parse mode.
+
+    `rtl` is not cosmetic and Telegram does not infer it: a table written
+    entirely in Persian arrives with `is_rtl: false` and renders its columns
+    left to right, which is the wrong shape for the text in them. The flag
+    existed on the TL type from the start and was simply never passed.
+    """
     if parse_mode == "rich_html":
-        return types.InputRichMessageHTML(html=text)
-    return types.InputRichMessageMarkdown(markdown=text)
+        return types.InputRichMessageHTML(html=text, rtl=rtl)
+    return types.InputRichMessageMarkdown(markdown=text, rtl=rtl)
 
 
 def premium_required_result(action: str) -> str:

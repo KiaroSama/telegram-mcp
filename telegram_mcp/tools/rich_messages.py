@@ -85,9 +85,18 @@ def _flatten(node) -> str:
         opener, closer = _EMPHASIS[kind]
         inner = _flatten(node.get("text"))
         return f"{opener}{inner}{closer}" if inner else ""
+    if kind == "richTextCustomEmoji":
+        # THE premium-emoji node, and the one this reader used to drop. It is
+        # not `richTextIcon`: a single real message carried 23 of these and
+        # came back with every one missing, which read as "rich messages cannot
+        # hold premium emoji" when they hold them perfectly well. The fallback
+        # glyph is the text, and the id is what makes it reproducible.
+        alt = node.get("alternative_text") or ""
+        emoji_id = node.get("custom_emoji_id")
+        return f"{alt}<tg-emoji id={emoji_id}>" if emoji_id else alt
     if kind == "richTextIcon":
-        # A custom emoji or a document rendered inline. There is no text to
-        # take, so it is named rather than dropped without trace.
+        # A document rendered inline - a sticker or an image, not an emoji.
+        # There is no text to take, so it is named rather than dropped.
         return "[icon]"
     # Every other wrapper (underline, marked, subscript, anchors, references)
     # carries its content under `text` too; taking that keeps the words even
@@ -164,6 +173,22 @@ def _render_block(block: dict) -> dict:
     return record
 
 
+async def tdlib_chat_id(chat_id, account) -> int:
+    """A numeric chat id TDLib accepts, from anything the other tools accept.
+
+    TDLib's ids for users and channels are the same marked ids everything else
+    here reports, so resolving with the ordinary client and marking the result
+    is the whole conversion.
+    """
+    try:
+        return int(chat_id)
+    except (TypeError, ValueError):
+        pass
+    cl = get_client(account)
+    await ensure_connected(cl)
+    return get_marked_id(await resolve_entity(chat_id, cl))
+
+
 @mcp.tool(
     annotations=ToolAnnotations(title="Read Rich Message", openWorldHint=True, readOnlyHint=True)
 )
@@ -199,14 +224,20 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
         label = account_label(account)
         client = await secret_client(label)
 
+        # TDLib wants a numeric chat id, so `me`, `@name` and a saved alias all
+        # died on `int()` with a message about a base-10 literal - every other
+        # tool here takes them. Resolving through the ordinary client first
+        # keeps this tool addressable the same way as its neighbours.
+        chat_id = await tdlib_chat_id(chat_id, account)
+
         # TDLib answers from its own database, so a chat it has never seen has
         # to be fetched first. Skipping this fails on a valid id with an error
         # about the MESSAGE, which sends the reader to the wrong place.
-        await client.request({"@type": "getChat", "chat_id": int(chat_id)})
+        await client.request({"@type": "getChat", "chat_id": chat_id})
         message = await client.request(
             {
                 "@type": "getMessage",
-                "chat_id": int(chat_id),
+                "chat_id": chat_id,
                 "message_id": int(message_id) << _MESSAGE_ID_SHIFT,
             }
         )
@@ -216,7 +247,7 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
         if kind != "messageRichMessage":
             return format_tool_result(
                 {
-                    "chat_id": int(chat_id),
+                    "chat_id": chat_id,
                     "message_id": int(message_id),
                     "content_type": kind,
                     "note": (
@@ -230,7 +261,7 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
         blocks = [_render_block(block) for block in rich.get("blocks") or []]
         return format_tool_result(
             {
-                "chat_id": int(chat_id),
+                "chat_id": chat_id,
                 "message_id": int(message_id),
                 "content_type": kind,
                 "is_rtl": bool(rich.get("is_rtl")),

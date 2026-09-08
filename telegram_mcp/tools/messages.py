@@ -78,6 +78,7 @@ async def _send_rich(
     parse_mode: str,
     topic_id: Optional[int] = None,
     reply_to_message_id: Optional[int] = None,
+    rich_rtl: Optional[bool] = None,
 ):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
     if not await account_is_premium(cl):
@@ -93,7 +94,7 @@ async def _send_rich(
                 # form here could also not express "reply inside a topic", which
                 # needs both ids.
                 reply_to=topic_reply_to_request(topic_id, reply_to_message_id),
-                rich_message=make_rich_input(parse_mode, text),
+                rich_message=make_rich_input(parse_mode, text, rich_rtl),
             )
         )
     except telethon.errors.RPCError as e:
@@ -169,7 +170,9 @@ async def _send_text(
     )
 
 
-async def _edit_rich(cl, entity, message_id: int, text: str, parse_mode: str):
+async def _edit_rich(
+    cl, entity, message_id: int, text: str, parse_mode: str, rich_rtl: Optional[bool] = None
+):
     """Edit a message with server-parsed rich content. Returns a JSON result string."""
     if not await account_is_premium(cl):
         return premium_required_result("edit_message")
@@ -179,7 +182,7 @@ async def _edit_rich(cl, entity, message_id: int, text: str, parse_mode: str):
                 peer=entity,
                 id=message_id,
                 message=text,
-                rich_message=make_rich_input(parse_mode, text),
+                rich_message=make_rich_input(parse_mode, text, rich_rtl),
             )
         )
     except telethon.errors.RPCError as e:
@@ -378,6 +381,7 @@ async def send_message(
     topic_id: Optional[int] = None,
     reply_to_message_id: Optional[int] = None,
     send_as: Optional[Union[int, str]] = None,
+    rich_rtl: Optional[bool] = None,
     account: str = None,
 ) -> str:
     """
@@ -428,7 +432,7 @@ async def send_message(
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
             return await _send_rich(
-                cl, entity, message, parse_mode.lower(), topic_id, reply_to_message_id
+                cl, entity, message, parse_mode.lower(), topic_id, reply_to_message_id, rich_rtl
             )
         sent = await _send_text(
             cl,
