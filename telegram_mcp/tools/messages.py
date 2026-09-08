@@ -457,13 +457,17 @@ async def send_message(
     annotations=ToolAnnotations(title="Forward Message", openWorldHint=True, destructiveHint=True)
 )
 @with_account(readonly=False)
-@validate_id("from_chat_id", "to_chat_id")
+@validate_id("from_chat_id", "to_chat_id", "send_as")
 async def forward_message(
     from_chat_id: Union[int, str],
     message_id: Union[int, List[int]],
     to_chat_id: Union[int, str],
     account: str = None,
     expand_album: bool = True,
+    topic_id: Optional[int] = None,
+    send_as: Union[int, str] = None,
+    drop_author: bool = False,
+    silent: bool = False,
 ) -> str:
     """
     Forward a message (or several) from a source chat to a destination chat.
@@ -489,6 +493,12 @@ async def forward_message(
         account: Optional account label for multi-account mode.
         expand_album: If True (default) and message_id is a single int, the
             server expands albums automatically. No effect on list inputs.
+        topic_id: Forward INTO this forum topic. Without it a forward lands in
+            the destination's General topic, which is a different place.
+        send_as: Post the forward under this identity instead of your own -
+            same values `list_send_as` reports for the DESTINATION.
+        drop_author: Forward without the "Forwarded from" header.
+        silent: Deliver without a notification.
     """
     try:
         cl = get_client(account)
@@ -499,7 +509,37 @@ async def forward_message(
             cl, from_entity, message_id, expand_album
         )
 
-        await cl.forward_messages(to_entity, ids_to_forward, from_entity)
+        # Telethon's helper has no `top_msg_id` or `send_as`, so routing means
+        # the raw request. The helper still handles everything else, and it is
+        # kept for the ordinary case rather than reimplemented alongside it.
+        if topic_id is not None or send_as is not None:
+            posting_as = await resolve_input_entity(send_as, cl) if send_as else None
+            batch = ids_to_forward if isinstance(ids_to_forward, list) else [ids_to_forward]
+            await cl(
+                functions.messages.ForwardMessagesRequest(
+                    from_peer=await resolve_input_entity(from_chat_id, cl),
+                    id=batch,
+                    to_peer=await resolve_input_entity(to_chat_id, cl),
+                    # Telegram deduplicates on random_id, so a per-message one
+                    # is required: reusing a value silently drops the copy.
+                    random_id=[random.randrange(-(2**63), 2**63) for _ in batch],
+                    drop_author=drop_author or None,
+                    silent=silent or None,
+                    **({"top_msg_id": topic_id} if topic_id is not None else {}),
+                    **({"send_as": posting_as} if posting_as is not None else {}),
+                )
+            )
+        else:
+            # Only what was actually asked for. Passing `drop_author=None`
+            # unconditionally changes this call's signature for every existing
+            # caller and test - the exact break `send_as` caused last time.
+            await cl.forward_messages(
+                to_entity,
+                ids_to_forward,
+                from_entity,
+                **({"drop_author": True} if drop_author else {}),
+                **({"silent": True} if silent else {}),
+            )
         count = len(ids_to_forward) if isinstance(ids_to_forward, list) else 1
         if count == 1:
             return f"Message {message_id} forwarded from {from_chat_id} to {to_chat_id}."
@@ -516,6 +556,8 @@ async def forward_message(
             from_chat_id=from_chat_id,
             message_id=message_id,
             to_chat_id=to_chat_id,
+            topic_id=topic_id,
+            send_as=send_as,
         )
 
 

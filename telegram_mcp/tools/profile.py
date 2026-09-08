@@ -95,11 +95,23 @@ async def update_profile(
     )
 )
 @with_account(readonly=False)
+@validate_id("bot")
 async def set_profile_photo(
-    file_path: str, ctx: Optional[Context] = None, account: str = None
+    file_path: str,
+    bot: Union[int, str] = None,
+    ctx: Optional[Context] = None,
+    account: str = None,
 ) -> str:
     """
-    Set a new profile photo.
+    Set a profile photo - this account's, or one of the bots it owns.
+
+    Groups and channels take their photo through `edit_chat_photo` instead;
+    this is the personal-identity side of the same job.
+
+    Args:
+        file_path: Image to upload.
+        bot: A bot this account owns (ID or @username). Omit for your own
+            profile. Telegram refuses a bot you do not own.
     """
     try:
         cl = get_client(account)
@@ -109,11 +121,20 @@ async def set_profile_photo(
         ) as (source, path_error):
             if path_error:
                 return path_error
+            target = await resolve_input_entity(bot, cl) if bot is not None else None
             uploaded = await cl.upload_file(source.handle)
-            await cl(functions.photos.UploadProfilePhotoRequest(file=uploaded))
-            return f"Profile photo updated from {source.path}."
+            # `bot=` omitted entirely rather than passed as None: the flag is
+            # what tells Telegram whose photo this is, and a present-but-empty
+            # optional has bitten this codebase before (see `send_as`).
+            await cl(
+                functions.photos.UploadProfilePhotoRequest(
+                    file=uploaded, **({"bot": target} if target is not None else {})
+                )
+            )
+            whose = f"Bot {bot}" if bot is not None else "Profile"
+            return f"{whose} photo updated from {source.path}."
     except Exception as e:
-        return log_and_format_error("set_profile_photo", e, file_path=file_path)
+        return log_and_format_error("set_profile_photo", e, file_path=file_path, bot=bot)
 
 
 @mcp.tool(
@@ -122,13 +143,25 @@ async def set_profile_photo(
     )
 )
 @with_account(readonly=False)
-async def delete_profile_photo(account: str = None) -> str:
+@validate_id("bot")
+async def delete_profile_photo(bot: Union[int, str] = None, account: str = None) -> str:
     """
-    Delete your current profile photo.
+    Remove a profile photo - this account's, or one of the bots it owns.
+
+    Args:
+        bot: A bot this account owns (ID or @username). Omit for your own.
     """
     try:
         cl = get_client(account)
         await ensure_connected(cl)
+        if bot is not None:
+            # A bot's photo is not in the caller's own photo list, so there is
+            # nothing to delete BY ID: it is cleared by setting an empty one.
+            target = await resolve_input_entity(bot, cl)
+            await cl(
+                functions.photos.UpdateProfilePhotoRequest(id=types.InputPhotoEmpty(), bot=target)
+            )
+            return f"Bot {bot} photo removed."
         photos = await cl(
             functions.photos.GetUserPhotosRequest(user_id="me", offset=0, max_id=0, limit=1)
         )
@@ -137,7 +170,7 @@ async def delete_profile_photo(account: str = None) -> str:
         await cl(functions.photos.DeletePhotosRequest(id=[photos.photos[0]]))
         return "Profile photo deleted."
     except Exception as e:
-        return log_and_format_error("delete_profile_photo", e)
+        return log_and_format_error("delete_profile_photo", e, bot=bot)
 
 
 # The privacy keys this server exposes, and the argument name each is reached

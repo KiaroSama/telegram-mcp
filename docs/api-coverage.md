@@ -99,6 +99,8 @@ predicted.
 | Quick-reply shortcuts | `list_quick_replies`, `send_quick_reply` | `tools/saved.py` |
 | Quick-reply editing | `add_quick_reply`, `read_quick_reply`, `edit_quick_reply`, `rename_quick_reply`, `delete_quick_reply` | `tools/quick_replies.py` |
 | The search bar's own tabs | `media_type` on `search_messages` and `search_global` (photos, videos, links, files, music, voice and ten more), `from_user` on `search_messages`, `kind` plus a `joined` flag on `search_public_chats`, and `search_posts` for public posts | `tools/messages_read.py`, `tools/chats.py` |
+| Profile photos, including a bot's | `set_profile_photo` and `delete_profile_photo` take a `bot` argument (`photos.uploadProfilePhoto`'s own `bot` flag; removal sets an empty photo, since a bot's is not in the caller's photo list). Groups and channels go through `edit_chat_photo` | `tools/profile.py`, `tools/groups.py` |
+| Forwarding into a topic, as a channel | `topic_id`, `send_as`, `drop_author` and `silent` on `forward_message` — `messages.ForwardMessages` for the routed case, Telethon's helper otherwise | `tools/messages.py` |
 | Posting as a channel | `list_send_as`, `set_default_send_as`, and a `send_as` argument on `send_message`, `reply_to_message` and `send_file` | `tools/messages.py`, `tools/media.py` |
 | Translation | `translate` | `tools/translation.py` |
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
