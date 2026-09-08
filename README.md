@@ -128,7 +128,13 @@ server deliberately does not. The tools group into these areas:
   comparison sheet to decide from. The ranking uses silhouette, spatial colour and edge
   structure after normalising scale and position; `scripts/emoji_accuracy.py` scores it against
   pairs that are already known to be correct. Frame choice is part of it: a `.tgs` legitimately
-  begins and ends transparent, so a preview that grabs frame 0 shows an empty box.
+  begins and ends transparent, so a preview that grabs frame 0 shows an empty box. `index`
+  builds the comparison set from a local pack export if you have one (`--packs-dir`, or
+  `TELEGRAM_MCP_EMOJI_PACKS`) — no Telegram calls, and re-running it after the export changes
+  only re-reads the thumbnails that moved. **A ranking is the fallback, not the first answer:**
+  where the export records which emoji a copied one became, `nearest` prints that exact id
+  above the ranking, because three emoji were reported as having no equivalent while the
+  export held their ids.
 - **Quick replies, the writing half:** `add_quick_reply` stores a message under a shortcut,
   `read_quick_reply` lists what a shortcut holds, `rename_quick_reply` renames one and
   `delete_quick_reply` removes either specific messages or the whole shortcut. Telegram has no

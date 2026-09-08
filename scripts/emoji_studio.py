@@ -194,9 +194,10 @@ class Pictures:
 
     def __init__(self, make_studio, root=None):
         self._make_studio, self._studio = make_studio, None
-        self.entries = {}
+        self.entries, self.from_source = {}, {}
         if root is not None:
             self.entries, problems = emoji_packs.read_catalogue(root)
+            self.from_source = emoji_packs.source_map(root)
             for problem in problems:
                 print(f"packs: {problem}", file=sys.stderr)
 
@@ -351,6 +352,21 @@ def cmd_nearest(args):
     if not cache.exists():
         raise SystemExit(f"No fingerprints at {cache}. Run `index` first.")
     stored = json.loads(cache.read_text(encoding="utf-8"))
+
+    # The export knows exactly which of the owner's emoji a copied one became.
+    # An exact answer outranks any ranking, and printing it FIRST is the whole
+    # point: three emoji were reported as having no equivalent while this table
+    # held their ids.
+    exact = source.from_source.get(str(args.id))
+    if exact:
+        entry = source.entries.get(exact, {})
+        print(
+            f"EXACT  {args.id} was copied into {exact}  "
+            f"{entry.get('glyph') or ''} ({entry.get('title') or '?'})"
+        )
+        if entry.get("link"):
+            print(f"       {entry['link']}")
+        print("       ranking below is only for comparison.")
 
     query = source.get([args.id], size=args.size).get(str(args.id))
     if query is None:

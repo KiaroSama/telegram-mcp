@@ -25,9 +25,19 @@ from pathlib import Path
 ENV_VAR = "TELEGRAM_MCP_EMOJI_PACKS"
 THUMBS = ".thumbs"
 INDEX = "index.json"
-# An animated emoji is exported with a companion still, already picked. Only
-# when that is missing does anything here scan frames, and then not all of them.
+# Frames sampled from an animation before one is chosen. An animation
+# legitimately begins and ends transparent, so one frame is a coin toss.
 FRAME_SAMPLES = 6
+# A `.webm` emoji is at most three seconds at a low frame rate, so this reads
+# the whole of a short one and a fair spread of a longer one.
+VIDEO_FRAMES = 30
+
+
+def ffmpeg_path():
+    """Where ffmpeg is, or None. Looked up per call so a test can remove it."""
+    import shutil
+
+    return shutil.which("ffmpeg")
 
 
 def find_root(explicit=None):
@@ -55,17 +65,72 @@ def stamp_of(path):
 
 
 def thumb_for(root, emoji_id):
-    """The picture to fingerprint, preferring the export's own chosen still.
+    """The picture to fingerprint, preferring the ANIMATION over the still.
 
-    `.webm` is returned when it is all that exists so the caller can report the
-    emoji as skipped rather than silently absent; Pillow cannot open one.
+    The export writes `<id>_still.webp` beside an animated `<id>.webp`, and that
+    still is whatever frame the exporter picked. 66 of this export's 375 are
+    under 600 bytes - all but empty - and one of them is the shopping cart the
+    owner knew was in their pack while this index served a blank square for it.
+    Scanning the animation costs six frames and cannot make that mistake, so the
+    still is only a fallback for an emoji that has no animation at all.
     """
     thumbs = root / THUMBS
-    for name in (f"{emoji_id}_still.webp", f"{emoji_id}.webp", f"{emoji_id}.webm"):
+    for name in (f"{emoji_id}.webp", f"{emoji_id}_still.webp", f"{emoji_id}.webm"):
         candidate = thumbs / name
         if candidate.is_file():
             return candidate
     return None
+
+
+def _weight(frame):
+    """Total visible alpha - how much of the frame is actually drawn.
+
+    `histogram()` rather than `getdata()`: same total, and getdata is deprecated
+    for removal in Pillow 14.
+    """
+    return sum(level * count for level, count in enumerate(frame.getchannel("A").histogram()))
+
+
+def _video_frames(path, limit=VIDEO_FRAMES):
+    """Frames of a `.webm` emoji as RGBA, with its transparency intact.
+
+    **`-c:v libvpx-vp9` must come BEFORE `-i`.** VP9 keeps alpha in a separate
+    layer that ffmpeg's default decoder silently discards, so the emoji decodes
+    as an opaque square - which then ranks confidently and wrongly. The same
+    flag is needed to MEASURE it: probing with the default decoder reports every
+    VP9 emoji as opaque, including the correct ones. Both facts were paid for in
+    the sibling Emoji Mapper project; see `.ai/LESSON.md`.
+    """
+    import subprocess
+    import tempfile
+
+    from PIL import Image
+
+    if not ffmpeg_path():
+        return []
+    with tempfile.TemporaryDirectory() as scratch:
+        result = subprocess.run(
+            [
+                ffmpeg_path(),
+                "-v",
+                "error",
+                "-c:v",
+                "libvpx-vp9",
+                "-i",
+                str(path),
+                "-frames:v",
+                str(limit),
+                "-fps_mode",
+                "passthrough",
+                str(Path(scratch) / "%03d.png"),
+            ],
+            capture_output=True,
+            timeout=30,
+        )
+        if result.returncode != 0:
+            raise RuntimeError((result.stderr or b"").decode("utf-8", "replace").strip()[:200])
+        # Loaded eagerly: the directory is gone by the time the caller looks.
+        return [Image.open(f).convert("RGBA") for f in sorted(Path(scratch).glob("*.png"))]
 
 
 def open_picture(path):
@@ -77,6 +142,12 @@ def open_picture(path):
     """
     from PIL import Image
 
+    if path.suffix == ".webm":
+        frames = _video_frames(path)
+        if not frames:
+            raise RuntimeError("no ffmpeg, or it produced no frames")
+        return max(frames, key=_weight)
+
     picture = Image.open(path)
     count = getattr(picture, "n_frames", 1)
     if count <= 1:
@@ -87,11 +158,7 @@ def open_picture(path):
     for number in range(0, count, step):
         picture.seek(number)
         frame = picture.convert("RGBA")
-        # `histogram()` rather than `getdata()`: same total, and getdata is
-        # deprecated for removal in Pillow 14.
-        weight = sum(
-            level * count for level, count in enumerate(frame.getchannel("A").histogram())
-        )
+        weight = _weight(frame)
         if weight > best_weight:
             best, best_weight = frame, weight
     return best
@@ -142,6 +209,20 @@ def read_catalogue(root):
     return entries, problems
 
 
+def source_map(root):
+    """`{id it had in its ORIGINAL pack: the owner's id}` from the export.
+
+    This is an EXACT answer where it has one, and it outranks anything the
+    visual ranker can offer. Skipping it is how a shopping cart, a megaphone and
+    a red circle were all reported as "no equivalent in your packs" while the
+    export knew precisely which emoji each had become. Only emoji the owner
+    COPIED from somewhere have a row here - about 800 of 6739 - so a miss means
+    "not copied", never "not present".
+    """
+    index = json.loads((root / INDEX).read_text(encoding="utf-8"))
+    return {str(k): str(v) for k, v in (index.get("by_source_id") or {}).items()}
+
+
 def refresh(stored, entries, fingerprint):
     """Bring a fingerprint cache in line with the export, doing the least work.
 
@@ -158,7 +239,7 @@ def refresh(stored, entries, fingerprint):
 
     for emoji_id, entry in entries.items():
         thumb = entry["thumb"]
-        if thumb is None or thumb.suffix != ".webp":
+        if thumb is None or (thumb.suffix == ".webm" and not ffmpeg_path()):
             skipped += 1
             continue
         was = stored.get(emoji_id)

@@ -147,16 +147,6 @@ def test_an_emoji_with_only_a_webm_thumb_is_found_but_carries_no_webp(tmp_path):
     assert entries["111"]["thumb"].suffix == ".webm"
 
 
-def test_the_exports_own_still_is_preferred_over_the_animation(tmp_path):
-    """Choosing a frame is guesswork; the export already chose one."""
-    root = _export(tmp_path, {"pack_a": [("111", "✅")]})
-    _webp(root / emoji_packs.THUMBS / "111_still.webp")
-
-    entries, _ = emoji_packs.read_catalogue(root)
-
-    assert entries["111"]["thumb"].name == "111_still.webp"
-
-
 # ------------------------------------------------------------------ refresh
 
 
@@ -273,3 +263,127 @@ def test_an_animated_thumbnail_yields_a_frame_with_something_in_it(tmp_path):
 
     alpha = picture.getchannel("A").histogram()
     assert sum(level * count for level, count in enumerate(alpha)) > 0
+
+
+# ------------------------------------------------- the still that was blank
+
+
+def test_the_animation_is_preferred_over_the_exports_chosen_still(tmp_path):
+    """The still is whatever frame the exporter picked, and 66 of this export's
+    375 are under 600 bytes. One of them was a shopping cart the owner knew was
+    in their pack, and the index served a blank square for it and reported "no
+    equivalent". Scanning six frames cannot make that mistake."""
+    root = _export(tmp_path, {"p": [("1", "🛒")]})
+    _webp(root / emoji_packs.THUMBS / "1_still.webp")
+
+    assert emoji_packs.thumb_for(root, "1").name == "1.webp"
+
+
+def test_the_still_is_still_used_when_there_is_no_animation(tmp_path):
+    root = _export(tmp_path, {"p": [("1", "a")]})
+    (root / emoji_packs.THUMBS / "1.webp").unlink()
+    _webp(root / emoji_packs.THUMBS / "1_still.webp")
+
+    assert emoji_packs.thumb_for(root, "1").name == "1_still.webp"
+
+
+# ------------------------------------------------------------ video thumbs
+
+
+def test_the_vp9_decoder_is_named_before_the_input(monkeypatch, tmp_path):
+    """`-c:v libvpx-vp9` BEFORE `-i` is the whole fix. VP9 keeps alpha in a
+    separate layer that ffmpeg's default decoder silently drops, so without it a
+    transparent emoji decodes as an opaque square and ranks confidently wrong -
+    and probing with the default decoder calls every VP9 emoji opaque too,
+    including the correct ones. Asserted on the ARGUMENT ORDER because nothing
+    about the output says which decoder produced it."""
+    seen = {}
+
+    class Result:
+        returncode = 0
+        stderr = b""
+
+    def _run(argv, **kwargs):
+        seen["argv"] = argv
+        return Result()
+
+    monkeypatch.setattr(emoji_packs, "ffmpeg_path", lambda: "ffmpeg")
+    monkeypatch.setattr("subprocess.run", _run)
+
+    emoji_packs._video_frames(tmp_path / "x.webm")
+
+    argv = seen["argv"]
+    assert argv[argv.index("-c:v") + 1] == "libvpx-vp9"
+    assert argv.index("-c:v") < argv.index("-i"), "the decoder was named after the input"
+
+
+def test_a_webm_is_skipped_rather_than_failing_when_ffmpeg_is_missing(tmp_path, monkeypatch):
+    root = _export(tmp_path, {"p": [("1", "a"), ("2", "b")]})
+    (root / emoji_packs.THUMBS / "2.webp").unlink()
+    (root / emoji_packs.THUMBS / "2.webm").write_bytes(b"video")
+    monkeypatch.setattr(emoji_packs, "ffmpeg_path", lambda: None)
+    entries, _ = emoji_packs.read_catalogue(root)
+
+    stored, counts = emoji_packs.refresh({}, entries, _fingerprint)
+
+    assert counts["added"] == 1 and counts["skipped"] == 1
+    assert "2" not in stored
+
+
+@pytest.mark.skipif(emoji_packs.ffmpeg_path() is None, reason="ffmpeg not installed")
+def test_a_real_transparent_vp9_keeps_its_transparency(tmp_path):
+    """The round trip, on a file ffmpeg itself made: a green square on a
+    transparent ground must come back with BOTH, not as an opaque rectangle."""
+    import subprocess
+
+    source = tmp_path / "in.webm"
+    subprocess.run(
+        [
+            emoji_packs.ffmpeg_path(),
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green@1.0:s=64x64:d=1,format=yuva420p,"
+            "geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='if(lt(X,32),255,0)'",
+            "-c:v",
+            "libvpx-vp9",
+            "-pix_fmt",
+            "yuva420p",
+            str(source),
+        ],
+        capture_output=True,
+        timeout=60,
+        check=True,
+    )
+
+    picture = emoji_packs.open_picture(source)
+
+    alpha = set(picture.getchannel("A").getextrema())
+    assert 0 in alpha, "the transparent half decoded as opaque - the alpha layer was dropped"
+    assert 255 in alpha, "the drawn half decoded as transparent"
+
+
+# -------------------------------------------------------- the exact bridge
+
+
+def test_the_source_id_table_answers_exactly_where_the_ranker_only_guesses(tmp_path):
+    """Three emoji were reported as having no equivalent in the owner's packs
+    while this table held the id each had become."""
+    root = _export(tmp_path, {"p": [("999", "🛒")]})
+    index = json.loads((root / emoji_packs.INDEX).read_text(encoding="utf-8"))
+    index["by_source_id"] = {"4967523779728114410": 999}
+    (root / emoji_packs.INDEX).write_text(json.dumps(index), encoding="utf-8")
+
+    table = emoji_packs.source_map(root)
+
+    assert (
+        table["4967523779728114410"] == "999"
+    ), "an id came back as something other than a string"
+
+
+def test_an_export_without_the_table_is_empty_not_an_error(tmp_path):
+    """Only copied emoji have a row - about 800 of 6739 - so a miss means "not
+    copied", never "not present"."""
+    assert emoji_packs.source_map(_export(tmp_path, {"p": [("1", "a")]})) == {}
