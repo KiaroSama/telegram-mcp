@@ -43,6 +43,7 @@ LIMITS: dict[str, int] = {
     "get_messages": 200,
     "search_messages": 200,
     "search_global": 100,
+    "search_posts": 100,  # Telegram's own cap on channels.searchPosts
     "get_saved_history": 100,  # Telegram's own cap on messages.getSavedHistory
     "inspect_messages": 50,  # every entity, reaction and media field per message
     "get_message_context": 25,  # taken twice, before and after

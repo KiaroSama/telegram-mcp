@@ -520,8 +520,11 @@ async def test_search_global_reports_an_empty_page_as_empty(monkeypatch):
         def __init__(self):
             self.calls = []
 
-        async def get_messages(self, entity, limit=None, search=None, add_offset=None):
-            self.calls.append((entity, limit, search, add_offset))
+        async def get_messages(self, entity, **kwargs):
+            # **kwargs, not a fixed signature: this fixture pinned the exact call
+            # shape, so giving the tool a `filter=` argument broke it with a
+            # TypeError that read like a defect in the tool itself.
+            self.calls.append((entity, kwargs))
             return []
 
     from telegram_mcp.tools import messages_read as read_mod
@@ -537,7 +540,7 @@ async def test_search_global_reports_an_empty_page_as_empty(monkeypatch):
 
     assert "No messages found" in result
     assert client.calls, "search_global never queried anything"
-    assert client.calls[-1][2] == "nothing matches this"
+    assert client.calls[-1][1]["search"] == "nothing matches this"
 
 
 @pytest.mark.asyncio

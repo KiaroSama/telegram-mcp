@@ -11,7 +11,7 @@ re-exports, which is where the earlier 802 came from.
 
 | | Count |
 |---|---|
-| MCP tools registered | **212** |
+| MCP tools registered | **216** |
 | TL namespaces | 23, plus the root `functions` module |
 | Unique `TLRequest` classes in layer 227 | **800** |
 | Raw TL requests this codebase calls | 97 |
@@ -75,6 +75,7 @@ can see. Treat a TL-verb grep as a starting point, never as the answer.
 | Drafts | `messages.SaveDraft`, `GetAllDrafts` |
 | Forum topics (create / list / edit / send into / read back) | `channels.CreateForumTopic`, `GetForumTopics`, plus `topic_id` on every sending tool |
 | Message search, in-chat and global | `search_messages` / `search_global`, through Telethon's `get_messages(search=…)` — no raw call, which is exactly why a raw-only count misses it |
+| Public post search | `search_posts` → `channels.SearchPosts`, by free text or by hashtag |
 | Read receipts — *who* read a message | `get_message_read_by` → `messages.GetMessageReadParticipants` |
 | Reading who reacted | `messages.GetMessageReactionsList` |
 | Sending a reaction | `messages.SendReaction` |
@@ -97,6 +98,7 @@ predicted.
 | Saved messages: tags and saved dialogs | `list_saved_dialogs`, `get_saved_history`, `list_saved_tags`, `name_saved_tag` | `tools/saved.py` |
 | Quick-reply shortcuts | `list_quick_replies`, `send_quick_reply` | `tools/saved.py` |
 | Quick-reply editing | `add_quick_reply`, `read_quick_reply`, `edit_quick_reply`, `rename_quick_reply`, `delete_quick_reply` | `tools/quick_replies.py` |
+| The search bar's own tabs | `media_type` on `search_messages` and `search_global` (photos, videos, links, files, music, voice and ten more), `from_user` on `search_messages`, `kind` plus a `joined` flag on `search_public_chats`, and `search_posts` for public posts | `tools/messages_read.py`, `tools/chats.py` |
 | Posting as a channel | `list_send_as`, `set_default_send_as`, and a `send_as` argument on `send_message`, `reply_to_message` and `send_file` | `tools/messages.py`, `tools/media.py` |
 | Translation | `translate` | `tools/translation.py` |
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
