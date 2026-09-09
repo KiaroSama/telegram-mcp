@@ -32,7 +32,12 @@ from telegram_mcp.text_fidelity import fidelity_text
 # from it and it imports from none of them. `_as_utc` lives there because
 # `copy_message` needs the same parser and duplicating it is how two tools start
 # reading the same argument differently.
-from telegram_mcp.tools.messages import _as_utc
+from telegram_mcp.tools.messages import (
+    REPEAT_PERIODS,
+    _PREMIUM_NOTE,
+    _as_utc,
+    _repeat_seconds,
+)
 
 from telethon import errors, functions, types
 
@@ -45,28 +50,9 @@ __all__ = [
 ]
 
 
-# Verified against the live server, not inferred from the field name.
-REPEAT_PERIODS = {"daily": 86400, "weekly": 604800}
-
-_PREMIUM_NOTE = (
-    "Telegram gates the recurring-message period behind Premium: the period value itself is "
-    "accepted, but a non-Premium account gets PREMIUM_ACCOUNT_REQUIRED. Schedule it without "
-    "repeat, or use a Premium account."
-)
-
-
-def _repeat_seconds(repeat: Optional[str]) -> Union[int, None, str]:
-    """The period for a repeat name, ``None`` for no repeat, or an error string."""
-    if repeat is None or str(repeat).lower() in ("", "none", "off"):
-        return None
-    period = REPEAT_PERIODS.get(str(repeat).lower())
-    if period is None:
-        return (
-            f"repeat must be one of {', '.join(REPEAT_PERIODS)} (or omitted) — got {repeat!r}. "
-            "Telegram validates the period against a fixed set and rejects anything else with "
-            "SCHEDULE_REPEAT_PERIOD_INVALID."
-        )
-    return period
+# The repeat vocabulary lives in the base module because `copy_message` needs
+# the same names: two tools reading "daily" differently is the exact drift
+# `_as_utc` was moved down there to avoid.
 
 
 def _refuse_if_past(target: datetime) -> Optional[str]:
@@ -315,6 +301,23 @@ async def edit_scheduled_message(
             return (
                 f"Message {message_id} is not in chat {chat_id}'s scheduled queue. "
                 "Run list_scheduled_messages — a scheduled ID is separate from a sent one."
+            )
+
+        # A RICH scheduled message (a table, a photo block) arrives here with no
+        # text, no entities and no media, because MTProto cannot express its
+        # content at all. `EditMessage` replaces the message wholesale, so
+        # carrying that "text" forward would replace the table with an empty
+        # message just to move its delivery time.
+        if (
+            message is None
+            and not (current.message or "")
+            and getattr(current, "media", None) is None
+        ):
+            return (
+                f"Scheduled message {message_id} has no text this server can read - it is a "
+                "rich message, and MTProto reports its body as empty. Editing it here would "
+                "replace it with an empty message. Cancel it and queue a new one with "
+                "copy_message(when=..., repeat=...), which lets Telegram copy the content."
             )
 
         built_entities = None

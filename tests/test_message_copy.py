@@ -303,3 +303,97 @@ async def test_slow_mode_configured_but_off_still_reports_zero(wire_full_chat):
 
     assert record["slowmode_seconds"] == 0
     assert "slowmode_next_send_date" not in record
+
+
+# --- a recurring copy, which is the only way to repeat a RICH message -------
+
+
+class _RawCopyClient(_CopyClient):
+    """Also answers the raw request, which is where a repeat has to go."""
+
+    def __init__(self, **kw):
+        super().__init__(**kw)
+        self.requests = []
+
+    async def __call__(self, request):
+        self.requests.append(request)
+        return SimpleNamespace(updates=[])
+
+
+@pytest.mark.asyncio
+async def test_a_repeating_copy_uses_the_raw_request(wire_copy):
+    """Telethon's `forward_messages` helper has no `schedule_repeat_period`, so a
+    recurring copy that went through it would be scheduled ONCE and report
+    success - the same shape of silent loss as a forward that loses its topic."""
+    client = wire_copy(_RawCopyClient())
+
+    await copy_message(
+        "@src", 11, "@dest", when=SOON, repeat="daily", expand_album=False, account="a"
+    )
+
+    assert client.forwarded is None, "the helper cannot carry a repeat period"
+    request = client.requests[-1]
+    assert request.schedule_repeat_period == 86400
+    assert request.drop_author is True
+    assert len(request.random_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_copy_without_repeat_still_goes_through_the_helper(wire_copy):
+    """The helper resolves peers, groups albums and picks random ids; only the
+    repeat period is a reason to bypass it."""
+    client = wire_copy(_RawCopyClient())
+
+    await copy_message("@src", 11, "@dest", when=SOON, expand_album=False, account="a")
+
+    assert client.forwarded is not None and not client.requests
+
+
+@pytest.mark.asyncio
+async def test_a_repeat_without_a_time_is_refused(wire_copy):
+    """A recurring copy has to start somewhere; Telegram would otherwise send it
+    now and repeat from an hour nobody chose."""
+    client = wire_copy(_RawCopyClient())
+
+    answer = await copy_message(
+        "@src", 11, "@dest", repeat="daily", expand_album=False, account="a"
+    )
+
+    assert "when" in answer
+    assert client.forwarded is None and not client.requests
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_repeat_name_is_named_rather_than_sent(wire_copy):
+    client = wire_copy(_RawCopyClient())
+
+    answer = await copy_message(
+        "@src", 11, "@dest", when=SOON, repeat="hourly", expand_album=False, account="a"
+    )
+
+    assert "daily" in answer and "weekly" in answer
+    assert client.forwarded is None and not client.requests
+
+
+@pytest.mark.asyncio
+async def test_a_copy_into_a_topic_carries_the_topic_id(wire_copy):
+    """Telethon's helper has no topic argument, so a copy that went through it
+    would land in General - a different place, reported as success."""
+    client = wire_copy(_RawCopyClient())
+
+    await copy_message("@src", 11, "@dest", topic_id=14345, expand_album=False, account="a")
+
+    assert client.forwarded is None
+    assert client.requests[-1].top_msg_id == 14345
+
+
+@pytest.mark.asyncio
+async def test_a_topic_and_a_repeat_travel_together(wire_copy):
+    client = wire_copy(_RawCopyClient())
+
+    await copy_message(
+        "@src", 11, "@dest", when=SOON, repeat="daily", topic_id=7, expand_album=False, account="a"
+    )
+
+    request = client.requests[-1]
+    assert request.top_msg_id == 7 and request.schedule_repeat_period == 86400

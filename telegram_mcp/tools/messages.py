@@ -58,6 +58,32 @@ async def _album_batch(cl, entity, message_id, expand: bool):
     return message_id, False
 
 
+# Verified against the live server, not inferred from the field name: 86400 and
+# 604800 are accepted (they fail only on the Premium gate), while 5 is rejected
+# with SCHEDULE_REPEAT_PERIOD_INVALID.
+REPEAT_PERIODS = {"daily": 86400, "weekly": 604800}
+
+_PREMIUM_NOTE = (
+    "Telegram gates the recurring-message period behind Premium: the period value itself is "
+    "accepted, but a non-Premium account gets PREMIUM_ACCOUNT_REQUIRED. Schedule it without "
+    "repeat, or use a Premium account."
+)
+
+
+def _repeat_seconds(repeat: Optional[str]) -> Union[int, None, str]:
+    """The period for a repeat name, ``None`` for no repeat, or an error string."""
+    if repeat is None or str(repeat).lower() in ("", "none", "off"):
+        return None
+    period = REPEAT_PERIODS.get(str(repeat).lower())
+    if period is None:
+        return (
+            f"repeat must be one of {', '.join(REPEAT_PERIODS)} (or omitted) - got {repeat!r}. "
+            "Telegram validates the period against a fixed set and rejects anything else with "
+            "SCHEDULE_REPEAT_PERIOD_INVALID."
+        )
+    return period
+
+
 def _as_utc(value: Union[str, int]) -> datetime:
     """A schedule time from an ISO-8601 string or a Unix timestamp, as UTC.
 
@@ -601,6 +627,8 @@ async def copy_message(
     message_id: Union[int, List[int]],
     to_chat_id: Union[int, str],
     when: Union[str, int] = None,
+    repeat: str = None,
+    topic_id: Optional[int] = None,
     expand_album: bool = True,
     drop_captions: bool = False,
     account: str = None,
@@ -622,11 +650,26 @@ async def copy_message(
         to_chat_id: Destination chat (id or @username).
         when: Omit to send now. An ISO-8601 string ("2026-09-01T14:30:00Z") or a
             Unix timestamp schedules the copy instead; a naive datetime is UTC.
+        repeat: "daily", "weekly", or omitted for a single send, exactly as
+            `schedule_message` takes it. Needs `when`. This is the only way to
+            put a RICH message on a recurring schedule: `schedule_message`
+            composes from text and entities, which cannot express a table, a
+            photo block or anything else `read_rich_message` reports - the copy
+            is made by Telegram itself and carries all of it. Telegram requires
+            Premium for the period.
+        topic_id: Forum topic id from `list_topics`. Without it a copy into a
+            forum supergroup lands in General, which is a different place and
+            reports success either way.
         expand_album: When a single id belongs to an album, copy the whole album
             rather than one detached item. No effect on a list.
         drop_captions: Copy the media without its caption.
     """
     try:
+        period = _repeat_seconds(repeat)
+        if isinstance(period, str):
+            return period
+        if period is not None and when is None:
+            return "repeat needs `when`: a recurring copy has to start somewhere."
         target = None
         if when is not None:
             target = _as_utc(when)
@@ -642,14 +685,35 @@ async def copy_message(
         to_entity = await resolve_entity(to_chat_id, cl)
 
         ids, expanded = await _album_batch(cl, from_entity, message_id, expand_album)
-        await cl.forward_messages(
-            to_entity,
-            ids,
-            from_entity,
-            drop_author=True,
-            drop_media_captions=drop_captions,
-            schedule=target,
-        )
+        # Telethon's helper carries neither a repeat period nor a topic, so
+        # either one drops this to the raw request - the same reason
+        # `forward_message` has two paths.
+        if period is None and topic_id is None:
+            await cl.forward_messages(
+                to_entity,
+                ids,
+                from_entity,
+                drop_author=True,
+                drop_media_captions=drop_captions,
+                schedule=target,
+            )
+        else:
+            ids_to_forward = ids if isinstance(ids, list) else [ids]
+            await cl(
+                functions.messages.ForwardMessagesRequest(
+                    from_peer=from_entity,
+                    id=ids_to_forward,
+                    to_peer=to_entity,
+                    random_id=[
+                        int.from_bytes(os.urandom(8), "big", signed=True) for _ in ids_to_forward
+                    ],
+                    drop_author=True,
+                    schedule_date=target,
+                    schedule_repeat_period=period,
+                    top_msg_id=topic_id,
+                    **({"drop_media_captions": True} if drop_captions else {}),
+                )
+            )
 
         count = len(ids) if isinstance(ids, list) else 1
         record = {
@@ -662,9 +726,16 @@ async def copy_message(
             record["expanded_from_album"] = message_id
         if target is not None:
             record["scheduled_for"] = target.isoformat()
+        if period is not None:
+            record["repeat"] = repeat
+            record["repeat_seconds"] = period
+        if topic_id is not None:
+            record["topic_id"] = topic_id
         if drop_captions:
             record["captions"] = "dropped"
         return format_tool_result(record)
+    except telethon.errors.rpcerrorlist.PremiumAccountRequiredError:
+        return _PREMIUM_NOTE
     except telethon.errors.rpcerrorlist.ChatForwardsRestrictedError:
         # Content protection. Worth naming, because the obvious next move -
         # reading the text and sending it again - is exactly what loses the

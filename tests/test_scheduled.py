@@ -263,3 +263,18 @@ async def test_cancelling_nothing_never_reaches_the_server(_wire):
 
     assert "empty" in result
     assert client.requests == []
+
+
+@pytest.mark.asyncio
+async def test_moving_a_rich_scheduled_message_is_refused_rather_than_blanking_it(_wire):
+    """A rich message has no text through MTProto, and `EditMessage` replaces the
+    message wholesale - so carrying that empty text forward would destroy a table
+    just to move its delivery time. Found while rounding a live schedule."""
+    client = _wire(_Client(queued=[_queued(439, "")]))
+
+    answer = await edit_scheduled_message(1, 439, when=SOON, account="a")
+
+    assert "rich message" in answer and "copy_message" in answer
+    assert (
+        client.sent("EditMessageRequest") is None
+    ), "the edit was sent anyway and would have blanked the message"
