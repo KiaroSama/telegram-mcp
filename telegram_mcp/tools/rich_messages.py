@@ -50,7 +50,45 @@ _EMPHASIS = {
     "richTextItalic": ("*", "*"),
     "richTextStrikethrough": ("~~", "~~"),
     "richTextFixed": ("`", "`"),
+    # The rest of what the composer offers. Without these the words survive and
+    # the formatting vanishes, so an underlined warning and a plain sentence
+    # read back identically.
+    "richTextUnderline": ("__", "__"),
+    "richTextMarked": ("==", "=="),
+    "richTextSubscript": ("~", "~"),
+    "richTextSuperscript": ("^", "^"),
+    # `||x||` is Telegram's own spoiler syntax, so this round-trips. It reads
+    # back unmarked only when the sender wrote `<span class="tg-spoiler">`,
+    # which the rich parser does not treat as a spoiler at all - the rich tag
+    # is `<tg-spoiler>`, and the difference is invisible until you read the
+    # message back.
+    "richTextSpoiler": ("||", "||"),
 }
+
+# Media blocks name their content with their own key, and what sits under it is
+# a TDLib media record, not rich text. Reading `text` on one returns nothing,
+# which is why a photo, a clip and a track all came back as an empty `{}`.
+_MEDIA_BLOCKS = {
+    "pageBlockPhoto": "photo",
+    "pageBlockVideo": "video",
+    "pageBlockAnimation": "animation",
+    "pageBlockAudio": "audio",
+    "pageBlockVoiceNote": "voice_note",
+    "pageBlockDocument": "document",
+}
+
+# What is worth carrying out of a media record. The file handles under it are
+# left behind on purpose: they are pages of download state, and nothing here
+# can fetch a rich message's media with them anyway.
+_MEDIA_FACTS = (
+    "file_name",
+    "mime_type",
+    "duration",
+    "width",
+    "height",
+    "title",
+    "performer",
+)
 
 
 def _flatten(node) -> str:
@@ -94,6 +132,11 @@ def _flatten(node) -> str:
         alt = node.get("alternative_text") or ""
         emoji_id = node.get("custom_emoji_id")
         return f"{alt}<tg-emoji id={emoji_id}>" if emoji_id else alt
+    if kind == "richTextMathematicalExpression":
+        # Not under `text` like every other node, and not rich text at all -
+        # a bare LaTeX string. The generic fallback below found no `text` and
+        # returned nothing, so an inline formula vanished without a trace.
+        return f"${node.get('expression') or ''}$"
     if kind == "richTextIcon":
         # A document rendered inline - a sticker or an image, not an emoji.
         # There is no text to take, so it is named rather than dropped.
@@ -102,6 +145,15 @@ def _flatten(node) -> str:
     # carries its content under `text` too; taking that keeps the words even
     # when this does not know the decoration.
     return _flatten(node.get("text")) or _flatten(node.get("texts"))
+
+
+def _alignment(node) -> Optional[str]:
+    """`left`/`center`/`right` (or `top`/`middle`/`bottom`) from a TDLib enum."""
+    kind = (node or {}).get("@type") or ""
+    for prefix in ("pageBlockHorizontalAlignment", "pageBlockVerticalAlignment"):
+        if kind.startswith(prefix):
+            return kind[len(prefix) :].lower() or None
+    return None
 
 
 def _table_rows(block) -> list:
@@ -115,6 +167,12 @@ def _table_rows(block) -> list:
                     "is_header": bool(cell.get("is_header")),
                     "colspan": cell.get("colspan", 1),
                     "rowspan": cell.get("rowspan", 1),
+                    # Alignment is part of how a table LOOKS, and leaving it out
+                    # made a centred table and a left-aligned one report as
+                    # identical - a reproduction matched every field this tool
+                    # returned and was still visibly wrong.
+                    "align": _alignment(cell.get("align")),
+                    "valign": _alignment(cell.get("valign")),
                 }
                 for cell in (row if isinstance(row, list) else [row])
             ]
@@ -164,10 +222,91 @@ def _render_block(block: dict) -> dict:
                 record[flag] = True
         return record
 
-    # Not a table. Blocks carry their content under several different names, so
-    # take whichever is present rather than returning an empty record for a
-    # block type this has not met before - the words are the point.
-    text = _flatten(block.get("text")) or _flatten(block.get("caption"))
+    # Container blocks hold NESTED BLOCKS, not rich text - measured, because
+    # reading `text` on them returns nothing and they came back as bare `{}`
+    # with their whole contents missing.
+    if kind in ("pageBlockBlockQuote", "pageBlockPullQuote"):
+        record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
+        credit = _flatten(block.get("credit"))
+        if credit:
+            record["credit"] = sanitize_name(credit)
+        return record
+
+    if kind == "pageBlockList":
+        items = []
+        for item in block.get("items") or []:
+            entry = {"blocks": [_render_block(b) for b in item.get("blocks") or []]}
+            label = _flatten(item.get("label"))
+            if label:
+                entry["label"] = sanitize_name(label)
+            # A checklist and a bullet list are the same block type; only these
+            # two flags separate "todo" from "point".
+            if item.get("has_checkbox"):
+                entry["checkbox"] = True
+                entry["checked"] = bool(item.get("is_checked"))
+            items.append(entry)
+        record["items"] = items
+        record["item_count"] = len(items)
+        return record
+
+    if kind == "pageBlockDetails":
+        header = _flatten(block.get("header"))
+        if header:
+            record["header"] = sanitize_name(header)
+        record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
+        record["is_open"] = bool(block.get("is_open"))
+        return record
+
+    if kind == "pageBlockDivider":
+        return record  # nothing to carry; the type IS the content
+
+    if kind == "pageBlockMathematicalExpression":
+        record["expression"] = block.get("expression") or ""
+        return record
+
+    if kind in _MEDIA_BLOCKS:
+        media = block.get(_MEDIA_BLOCKS[kind]) or {}
+        record["media"] = {"kind": _MEDIA_BLOCKS[kind]}
+        record["media"].update(
+            {key: media[key] for key in _MEDIA_FACTS if media.get(key) not in (None, "")}
+        )
+        # A photo record carries no width or height of its own; the sizes are
+        # the picture, and the last of them is the full one.
+        sizes = media.get("sizes") or []
+        if sizes:
+            record["media"]["width"] = sizes[-1].get("width")
+            record["media"]["height"] = sizes[-1].get("height")
+        for flag in ("has_spoiler", "need_autoplay", "is_looped"):
+            if block.get(flag):
+                record[flag] = True
+        if block.get("url"):
+            record["url"] = block["url"]
+        caption = _flatten(block.get("caption"))
+        if caption:
+            record["caption"] = sanitize_name(caption)
+        return record
+
+    if kind == "pageBlockMap":
+        where = block.get("location") or {}
+        record["location"] = {
+            "latitude": where.get("latitude"),
+            "longitude": where.get("longitude"),
+        }
+        for key in ("zoom", "width", "height"):
+            if block.get(key):
+                record[key] = block[key]
+        caption = _flatten(block.get("caption"))
+        if caption:
+            record["caption"] = sanitize_name(caption)
+        return record
+
+    # Anything else carries its words under one of these names. Taking whichever
+    # is present keeps the text for a block type this has not met before.
+    text = (
+        _flatten(block.get("text"))
+        or _flatten(block.get("caption"))
+        or _flatten(block.get("footer"))
+    )
     if text:
         record["text"] = sanitize_name(text)
     return record

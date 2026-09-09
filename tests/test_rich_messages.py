@@ -303,3 +303,226 @@ def test_an_inline_document_is_still_reported_as_an_icon():
     """`richTextIcon` is a sticker or image, not an emoji - it has no glyph and
     no id to give back, so naming it stays the honest answer."""
     assert rm._flatten({"@type": "richTextIcon"}) == "[icon]"
+
+
+# --- the composer's other formats, all of which used to come back empty ------
+
+
+def test_a_blockquote_keeps_the_blocks_inside_it():
+    """These containers hold NESTED BLOCKS, not rich text. Reading `text` on one
+    returns nothing, which is why a quote came back as a bare `{}` with its
+    whole contents missing."""
+    block = {
+        "@type": "pageBlockBlockQuote",
+        "blocks": [
+            {"@type": "pageBlockParagraph", "text": {"@type": "richTextPlain", "text": "a quote"}}
+        ],
+    }
+
+    out = rm._render_block(block)
+
+    assert out["blocks"][0]["text"] == "a quote"
+
+
+def test_a_list_keeps_its_items_and_their_labels():
+    block = {
+        "@type": "pageBlockList",
+        "items": [
+            {
+                "@type": "pageBlockListItem",
+                "label": {"@type": "richTextPlain", "text": "1."},
+                "blocks": [
+                    {
+                        "@type": "pageBlockParagraph",
+                        "text": {"@type": "richTextPlain", "text": "first"},
+                    }
+                ],
+            },
+        ],
+    }
+
+    out = rm._render_block(block)
+
+    assert out["item_count"] == 1
+    assert out["items"][0]["label"] == "1."
+    assert out["items"][0]["blocks"][0]["text"] == "first"
+
+
+def test_a_checklist_item_reports_its_box_and_whether_it_is_ticked():
+    """A checklist and a bullet list are the SAME block type; only these two
+    flags separate "todo" from "point"."""
+    block = {
+        "@type": "pageBlockList",
+        "items": [
+            {
+                "@type": "pageBlockListItem",
+                "has_checkbox": True,
+                "is_checked": True,
+                "blocks": [
+                    {
+                        "@type": "pageBlockParagraph",
+                        "text": {"@type": "richTextPlain", "text": "done"},
+                    }
+                ],
+            }
+        ],
+    }
+
+    item = rm._render_block(block)["items"][0]
+
+    assert item["checkbox"] is True and item["checked"] is True
+
+
+def test_a_bullet_item_has_no_checkbox_keys_at_all():
+    block = {"@type": "pageBlockList", "items": [{"@type": "pageBlockListItem", "blocks": []}]}
+
+    item = rm._render_block(block)["items"][0]
+
+    assert "checkbox" not in item and "checked" not in item
+
+
+def test_a_details_block_keeps_its_summary_body_and_open_state():
+    block = {
+        "@type": "pageBlockDetails",
+        "header": {"@type": "richTextPlain", "text": "the summary"},
+        "is_open": False,
+        "blocks": [
+            {
+                "@type": "pageBlockParagraph",
+                "text": {"@type": "richTextPlain", "text": "hidden body"},
+            }
+        ],
+    }
+
+    out = rm._render_block(block)
+
+    assert out["header"] == "the summary"
+    assert out["is_open"] is False
+    assert out["blocks"][0]["text"] == "hidden body"
+
+
+def test_a_divider_is_reported_by_its_type_and_carries_nothing():
+    assert rm._render_block({"@type": "pageBlockDivider"}) == {"type": "pageBlockDivider"}
+
+
+def test_every_emphasis_the_composer_offers_survives_the_round_trip():
+    """Without these the words come back and the formatting does not, so an
+    underlined warning and a plain sentence read identically."""
+    for kind, marker in (
+        ("richTextUnderline", "__"),
+        ("richTextMarked", "=="),
+        ("richTextSubscript", "~"),
+        ("richTextSuperscript", "^"),
+    ):
+        node = {"@type": kind, "text": {"@type": "richTextPlain", "text": "x"}}
+
+        assert rm._flatten(node) == f"{marker}x{marker}", kind
+
+
+def test_cell_alignment_is_reported():
+    """A centred table and a left-aligned one used to read back identical - a
+    reproduction matched every field this tool returned and was still wrong."""
+    block = {
+        "@type": "pageBlockTable",
+        "cells": [
+            [
+                {
+                    "@type": "pageBlockTableCell",
+                    "text": {"@type": "richTextPlain", "text": "c"},
+                    "align": {"@type": "pageBlockHorizontalAlignmentCenter"},
+                    "valign": {"@type": "pageBlockVerticalAlignmentTop"},
+                }
+            ]
+        ],
+    }
+
+    cell = rm._render_block(block)["rows"][0][0]
+
+    assert cell["align"] == "center" and cell["valign"] == "top"
+
+
+def test_a_spoiler_comes_back_marked():
+    """It read back as ordinary words, and that was diagnosed as "Telegram keeps
+    no spoiler node" - twice wrong. `richTextSpoiler` exists and carries `text`
+    like the rest of its family; the generic fallback took the words and dropped
+    the marker, exactly as it once did to premium emoji."""
+    node = {"@type": "richTextSpoiler", "text": {"@type": "richTextPlain", "text": "hidden"}}
+
+    assert rm._flatten(node) == "||hidden||"
+
+
+def test_an_inline_formula_keeps_its_expression():
+    """The one node that does NOT hold its content under `text`. The fallback
+    found no `text`, returned nothing, and an inline formula vanished from the
+    paragraph with no sign it had ever been there."""
+    node = {"@type": "richTextMathematicalExpression", "expression": "E=mc^2"}
+
+    assert rm._flatten(node) == "$E=mc^2$"
+
+
+def test_a_formula_block_keeps_its_expression():
+    block = {"@type": "pageBlockMathematicalExpression", "expression": "a^2+b^2=c^2"}
+
+    assert rm._render_block(block) == {
+        "type": "pageBlockMathematicalExpression",
+        "expression": "a^2+b^2=c^2",
+    }
+
+
+def test_a_photo_block_reports_the_picture_and_its_full_size():
+    """A photo record has no width or height of its own - the sizes ARE the
+    picture - so reading the record alone reports a photo of no dimensions."""
+    block = {
+        "@type": "pageBlockPhoto",
+        "photo": {
+            "@type": "photo",
+            "sizes": [
+                {"@type": "photoSize", "type": "s", "width": 90, "height": 90},
+                {"@type": "photoSize", "type": "x", "width": 640, "height": 480},
+            ],
+        },
+        "has_spoiler": True,
+    }
+
+    record = rm._render_block(block)
+
+    assert record["media"] == {"kind": "photo", "width": 640, "height": 480}
+    assert record["has_spoiler"] is True
+
+
+def test_a_track_reports_what_it_is_rather_than_an_empty_record():
+    """Every media block came back as a bare `{}`: its content hangs off its own
+    key and is a media record, so reading `text` on one finds nothing."""
+    block = {
+        "@type": "pageBlockAudio",
+        "audio": {
+            "@type": "audio",
+            "duration": 1,
+            "file_name": "tone.mp3",
+            "mime_type": "audio/mpeg",
+            "title": "a tone",
+        },
+    }
+
+    assert rm._render_block(block)["media"] == {
+        "kind": "audio",
+        "duration": 1,
+        "file_name": "tone.mp3",
+        "mime_type": "audio/mpeg",
+        "title": "a tone",
+    }
+
+
+def test_a_map_block_reports_where_it_points():
+    block = {
+        "@type": "pageBlockMap",
+        "location": {"@type": "location", "latitude": 35.689214, "longitude": 51.38901},
+        "zoom": 12,
+        "width": 800,
+        "height": 400,
+    }
+
+    record = rm._render_block(block)
+
+    assert record["location"] == {"latitude": 35.689214, "longitude": 51.38901}
+    assert record["zoom"] == 12

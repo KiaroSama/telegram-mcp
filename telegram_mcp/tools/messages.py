@@ -79,6 +79,7 @@ async def _send_rich(
     topic_id: Optional[int] = None,
     reply_to_message_id: Optional[int] = None,
     rich_rtl: Optional[bool] = None,
+    rich_files=None,
 ):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
     if not await account_is_premium(cl):
@@ -94,7 +95,7 @@ async def _send_rich(
                 # form here could also not express "reply inside a topic", which
                 # needs both ids.
                 reply_to=topic_reply_to_request(topic_id, reply_to_message_id),
-                rich_message=make_rich_input(parse_mode, text, rich_rtl),
+                rich_message=make_rich_input(parse_mode, text, rich_rtl, rich_files),
             )
         )
     except telethon.errors.RPCError as e:
@@ -382,6 +383,8 @@ async def send_message(
     reply_to_message_id: Optional[int] = None,
     send_as: Optional[Union[int, str]] = None,
     rich_rtl: Optional[bool] = None,
+    rich_files: Optional[Dict[str, str]] = None,
+    ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
     """
@@ -416,6 +419,17 @@ async def send_message(
             {"sent": false, "reason": "telegram_premium_required"} result tells you to
             reformat and retry with 'md'/'html'. Premium is re-checked on every call
             (it can expire or be bought at any time).
+        rich_rtl: Rich modes only. Telegram does NOT infer direction: a table
+            written entirely in Persian arrives left-to-right unless this is
+            true.
+        rich_files: Rich modes only. `{name: local path}` for the media the
+            markup refers to. Rich markup names its media rather than carrying
+            it, so `<img src="name">`, `<video src="name">`, `<audio src="name">`
+            and `<a href="name">` are a picture, a video, a track and a file
+            only for names listed here; an unlisted one is dropped silently.
+            Each path is uploaded once, under the same allowed roots as
+            `upload_file`. A location needs no file: `<tg-map lat=".." long=".."
+            zoom=".."/>`.
     """
     try:
         built_entities = await build_send_entities(entities, message, account)
@@ -431,8 +445,20 @@ async def send_message(
         cl = get_client(account)
         entity = await resolve_entity(chat_id, cl)
         if parse_mode and parse_mode.lower() in RICH_PARSE_MODES:
+            files = None
+            if rich_files:
+                files, files_error = await rich_message_files(cl, entity, rich_files, message, ctx)
+                if files_error:
+                    return files_error
             return await _send_rich(
-                cl, entity, message, parse_mode.lower(), topic_id, reply_to_message_id, rich_rtl
+                cl,
+                entity,
+                message,
+                parse_mode.lower(),
+                topic_id,
+                reply_to_message_id,
+                rich_rtl,
+                files,
             )
         sent = await _send_text(
             cl,

@@ -437,17 +437,93 @@ async def account_is_premium(client) -> bool:
     return bool(getattr(me, "premium", False))
 
 
-def make_rich_input(parse_mode: str, text: str, rtl: Optional[bool] = None):
+def make_rich_input(parse_mode: str, text: str, rtl: Optional[bool] = None, files=None):
     """Build the InputRichMessage payload for a rich parse mode.
 
     `rtl` is not cosmetic and Telegram does not infer it: a table written
     entirely in Persian arrives with `is_rtl: false` and renders its columns
     left to right, which is the wrong shape for the text in them. The flag
     existed on the TL type from the start and was simply never passed.
+
+    `files` is the other field that existed and was never passed. Rich markup
+    NAMES its media instead of carrying it -- `<img src="name">` is a picture
+    only because `name` is in this list -- so without it the composer's
+    Photo/Video, Audio and File attachments cannot be sent at all. Build it
+    with `rich_message_files`.
     """
     if parse_mode == "rich_html":
-        return types.InputRichMessageHTML(html=text, rtl=rtl)
-    return types.InputRichMessageMarkdown(markdown=text, rtl=rtl)
+        return types.InputRichMessageHTML(html=text, rtl=rtl, files=files)
+    return types.InputRichMessageMarkdown(markdown=text, rtl=rtl, files=files)
+
+
+# Every reference the markup makes to an attached file, as (scheme, name).
+# Measured against the live API, which distinguishes an unusable URL
+# (`RICH_MESSAGE_PHOTO_URL_INVALID`) from a URL whose media is the wrong kind
+# (`RICH_MESSAGE_PHOTO_INVALID`) -- the second error is what says the form was
+# understood and only the file was wrong.
+_RICH_FILE_REFERENCE = re.compile(r"tg://(photo|video|audio|document)\?id=([^\"'\s>&]+)")
+
+
+async def rich_message_files(cl, entity, attachments: dict, markup: str = "", ctx=None):
+    """`(InputRichFile list, error)` for `make_rich_input`'s `files`.
+
+    `attachments` maps the name the markup refers to -> a local path:
+
+        <img   src="tg://photo?id=logo">      a photo
+        <video src="tg://video?id=clip">      a document
+        <audio src="tg://audio?id=track">     a document
+        <a    href="tg://document?id=report"> a document
+
+    The wrapper follows the SCHEME the markup used, not the file's own type, so
+    the same picture can be a photo in one message and a downloadable file in
+    the next. Getting that pair wrong is not a silent failure but it is an
+    opaque one: Telegram answers `RICH_MESSAGE_PHOTO_INVALID` and names neither
+    the tag nor the file.
+
+    The list takes a SAVED photo or document, never an upload, which is why this
+    cannot simply hand over what `upload_file` returns: `messages.uploadMedia`
+    is the step that turns an uploaded file into one Telegram will keep, and it
+    does that without sending a message anywhere.
+
+    Paths go through the same allowed-roots guard as every other file this
+    server reads; an unreadable or out-of-root path comes back as the error
+    rather than raised, so the caller answers instead of crashing.
+    """
+    scheme_of = {name: scheme for scheme, name in _RICH_FILE_REFERENCE.findall(markup or "")}
+    files = []
+    for name, path in (attachments or {}).items():
+        # `force_document` STRIPS the duration and dimensions Telegram needs before
+        # it will accept a video or a track, so it is right only for the one scheme
+        # that asks for a plain file. Forcing it everywhere turned two working
+        # attachments into RICH_MESSAGE_VIDEO_INVALID and RICH_MESSAGE_AUDIO_INVALID.
+        as_file = scheme_of.get(str(name)) == "document"
+        async with _open_verified_source(raw_path=path, ctx=ctx, tool_name="send_message") as (
+            source,
+            path_error,
+        ):
+            if path_error:
+                return None, path_error
+            # The conversion send_file uses, so mime type, dimensions and video
+            # attributes are not re-derived here.
+            # ponytail: Telethon-private helper, same trade as `post_story`.
+            _handle, media, _as_image = await cl._file_to_media(
+                source.handle, force_document=as_file
+            )
+        if media is None:
+            return None, f"Nothing uploadable was found at {path}."
+        saved = await cl(functions.messages.UploadMediaRequest(peer=entity, media=media))
+        photo = getattr(saved, "photo", None)
+        if photo is not None:
+            files.append(
+                types.InputRichFilePhoto(id=str(name), photo=utils.get_input_photo(photo))
+            )
+        else:
+            files.append(
+                types.InputRichFileDocument(
+                    id=str(name), document=utils.get_input_document(saved.document)
+                )
+            )
+    return files, None
 
 
 def premium_required_result(action: str) -> str:
