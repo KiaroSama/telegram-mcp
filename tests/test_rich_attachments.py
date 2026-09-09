@@ -168,3 +168,20 @@ async def test_a_refused_path_stops_the_send_instead_of_sending_text(
 
     assert '"sent": true' not in answer.lower()
     assert not [r for r in client.sent if isinstance(r, functions.messages.SendMessageRequest)]
+
+
+# ------------------------------------------------------- the autolink flag
+
+
+def test_the_autolink_flag_reaches_both_rich_parse_modes():
+    """The third field that was on the TL type from the start and never passed.
+    Telegram links a bare URL by itself, so a message that writes one as an
+    example rather than a destination has no other way to say so."""
+    assert runtime.make_rich_input("rich_html", "<p>x</p>", None, None, True).noautolink is True
+    assert runtime.make_rich_input("rich_markdown", "x", None, None, True).noautolink is True
+
+
+def test_autolinking_stays_on_unless_it_is_turned_off():
+    """Absent, not False: an unasked-for keyword changes the payload for every
+    existing caller, which is how the send_as work broke five unrelated tests."""
+    assert runtime.make_rich_input("rich_html", "<p>x</p>").noautolink is None

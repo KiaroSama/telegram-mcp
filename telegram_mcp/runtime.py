@@ -437,7 +437,13 @@ async def account_is_premium(client) -> bool:
     return bool(getattr(me, "premium", False))
 
 
-def make_rich_input(parse_mode: str, text: str, rtl: Optional[bool] = None, files=None):
+def make_rich_input(
+    parse_mode: str,
+    text: str,
+    rtl: Optional[bool] = None,
+    files=None,
+    no_autolink: Optional[bool] = None,
+):
     """Build the InputRichMessage payload for a rich parse mode.
 
     `rtl` is not cosmetic and Telegram does not infer it: a table written
@@ -450,10 +456,16 @@ def make_rich_input(parse_mode: str, text: str, rtl: Optional[bool] = None, file
     only because `name` is in this list -- so without it the composer's
     Photo/Video, Audio and File attachments cannot be sent at all. Build it
     with `rich_message_files`.
+
+    `no_autolink` is the third field that was there and never passed:
+    Telegram turns bare URLs, @usernames and phone numbers into links on its
+    own, and a message writing one as an EXAMPLE has no other way to say so.
     """
     if parse_mode == "rich_html":
-        return types.InputRichMessageHTML(html=text, rtl=rtl, files=files)
-    return types.InputRichMessageMarkdown(markdown=text, rtl=rtl, files=files)
+        return types.InputRichMessageHTML(html=text, rtl=rtl, files=files, noautolink=no_autolink)
+    return types.InputRichMessageMarkdown(
+        markdown=text, rtl=rtl, files=files, noautolink=no_autolink
+    )
 
 
 # Every reference the markup makes to an attached file, as (scheme, name).

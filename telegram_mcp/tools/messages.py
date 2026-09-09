@@ -106,6 +106,7 @@ async def _send_rich(
     reply_to_message_id: Optional[int] = None,
     rich_rtl: Optional[bool] = None,
     rich_files=None,
+    rich_no_autolink: Optional[bool] = None,
 ):
     """Send text as a server-parsed rich message. Returns a JSON result string."""
     if not await account_is_premium(cl):
@@ -121,7 +122,9 @@ async def _send_rich(
                 # form here could also not express "reply inside a topic", which
                 # needs both ids.
                 reply_to=topic_reply_to_request(topic_id, reply_to_message_id),
-                rich_message=make_rich_input(parse_mode, text, rich_rtl, rich_files),
+                rich_message=make_rich_input(
+                    parse_mode, text, rich_rtl, rich_files, rich_no_autolink
+                ),
             )
         )
     except telethon.errors.RPCError as e:
@@ -410,6 +413,7 @@ async def send_message(
     send_as: Optional[Union[int, str]] = None,
     rich_rtl: Optional[bool] = None,
     rich_files: Optional[Dict[str, str]] = None,
+    rich_no_autolink: Optional[bool] = None,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -456,6 +460,9 @@ async def send_message(
             Each path is uploaded once, under the same allowed roots as
             `upload_file`. A location needs no file: `<tg-map lat=".." long=".."
             zoom=".."/>`.
+        rich_no_autolink: Rich modes only. Telegram links bare URLs, @usernames
+            and phone numbers by itself; set this when the message writes one as
+            an EXAMPLE rather than a destination.
     """
     try:
         built_entities = await build_send_entities(entities, message, account)
@@ -485,6 +492,7 @@ async def send_message(
                 reply_to_message_id,
                 rich_rtl,
                 files,
+                rich_no_autolink,
             )
         sent = await _send_text(
             cl,
