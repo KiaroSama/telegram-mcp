@@ -295,7 +295,12 @@ def test_extract_frames_refuses_a_suffix_it_cannot_decode(monkeypatch, hostile):
     extract_frames(b"whatever", hostile, count=1)
 
     assert seen["path"].endswith(".bin")
-    assert "ads" not in seen["path"]
+    # The hostile suffix itself, not a fragment of it. `"ads" not in path` also
+    # ran for the parameters that never contained "ads", where it was really
+    # asserting that `tempfile`'s random name avoids three letters - and CI
+    # eventually drew `/tmp/tmp1djads2r.bin`. Checking the whole suffix is both
+    # stronger and deterministic.
+    assert hostile not in seen["path"]
 
 
 def test_open_image_bytes_refuses_an_oversized_image(monkeypatch):
