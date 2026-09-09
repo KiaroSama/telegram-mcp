@@ -137,6 +137,15 @@ def _flatten(node) -> str:
         # a bare LaTeX string. The generic fallback below found no `text` and
         # returned nothing, so an inline formula vanished without a trace.
         return f"${node.get('expression') or ''}$"
+    if kind == "richTextButton":
+        # A button is NOT text with a link: the label hangs off an `inlineButton`
+        # record, so nothing under `text` exists and the fallback returned "" -
+        # a whole button read back as an empty paragraph. Written in the same
+        # shape as the custom-emoji marker so the two read alike.
+        button = node.get("button") or {}
+        label = _flatten(button.get("text"))
+        target = (button.get("type") or {}).get("url") or (button.get("type") or {}).get("@type")
+        return f"[{label}]<tg-button url={target}>" if label else ""
     if kind == "richTextIcon":
         # A document rendered inline - a sticker or an image, not an emoji.
         # There is no text to take, so it is named rather than dropped.
@@ -255,6 +264,17 @@ def _render_block(block: dict) -> dict:
             record["header"] = sanitize_name(header)
         record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
         record["is_open"] = bool(block.get("is_open"))
+        return record
+
+    if kind in ("pageBlockCollage", "pageBlockSlideshow"):
+        # A gallery holds its pictures as nested blocks; only its caption sits
+        # where the fallback looks, so a two-photo collage read back as the word
+        # under it and nothing else.
+        record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
+        record["block_count"] = len(record["blocks"])
+        caption = _flatten(block.get("caption"))
+        if caption:
+            record["caption"] = sanitize_name(caption)
         return record
 
     if kind == "pageBlockDivider":

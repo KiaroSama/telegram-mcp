@@ -526,3 +526,62 @@ def test_a_map_block_reports_where_it_points():
 
     assert record["location"] == {"latitude": 35.689214, "longitude": 51.38901}
     assert record["zoom"] == 12
+
+
+def test_a_button_keeps_its_label_and_target():
+    """A button is not text with a link: the label hangs off an `inlineButton`
+    record, so nothing sits under `text` and a whole button read back as an
+    empty paragraph."""
+    node = {
+        "@type": "richTextButton",
+        "button": {
+            "@type": "inlineButton",
+            "text": {"@type": "richTextPlain", "text": "go"},
+            "type": {"@type": "inlineKeyboardButtonTypeUrl", "url": "https://telegram.org/"},
+        },
+    }
+
+    assert rm._flatten(node) == "[go]<tg-button url=https://telegram.org/>"
+
+
+def test_a_button_without_a_url_is_named_by_its_type():
+    """Not every button is a link, and losing the label to report nothing at all
+    would be worse than saying which kind arrived."""
+    node = {
+        "@type": "richTextButton",
+        "button": {
+            "text": {"@type": "richTextPlain", "text": "pay"},
+            "type": {"@type": "inlineKeyboardButtonTypeBuy"},
+        },
+    }
+
+    assert rm._flatten(node) == "[pay]<tg-button url=inlineKeyboardButtonTypeBuy>"
+
+
+def test_a_gallery_reports_the_pictures_inside_it():
+    """A collage holds its photos as nested blocks and only its caption sits
+    where the fallback looks, so two pictures read back as one word."""
+    photo = {
+        "@type": "pageBlockPhoto",
+        "photo": {"sizes": [{"width": 64, "height": 64}]},
+    }
+    block = {
+        "@type": "pageBlockCollage",
+        "blocks": [photo, photo],
+        "caption": {
+            "@type": "pageBlockCaption",
+            "text": {"@type": "richTextPlain", "text": "two"},
+        },
+    }
+
+    record = rm._render_block(block)
+
+    assert record["block_count"] == 2
+    assert [b["type"] for b in record["blocks"]] == ["pageBlockPhoto", "pageBlockPhoto"]
+    assert record["caption"] == "two"
+
+
+def test_a_slideshow_is_read_the_same_way_as_a_collage():
+    block = {"@type": "pageBlockSlideshow", "blocks": [{"@type": "pageBlockDivider"}]}
+
+    assert rm._render_block(block)["block_count"] == 1
