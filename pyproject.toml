@@ -55,7 +55,7 @@ dependencies = [
 [project.optional-dependencies]
 # Required only when TELEGRAM_PROXY_TYPE is set to socks5/socks4/http.
 proxy = [
-    "python-socks>=2.4.3",
+    "python-socks>=3.1.1",
 ]
 # Renders .tgs (gzipped Lottie) animated stickers and custom emoji into frames.
 # Optional because it ships a native rlottie build; without it those media fall
