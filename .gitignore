@@ -225,6 +225,7 @@ incoming_feed.jsonl
 /.cursor/
 /.cline/
 /graphify-out/
+/.codebase-memory/
 
 # One directory per Telegram account, named by its numeric user id: that
 # account's own data and one-off scripts. Never part of the project.
