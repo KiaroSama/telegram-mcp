@@ -13,10 +13,13 @@ No network: a fake client records the TL requests it was handed.
 """
 
 import asyncio
+import datetime
 import time
 from types import SimpleNamespace
 
 import pytest
+
+from telethon.tl.types import Channel
 
 from telegram_mcp.tools import messages_delete as mod
 
@@ -222,3 +225,30 @@ async def test_deleting_for_everyone_is_available_when_it_is_asked_for(_wire):
 
     assert client.deleted[-1][2] is True
     assert "both" in both
+
+
+@pytest.mark.asyncio
+async def test_a_channel_deletion_is_not_reported_as_private(_wire, monkeypatch):
+    """A channel keeps no per-account copy, so `revoke` is ignored and the post
+    goes for every subscriber. Reporting the FLAG said "for you only" about a
+    message that was already gone for everyone - the one reading of that
+    sentence that matters, and the wrong one."""
+    client = _wire(_Client())
+
+    async def _resolve_channel(chat_id, _client):
+        return Channel(
+            id=chat_id,
+            title="a channel",
+            photo=None,
+            date=datetime.datetime.now(datetime.timezone.utc),
+            broadcast=True,
+        )
+
+    monkeypatch.setattr(mod, "resolve_entity", _resolve_channel)
+
+    said = await mod.delete_message(-1001129051609, 973, account="a")
+
+    assert client.deleted[-1][1] == 973, "the delete itself must still have been issued"
+    assert "you only" not in said, "a channel post is never deleted for you alone"
+    assert "both parties" not in said, "a channel has subscribers, not two parties"
+    assert "for everyone" in said

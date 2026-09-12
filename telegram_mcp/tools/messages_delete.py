@@ -69,7 +69,17 @@ async def delete_message(
         # recipient's chat as well. Reaching the other party is now something the
         # caller asks for.
         await cl.delete_messages(entity, message_id, revoke=revoke)
-        scope = "for both parties" if revoke else "for you only"
+        # Report what Telegram DID, not what the flag asked for. A channel or
+        # supergroup keeps no per-account copy, so `channels.deleteMessages`
+        # removes the message for every subscriber whatever `revoke` says - and
+        # echoing the flag meant a channel post that was already gone for
+        # everyone was reported as "deleted for you only". The caller then has
+        # every reason to believe it is still up, which is the one thing this
+        # sentence exists to settle.
+        if isinstance(entity, Channel):
+            scope = "for everyone (a channel keeps no per-account copy)"
+        else:
+            scope = "for both parties" if revoke else "for you only"
         return f"Message {message_id} deleted {scope}."
     except Exception as e:
         return log_and_format_error("delete_message", e, chat_id=chat_id, message_id=message_id)
