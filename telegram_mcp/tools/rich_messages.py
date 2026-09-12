@@ -27,6 +27,12 @@ same shape of answer to the same shape of problem.
 from typing import Optional, Union
 
 from telegram_mcp.runtime import *
+
+# Body text, NOT a display name and not the generic sanitiser: that one strips
+# every Cf character, and `text_fidelity` records why this module must not -
+# ZWNJ is a letter in Persian and ZWJ is what holds a multi-part emoji
+# together, so stripping them rewrites the message being reported.
+from telegram_mcp.text_fidelity import display_text
 from telegram_mcp.tdlib import (
     NotSignedIn,
     TDLibError,
@@ -203,7 +209,7 @@ def _table_rows(block) -> list:
         rows.append(
             [
                 {
-                    "text": sanitize_user_content(_flatten(cell.get("text"))),
+                    "text": display_text(_flatten(cell.get("text"))),
                     "is_header": bool(cell.get("is_header")),
                     "colspan": cell.get("colspan", 1),
                     "rowspan": cell.get("rowspan", 1),
@@ -256,7 +262,7 @@ def _render_block(block: dict) -> dict:
         record["markdown"] = _as_markdown(rows)
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_user_content(caption)
+            record["caption"] = display_text(caption)
         for flag in ("is_bordered", "is_striped", "is_compact"):
             if block.get(flag):
                 record[flag] = True
@@ -269,7 +275,7 @@ def _render_block(block: dict) -> dict:
         record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
         credit = _flatten(block.get("credit"))
         if credit:
-            record["credit"] = sanitize_user_content(credit)
+            record["credit"] = display_text(credit)
         return record
 
     if kind == "pageBlockList":
@@ -278,7 +284,7 @@ def _render_block(block: dict) -> dict:
             entry = {"blocks": [_render_block(b) for b in item.get("blocks") or []]}
             label = _flatten(item.get("label"))
             if label:
-                entry["label"] = sanitize_user_content(label)
+                entry["label"] = display_text(label)
             # A checklist and a bullet list are the same block type; only these
             # two flags separate "todo" from "point".
             if item.get("has_checkbox"):
@@ -292,7 +298,7 @@ def _render_block(block: dict) -> dict:
     if kind == "pageBlockDetails":
         header = _flatten(block.get("header"))
         if header:
-            record["header"] = sanitize_user_content(header)
+            record["header"] = display_text(header)
         record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
         record["is_open"] = bool(block.get("is_open"))
         return record
@@ -305,7 +311,7 @@ def _render_block(block: dict) -> dict:
         record["block_count"] = len(record["blocks"])
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_user_content(caption)
+            record["caption"] = display_text(caption)
         return record
 
     if kind == "pageBlockDivider":
@@ -340,7 +346,7 @@ def _render_block(block: dict) -> dict:
             record["url"] = block["url"]
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_user_content(caption)
+            record["caption"] = display_text(caption)
         return record
 
     if kind == "pageBlockMap":
@@ -354,7 +360,7 @@ def _render_block(block: dict) -> dict:
                 record[key] = block[key]
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_user_content(caption)
+            record["caption"] = display_text(caption)
         return record
 
     # Anything else carries its words under one of these names. Taking whichever
@@ -365,7 +371,7 @@ def _render_block(block: dict) -> dict:
         or _flatten(block.get("footer"))
     )
     if text:
-        record["text"] = sanitize_user_content(text)
+        record["text"] = display_text(text)
     return record
 
 

@@ -735,3 +735,37 @@ async def test_a_block_without_media_says_so_instead_of_failing(wire):
     )
 
     assert "carries media" in await rm.download_rich_media(-100123, 970, account="acct")
+
+
+def test_a_cell_keeps_the_joiners_that_are_part_of_its_words_and_emoji():
+    """The generic sanitiser strips every Cf character, which silently rewrites
+    the message: Persian spells `صرافی‌های` with a ZWNJ, and `😶‍🌫️` is one emoji
+    only because a ZWJ holds it together - without it the reader reports two.
+    `text_fidelity` records this, which is why the reader uses `display_text`."""
+    body = "صرافی\u200cهای \U0001f636\u200d\U0001f32b\ufe0f"
+    block = {
+        "@type": "pageBlockTable",
+        "cells": [
+            [{"@type": "pageBlockTableCell", "text": {"@type": "richTextPlain", "text": body}}]
+        ],
+    }
+
+    assert rm._render_block(block)["rows"][0][0]["text"] == body
+
+
+def test_a_cell_still_loses_a_genuinely_unsafe_invisible():
+    """Keeping the joiners is not "keep everything": a zero-width SPACE is not
+    orthography, it is a way to hide one string inside another."""
+    block = {
+        "@type": "pageBlockTable",
+        "cells": [
+            [
+                {
+                    "@type": "pageBlockTableCell",
+                    "text": {"@type": "richTextPlain", "text": "a\u200bb"},
+                }
+            ]
+        ],
+    }
+
+    assert rm._render_block(block)["rows"][0][0]["text"] == "ab"
