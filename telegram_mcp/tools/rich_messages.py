@@ -24,7 +24,7 @@ So this reads the message over TDLib and renders it, exactly as
 same shape of answer to the same shape of problem.
 """
 
-from typing import Union
+from typing import Optional, Union
 
 from telegram_mcp.runtime import *
 from telegram_mcp.tdlib import (
@@ -35,7 +35,7 @@ from telegram_mcp.tdlib import (
     secret_client,
 )
 
-__all__ = ["read_rich_message"]
+__all__ = ["download_rich_media", "read_rich_message"]
 
 # TDLib numbers messages `server_id << 20`: the low bits carry ordering and
 # send-state for messages not yet on the server. Inline rather than in a module
@@ -77,9 +77,21 @@ _MEDIA_BLOCKS = {
     "pageBlockDocument": "document",
 }
 
-# What is worth carrying out of a media record. The file handles under it are
-# left behind on purpose: they are pages of download state, and nothing here
-# can fetch a rich message's media with them anyway.
+# The FILE sits one level below the media record and TDLib names it differently
+# per kind - a voice note's is `voice`, not `voice_note` - so the mapping is
+# explicit rather than derived from the block key.
+_MEDIA_FILE_KEY = {
+    "video": "video",
+    "animation": "animation",
+    "audio": "audio",
+    "voice_note": "voice",
+    "document": "document",
+}
+
+# What is worth carrying out of a media record. TDLib's own download-state
+# pages are left behind - they are noise - but the file's ID is published now
+# that `download_rich_media` can act on it, along with a path when TDLib
+# already holds the bytes.
 _MEDIA_FACTS = (
     "file_name",
     "mime_type",
@@ -89,6 +101,25 @@ _MEDIA_FACTS = (
     "title",
     "performer",
 )
+
+
+def _block_file(block: dict) -> Optional[dict]:
+    """The TDLib `file` a media block carries, or None.
+
+    A photo has no file of its own: its `sizes` are the picture and the last of
+    them is the full one, which is why this cannot simply index the block key
+    the way every other kind does.
+    """
+    kind = _MEDIA_BLOCKS.get(block.get("@type"))
+    if kind is None:
+        return None
+    media = block.get(kind) or {}
+    if kind == "photo":
+        sizes = media.get("sizes") or []
+        candidate = sizes[-1].get("photo") if sizes else None
+    else:
+        candidate = media.get(_MEDIA_FILE_KEY[kind])
+    return candidate if isinstance(candidate, dict) and "id" in candidate else None
 
 
 def _flatten(node) -> str:
@@ -296,6 +327,12 @@ def _render_block(block: dict) -> dict:
         if sizes:
             record["media"]["width"] = sizes[-1].get("width")
             record["media"]["height"] = sizes[-1].get("height")
+        found = _block_file(block)
+        if found is not None:
+            record["media"]["file_id"] = found["id"]
+            local = found.get("local") or {}
+            if local.get("is_downloading_completed") and local.get("path"):
+                record["media"]["local_path"] = local["path"]
         for flag in ("has_spoiler", "need_autoplay", "is_looped"):
             if block.get(flag):
                 record[flag] = True
@@ -434,3 +471,113 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
         return f"Telegram refused this: {e}"
     except Exception as e:
         return log_and_format_error("read_rich_message", e, chat_id=chat_id, message_id=message_id)
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Download Rich Media", openWorldHint=True))
+@with_account(readonly=False)
+async def download_rich_media(
+    chat_id: Union[int, str],
+    message_id: int,
+    block_index: Optional[int] = None,
+    account: str = None,
+) -> str:
+    """
+    Fetch the photo, clip or file a rich message carries, and say where it is.
+
+    `read_rich_message` can report that a rich message has a photo and, before
+    this existed, had no way to hand it over: the block names its file only
+    inside TDLib's own file object. Over MTProto the message is empty by
+    definition - no text, no entities, no media - so `download_media` has
+    nothing to work with and this is the only route to the bytes.
+
+    The copy stays where TDLib puts it. Nothing here is under a self-destruct
+    timer, so unlike `save_secret_media` there is no copy out of TDLib's
+    directory to make; the returned `path` is durable.
+
+    Args:
+        chat_id: The chat, as an id or username.
+        message_id: The message id as a t.me link shows it.
+        block_index: Which block to fetch, numbered as `read_rich_message`
+            lists them. Omit for the first block that carries media.
+
+    Note: `file_name` is untrusted user-generated content.
+    """
+    try:
+        label = account_label(account)
+        client = await secret_client(label)
+        chat_id = await tdlib_chat_id(chat_id, account)
+        await client.request({"@type": "getChat", "chat_id": chat_id})
+        message = await client.request(
+            {
+                "@type": "getMessage",
+                "chat_id": chat_id,
+                "message_id": int(message_id) << _MESSAGE_ID_SHIFT,
+            }
+        )
+
+        content = message.get("content") or {}
+        if content.get("@type") != "messageRichMessage":
+            return (
+                "This is not a rich message. Ordinary media is `download_media`'s "
+                "job and it can see this message."
+            )
+
+        blocks = (content.get("message") or {}).get("blocks") or []
+        if block_index is None:
+            wanted = [(i, b) for i, b in enumerate(blocks) if _block_file(b) is not None]
+            if not wanted:
+                return "No block in this message carries media."
+            index, block = wanted[0]
+        else:
+            index = int(block_index)
+            if not 0 <= index < len(blocks):
+                return f"block_index {index} is outside this message's {len(blocks)} blocks."
+            block = blocks[index]
+
+        handle = _block_file(block)
+        if handle is None:
+            return f"Block {index} is a {block.get('@type')}, which carries no media."
+
+        # What TDLib already holds, read BEFORE asking it to fetch: a message
+        # whose picture has been displayed is usually already on disk, and a hit
+        # skips the transfer entirely.
+        local = handle.get("local") or {}
+        path = local.get("path") if local.get("is_downloading_completed") else None
+        size = handle.get("size")
+        if path is None:
+            fetched = await client.request(
+                {
+                    "@type": "downloadFile",
+                    "file_id": handle["id"],
+                    "priority": 1,
+                    "offset": 0,
+                    "limit": 0,
+                    "synchronous": True,
+                },
+                timeout=180,
+            )
+            done = fetched.get("local") or {}
+            if not done.get("is_downloading_completed"):
+                return format_tool_result(
+                    {"saved": False, "reason": "The transfer did not finish before the timeout."}
+                )
+            path, size = done.get("path"), fetched.get("size") or size
+
+        record = {
+            "saved": True,
+            "path": path,
+            "block_index": index,
+            "block_type": block.get("@type"),
+            "file_id": handle["id"],
+        }
+        if size:
+            record["size_bytes"] = size
+        return format_tool_result(record)
+    except (NotSignedIn, TDLibUnavailable, ValueError) as e:
+        return str(e)
+    except TDLibError as e:
+        return f"Telegram refused this: {e}"
+    except Exception as e:
+        return log_and_format_error(
+            "download_rich_media", e, chat_id=chat_id, message_id=message_id
+        )
