@@ -8,6 +8,7 @@ from telegram_mcp.tools.topics import *
 from telegram_mcp.tools.chat_state import *
 from telegram_mcp.tools.messages import *
 from telegram_mcp.tools.messages_delete import *
+from telegram_mcp.tools.messages_relay import *
 from telegram_mcp.tools.messages_read import *
 from telegram_mcp.tools.messages_state import *
 from telegram_mcp.tools.messages_queue import *
@@ -17,6 +18,7 @@ from telegram_mcp.tools.admin_rights import *
 from telegram_mcp.tools.invites import *
 from telegram_mcp.tools.media import *
 from telegram_mcp.tools.profile import *
+from telegram_mcp.tools.profile_privacy import *
 from telegram_mcp.tools.photos import *
 from telegram_mcp.tools.folders import *
 from telegram_mcp.tools.events import *

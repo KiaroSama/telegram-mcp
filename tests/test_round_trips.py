@@ -24,7 +24,7 @@ from telethon.tl import functions, types
 
 from telegram_mcp.sent import sent_message_ids
 from telegram_mcp.tools import effects as effects_mod
-from telegram_mcp.tools import profile as profile_mod
+from telegram_mcp.tools import profile_privacy as privacy_mod
 from telegram_mcp.tools import saved as saved_mod
 
 
@@ -51,22 +51,24 @@ def privacy(monkeypatch):
     async def _connected(cl=None):
         return None
 
-    monkeypatch.setattr(profile_mod, "get_client", lambda account=None: client)
-    monkeypatch.setattr(profile_mod, "resolve_entity", _resolve)
-    monkeypatch.setattr(profile_mod, "ensure_connected", _connected)
+    # The privacy tools live in `profile_privacy`; patching `profile` would
+    # bind a second name and leave the real client in place.
+    monkeypatch.setattr(privacy_mod, "get_client", lambda account=None: client)
+    monkeypatch.setattr(privacy_mod, "resolve_entity", _resolve)
+    monkeypatch.setattr(privacy_mod, "ensure_connected", _connected)
     return client
 
 
 def test_every_kind_the_reader_reports_can_be_written_back():
     """The bug in one assertion: a name the reader emits and the writer cannot
     build is a rule that a round trip silently destroys."""
-    assert set(profile_mod._PRIVACY_RULE_NAMES.values()) == set(profile_mod._PRIVACY_INPUT_RULES)
+    assert set(privacy_mod._PRIVACY_RULE_NAMES.values()) == set(privacy_mod._PRIVACY_INPUT_RULES)
 
 
 def test_each_mapped_name_resolves_to_a_real_telethon_type():
     from telethon.tl import types as tl_types
 
-    for class_name in profile_mod._PRIVACY_INPUT_RULES.values():
+    for class_name in privacy_mod._PRIVACY_INPUT_RULES.values():
         assert hasattr(tl_types, class_name), class_name
 
 
@@ -74,7 +76,7 @@ def test_each_mapped_name_resolves_to_a_real_telethon_type():
 async def test_the_rules_a_read_reported_go_back_out_in_order(privacy):
     """Order is the rule: Telegram applies the first match, so a base policy moved
     ahead of its own exceptions swallows them."""
-    await profile_mod.set_privacy_settings(
+    await privacy_mod.set_privacy_settings(
         "status",
         rules=[
             {"rule": "contacts_allowed"},
@@ -94,7 +96,7 @@ async def test_the_rules_a_read_reported_go_back_out_in_order(privacy):
 
 @pytest.mark.asyncio
 async def test_a_chat_rule_carries_its_chat_ids(privacy):
-    await profile_mod.set_privacy_settings(
+    await privacy_mod.set_privacy_settings(
         "status", rules=[{"rule": "chats_allowed", "chats": [42, 43]}]
     )
 
@@ -105,7 +107,7 @@ async def test_a_chat_rule_carries_its_chat_ids(privacy):
 async def test_an_unknown_rule_kind_changes_nothing(privacy):
     """Sending the rest would apply a REPLACEMENT missing whichever rule was not
     understood -- the exact deletion this parameter exists to prevent."""
-    result = await profile_mod.set_privacy_settings("status", rules=[{"rule": "invented"}])
+    result = await privacy_mod.set_privacy_settings("status", rules=[{"rule": "invented"}])
 
     assert privacy.sent == []
     assert "invented" in result
@@ -114,7 +116,7 @@ async def test_an_unknown_rule_kind_changes_nothing(privacy):
 @pytest.mark.asyncio
 async def test_the_old_convenience_arguments_still_work(privacy):
     """Guard the guard: `rules` is additive, not a replacement."""
-    await profile_mod.set_privacy_settings("status", base_policy="contacts")
+    await privacy_mod.set_privacy_settings("status", base_policy="contacts")
 
     assert [type(r).__name__ for r in privacy.sent[-1].rules] == ["InputPrivacyValueAllowContacts"]
 

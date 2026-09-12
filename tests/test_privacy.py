@@ -26,7 +26,7 @@ from telethon.tl.types import (
     User,
 )
 
-from telegram_mcp.tools import profile as mod
+from telegram_mcp.tools import profile_privacy as mod
 
 
 class _Client:

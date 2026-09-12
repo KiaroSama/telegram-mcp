@@ -100,8 +100,8 @@ predicted.
 | Quick-reply editing | `add_quick_reply`, `read_quick_reply`, `edit_quick_reply`, `rename_quick_reply`, `delete_quick_reply` | `tools/quick_replies.py` |
 | The search bar's own tabs | `media_type` on `search_messages` and `search_global` (photos, videos, links, files, music, voice and ten more), `from_user` on `search_messages`, `kind` plus a `joined` flag on `search_public_chats`, and `search_posts` for public posts | `tools/messages_read.py`, `tools/chats.py` |
 | Profile photos, including a bot's | `set_profile_photo` and `delete_profile_photo` take a `bot` argument (`photos.uploadProfilePhoto`'s own `bot` flag; removal sets an empty photo, since a bot's is not in the caller's photo list). Groups and channels go through `edit_chat_photo` | `tools/profile.py`, `tools/groups.py` |
-| Forwarding into a topic, as a channel | `topic_id`, `send_as`, `drop_author` and `silent` on `forward_message` — `messages.ForwardMessages` for the routed case, Telethon's helper otherwise | `tools/messages.py` |
-| Rich messages that keep their premium emoji | `read_rich_message` renders `richTextCustomEmoji` (it used to drop every one, which read as "rich messages cannot carry premium emoji" - they can, as `![glyph](tg://emoji?id=N)`), takes a username or `me` like every neighbouring tool, `send_message` takes `rich_rtl` because Telegram does not infer direction, and `rich_files` fills the `files` list on `InputRichMessageHTML`/`Markdown` so `<img>`, `<video>`, `<audio>` and a `tg://document` link resolve - without it the tag is dropped and the message arrives as text. `copy_message` takes `repeat` and `topic_id`, which is the only way to put a RICH message on a recurring schedule - `schedule_message` composes from text and entities and cannot express a table or a photo block | `tools/rich_messages.py`, `runtime.py` |
+| Forwarding into a topic, as a channel | `topic_id`, `send_as`, `drop_author` and `silent` on `forward_message` — `messages.ForwardMessages` for the routed case, Telethon's helper otherwise | `tools/messages_relay.py` |
+| Rich messages that keep their premium emoji | `read_rich_message` renders `richTextCustomEmoji` (it used to drop every one, which read as "rich messages cannot carry premium emoji" - they can, as `![glyph](tg://emoji?id=N)`), takes a username or `me` like every neighbouring tool, `send_message` takes `rich_rtl` because Telegram does not infer direction, and `rich_files` fills the `files` list on `InputRichMessageHTML`/`Markdown` so `<img>`, `<video>`, `<audio>` and a `tg://document` link resolve - without it the tag is dropped and the message arrives as text. `copy_message` takes `repeat` and `topic_id`, which is the only way to put a RICH message on a recurring schedule - `schedule_message` composes from text and entities and cannot express a table or a photo block | `tools/rich_messages.py`, `tools/messages_relay.py`, `runtime.py` |
 | Posting as a channel | `list_send_as`, `set_default_send_as`, and a `send_as` argument on `send_message`, `reply_to_message` and `send_file` | `tools/messages.py`, `tools/media.py` |
 | Translation | `translate` | `tools/translation.py` |
 | Sticker-set management | `inspect_sticker_set`, `suggest_sticker_set_name`, `add_sticker_to_set`, `remove_sticker_from_set`, `move_sticker_in_set` | `tools/stickers.py` |
@@ -122,7 +122,7 @@ history rewrite here left the two with no merge base). Secret chats then took it
 | Capability | Tools | Module |
 |---|---|---|
 | Peer photos | `list_photos`, `open_photo`, `get_photo_sheet` | `tools/photos.py` |
-| Copying a message whole | `copy_message` | `tools/messages.py` |
+| Copying a message whole | `copy_message` | `tools/messages_relay.py` |
 | Saying why the file tools are off | `get_file_roots_status` | `tools/diagnostics.py` |
 | Reversible channel settings | `set_join_to_send`, `set_join_request`, `set_prehistory_hidden`, `set_participants_hidden`, `set_signatures`, `set_view_forum_as_messages` | `tools/channel_settings.py` |
 | Closing the one-way pairs | `delete_story`, `close_poll`, `get_bot_commands` | `tools/stories.py`, `tools/polls.py`, `tools/profile.py` |
@@ -310,6 +310,26 @@ the tree, which is the cost of having deferred them.
    point plus `account-manager/*.ps1`, discovered rather than listed), because a source regex
    that matches nothing does not fail - it silently stops testing. Four
    assertions were caught doing precisely that.
+
+   **Two more on 2026-09-12**, both by moving whole tools rather than fragments:
+   `tools/messages.py` 1010 -> 705 (`messages_relay.py` - putting a message that
+   already exists into another chat: `forward_message`, `forward_messages`,
+   `copy_message` and the `_album_batch` both widen an id through) and
+   `tools/profile.py` 825 -> 519 (`profile_privacy.py` - the four `_PRIVACY_*`
+   translation tables and the two tools that read them).
+
+   The schedule vocabulary `copy_message` shares with `schedule_message`
+   (`_as_utc`, `_repeat_seconds`, `REPEAT_PERIODS`) STAYED in `messages.py`,
+   because that module is the documented base of the family: siblings import from
+   it and it imports nothing back, and the re-export at its foot is a
+   compatibility shim rather than a dependency.
+
+   The trap this time was the one `tests/conftest.py` already names - patch the
+   module that OWNS each name. `wire_client` patches `get_client` on the module
+   object, so a tool that moves keeps talking to the real client while its test
+   still passes. Five test files were re-pointed, and re-pointing the fixture was
+   not enough: `test_round_trips.py` also reached `_PRIVACY_INPUT_RULES` directly
+   and went red until those three references moved too.
 
    **The seam was chosen by where `$PSScriptRoot` is used.** That automatic
    variable resolves against the file it is WRITTEN in, so a function that moved

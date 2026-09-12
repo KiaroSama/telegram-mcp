@@ -16,7 +16,7 @@ import pytest
 from telethon.tl import functions, types
 
 from telegram_mcp import file_roots
-from telegram_mcp.tools import messages as messages_mod
+from telegram_mcp.tools import messages_relay as messages_mod
 from telegram_mcp.tools import profile as profile_mod
 
 

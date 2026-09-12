@@ -22,6 +22,7 @@ from telethon.tl import functions, types
 
 from telegram_mcp.tools import folders as folders_mod
 from telegram_mcp.tools import messages as messages_mod
+from telegram_mcp.tools import messages_relay as relay_mod
 from telegram_mcp.tools import messages_delete as delete_mod
 from telegram_mcp.tools import messages_queue as queue_mod
 from telegram_mcp.tools import messages_read as read_mod
@@ -275,9 +276,9 @@ async def test_reply_to_message_replies_to_the_id_it_was_given(wire_client):
 async def test_forward_message_resolves_both_ends(wire_client):
     """Two peers, two resolutions. Sending the caller's raw string for either end
     is the failure this pins."""
-    client = wire_client(messages_mod, Recorder(), entity=RESOLVED)
+    client = wire_client(relay_mod, Recorder(), entity=RESOLVED)
 
-    await messages_mod.forward_message("@from", 12, "@to")
+    await relay_mod.forward_message("@from", 12, "@to")
 
     forwards = [c for c in client.calls if c[0] == "forward_messages"]
     assert forwards, f"no forward went out; calls were {[c[0] for c in client.calls]}"

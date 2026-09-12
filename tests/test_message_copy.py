@@ -24,8 +24,8 @@ from telethon import types
 from telegram_mcp.message_view import describe_entities
 from telegram_mcp.text_fidelity import fidelity_text
 from telegram_mcp.tools import chats as chats_mod
-from telegram_mcp.tools import messages as messages_mod
-from telegram_mcp.tools.messages import copy_message
+from telegram_mcp.tools import messages_relay as messages_mod
+from telegram_mcp.tools.messages_relay import copy_message
 
 # The rebuilder moved out of `scheduled.py` into `telegram_mcp.entities`, the
 # write-side inverse of message_view.describe_entities: send_message,
