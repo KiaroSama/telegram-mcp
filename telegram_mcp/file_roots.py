@@ -23,6 +23,7 @@ empty and every file tool silently unconfigured.
 """
 
 import argparse
+import asyncio
 import logging
 import os
 import re
@@ -159,6 +160,13 @@ ROOTS_STATUS_UNSUPPORTED_FALLBACK = "unsupported_fallback"
 ROOTS_STATUS_CLIENT_DENY_ALL = "client_deny_all"
 ROOTS_STATUS_SERVER_FALLBACK = "server_fallback"
 ROOTS_STATUS_ERROR = "error"
+# `roots/list` is a request the SERVER makes of the CLIENT, and it carries no
+# deadline of its own. A client that accepts it and never answers - one that does
+# not serve the standalone channel the SDK sends it on, say - wedges every
+# file-path tool forever, and silently: the wait happens before any tool reaches
+# the network, so nothing is logged and no call is in flight to time out. A
+# healthy client answers in milliseconds; this is a ceiling, not a budget.
+_ROOTS_REQUEST_TIMEOUT: float = 10.0
 
 
 def _dedupe_paths(paths: List[Path]) -> List[Path]:
@@ -339,7 +347,9 @@ async def _get_effective_allowed_roots_with_status(
         return [], ROOTS_STATUS_NOT_CONFIGURED
 
     try:
-        list_roots_result = await ctx.session.list_roots()
+        list_roots_result = await asyncio.wait_for(
+            ctx.session.list_roots(), timeout=_ROOTS_REQUEST_TIMEOUT
+        )
     except Exception as error:
         recovered_roots = _coerce_paths_from_list_roots_validation_error(error)
         if recovered_roots:
@@ -354,7 +364,11 @@ async def _get_effective_allowed_roots_with_status(
                 return fallback_roots, ROOTS_STATUS_UNSUPPORTED_FALLBACK
             return [], ROOTS_STATUS_NOT_CONFIGURED
         # Unexpected list_roots failures (e.g. malformed client payloads that we
-        # could not recover). Match empty-list behavior: opt-in server fallback.
+        # could not recover, or a client that never answered within
+        # `_ROOTS_REQUEST_TIMEOUT`). Match empty-list behavior: opt-in server
+        # fallback. A timeout deliberately does NOT count as "roots unsupported":
+        # that branch widens access to the server roots unconditionally, and a
+        # silent client is not evidence that it has no roots to state.
         if fallback_roots and _server_roots_fallback_enabled():
             log_event(
                 logging.WARNING,
@@ -637,6 +651,7 @@ __all__ = [
     "ROOTS_STATUS_UNSUPPORTED_FALLBACK",
     "ROOTS_UNSUPPORTED_ERROR_CODES",
     "SERVER_ALLOWED_ROOTS",
+    "_ROOTS_REQUEST_TIMEOUT",
     "_coerce_paths_from_list_roots_validation_error",
     "_coerce_root_uri_to_path",
     "_configure_allowed_roots_from_cli",

@@ -750,6 +750,9 @@ Security behavior:
   `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
   in that case (opt-in; the default stays deny-all). The same opt-in also applies
   when `list_roots` fails unexpectedly and no client paths could be recovered.
+- A client that accepts the roots request and never answers it counts as such a
+  failure. The server waits ten seconds, not indefinitely, so a silent client
+  disables file tools rather than wedging every call that needs a path.
 - Paths are resolved through real paths and must stay inside an allowed root.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
 - Relative paths resolve under the first allowed root.

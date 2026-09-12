@@ -8,6 +8,7 @@ rebound rather than mutated, and those two hold further names for the same list,
 patch applied there is invisible to the code that reads it.
 """
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -302,6 +303,70 @@ async def test_list_roots_unexpected_error_denies_without_opt_in(tmp_path, monke
     )
     assert status == runtime.ROOTS_STATUS_ERROR
     assert roots == []
+
+
+class _SilentRootsSession:
+    """A client that accepts `roots/list` and never answers it.
+
+    Not a hypothetical: the request is sent on the connection's STANDALONE
+    channel (the SDK selects it whenever no `related_request_id` is given), so a
+    client that only reads the stream its own POST returned never sees it.
+    """
+
+    def __init__(self):
+        self.cancelled = False
+
+    async def list_roots(self):
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+
+
+def test_a_roots_timeout_is_not_mistaken_for_an_unsupported_client():
+    """Load-bearing: the unsupported branch hands back the server roots with no
+    opt-in, so classifying a silent client as "unsupported" would widen access
+    on nothing but silence."""
+    assert file_roots._is_roots_unsupported_error(asyncio.TimeoutError()) is False
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_never_answers_roots_does_not_wedge_the_tool(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "_ROOTS_REQUEST_TIMEOUT", 0.05)
+    monkeypatch.delenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", raising=False)
+    session = _SilentRootsSession()
+
+    # The outer bound is the test's own guard, so removing the fix FAILS this
+    # suite instead of hanging it; 0.05s above is the ceiling under test.
+    roots, status = await asyncio.wait_for(
+        runtime._get_effective_allowed_roots_with_status(SimpleNamespace(session=session)),
+        timeout=5,
+    )
+
+    assert (roots, status) == ([], runtime.ROOTS_STATUS_ERROR)
+    assert session.cancelled, "the abandoned roots request must not be left running"
+
+
+@pytest.mark.asyncio
+async def test_a_roots_timeout_takes_the_opt_in_fallback(tmp_path, monkeypatch):
+    root = tmp_path / "root"
+    root.mkdir()
+    monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root.resolve()])
+    monkeypatch.setattr(file_roots, "_ROOTS_REQUEST_TIMEOUT", 0.05)
+    monkeypatch.setenv("TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK", "1")
+
+    roots, status = await asyncio.wait_for(
+        runtime._get_effective_allowed_roots_with_status(
+            SimpleNamespace(session=_SilentRootsSession())
+        ),
+        timeout=5,
+    )
+
+    assert (roots, status) == ([root.resolve()], runtime.ROOTS_STATUS_SERVER_FALLBACK)
 
 
 @pytest.mark.asyncio
