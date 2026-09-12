@@ -585,3 +585,29 @@ def test_a_slideshow_is_read_the_same_way_as_a_collage():
     block = {"@type": "pageBlockSlideshow", "blocks": [{"@type": "pageBlockDivider"}]}
 
     assert rm._render_block(block)["block_count"] == 1
+
+
+def test_a_long_cell_is_not_cut_to_a_display_name_length():
+    """Cell text went through `sanitize_name`, which exists for usernames and
+    chat titles: it caps at 256 characters and flattens newlines. A rich message
+    is body content by definition, so a real advert's decorative emoji strip came
+    back ending in `... [truncated]` and the tool quietly described a message
+    that was not the one in the chat."""
+    body = "x" * 400 + "\nsecond line"
+    block = {
+        "@type": "pageBlockTable",
+        "cells": [
+            [
+                {
+                    "@type": "pageBlockTableCell",
+                    "text": {"@type": "richTextPlain", "text": body},
+                }
+            ]
+        ],
+        "caption": {"@type": "richTextPlain", "text": "y" * 400},
+    }
+
+    out = rm._render_block(block)
+
+    assert out["rows"][0][0]["text"] == body, "the cell was cut or its newline flattened"
+    assert "truncated" not in out["caption"] and len(out["caption"]) == 400

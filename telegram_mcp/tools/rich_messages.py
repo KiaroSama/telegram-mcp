@@ -172,7 +172,7 @@ def _table_rows(block) -> list:
         rows.append(
             [
                 {
-                    "text": sanitize_name(_flatten(cell.get("text"))),
+                    "text": sanitize_user_content(_flatten(cell.get("text"))),
                     "is_header": bool(cell.get("is_header")),
                     "colspan": cell.get("colspan", 1),
                     "rowspan": cell.get("rowspan", 1),
@@ -225,7 +225,7 @@ def _render_block(block: dict) -> dict:
         record["markdown"] = _as_markdown(rows)
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_name(caption)
+            record["caption"] = sanitize_user_content(caption)
         for flag in ("is_bordered", "is_striped", "is_compact"):
             if block.get(flag):
                 record[flag] = True
@@ -238,7 +238,7 @@ def _render_block(block: dict) -> dict:
         record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
         credit = _flatten(block.get("credit"))
         if credit:
-            record["credit"] = sanitize_name(credit)
+            record["credit"] = sanitize_user_content(credit)
         return record
 
     if kind == "pageBlockList":
@@ -247,7 +247,7 @@ def _render_block(block: dict) -> dict:
             entry = {"blocks": [_render_block(b) for b in item.get("blocks") or []]}
             label = _flatten(item.get("label"))
             if label:
-                entry["label"] = sanitize_name(label)
+                entry["label"] = sanitize_user_content(label)
             # A checklist and a bullet list are the same block type; only these
             # two flags separate "todo" from "point".
             if item.get("has_checkbox"):
@@ -261,7 +261,7 @@ def _render_block(block: dict) -> dict:
     if kind == "pageBlockDetails":
         header = _flatten(block.get("header"))
         if header:
-            record["header"] = sanitize_name(header)
+            record["header"] = sanitize_user_content(header)
         record["blocks"] = [_render_block(b) for b in block.get("blocks") or []]
         record["is_open"] = bool(block.get("is_open"))
         return record
@@ -274,7 +274,7 @@ def _render_block(block: dict) -> dict:
         record["block_count"] = len(record["blocks"])
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_name(caption)
+            record["caption"] = sanitize_user_content(caption)
         return record
 
     if kind == "pageBlockDivider":
@@ -303,7 +303,7 @@ def _render_block(block: dict) -> dict:
             record["url"] = block["url"]
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_name(caption)
+            record["caption"] = sanitize_user_content(caption)
         return record
 
     if kind == "pageBlockMap":
@@ -317,7 +317,7 @@ def _render_block(block: dict) -> dict:
                 record[key] = block[key]
         caption = _flatten(block.get("caption"))
         if caption:
-            record["caption"] = sanitize_name(caption)
+            record["caption"] = sanitize_user_content(caption)
         return record
 
     # Anything else carries its words under one of these names. Taking whichever
@@ -328,7 +328,7 @@ def _render_block(block: dict) -> dict:
         or _flatten(block.get("footer"))
     )
     if text:
-        record["text"] = sanitize_name(text)
+        record["text"] = sanitize_user_content(text)
     return record
 
 
