@@ -1,0 +1,29 @@
+# Line endings are decided HERE, by the repository, not by whatever
+# `core.autocrlf` happens to be set to on a contributor's machine.
+#
+# Why this file exists: rewriting a tracked file from a script on Windows -
+# `Path.write_text()`, `Set-Content` - rewrites EVERY line ending in it, not
+# just the edited lines, and `git diff` cannot show you that. Until this file
+# existed, the only thing keeping that churn out of the repository was one
+# machine's `core.autocrlf=true`. A clone without it would have committed the
+# lot on the first scripted edit.
+#
+# `eol=lf` covers the working tree as well as the stored blob, deliberately:
+# when the checked-out bytes match the committed bytes, a stray CRLF rewrite
+# shows up immediately as a diff instead of hiding behind a clean filter.
+* text=auto eol=lf
+
+# One file opts itself out and it is not a mistake: `tests/test_account_manager.ps1`
+# carries a lone CR - a 0x0D with no 0x0A after it - inside a regex character class
+# written with literal control characters. A lone CR is one of the things git's
+# `text=auto` detection treats as binary, so the rule below never reaches that file
+# and it keeps CRLF in both the index and the working tree, stably and without churn
+# (`git ls-files --eol` reports it as `i/-text w/-text`). Forcing `text` on it would
+# rewrite the bytes of that regex, so it is left alone deliberately.
+
+# The exception, and the reason it is one: a Windows batch file is read by
+# CMD.EXE, which mis-parses LF-only line endings - a `goto` label or a
+# multi-line `if` block can silently take the wrong branch. There are none in
+# the tree today; this is here so that adding one cannot break it.
+*.bat text eol=crlf
+*.cmd text eol=crlf
