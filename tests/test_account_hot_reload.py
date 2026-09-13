@@ -13,6 +13,7 @@ import os
 
 import pytest
 
+from telegram_mcp import account_config as cfg
 from telegram_mcp import connection as conn
 
 
@@ -36,11 +37,13 @@ def env_file(tmp_path, monkeypatch):
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         return path
 
+    monkeypatch.setattr(cfg, "_env_file", lambda: str(path))
     monkeypatch.setattr(conn, "_env_file", lambda: str(path))
     monkeypatch.setattr(conn, "_discover_accounts", lambda env=None: _discover(env))
     monkeypatch.setattr(conn, "clients", {}, raising=False)
     monkeypatch.setattr(conn, "_env_stamp", (), raising=False)
     monkeypatch.setattr(conn, "_env_digests", {}, raising=False)
+    monkeypatch.setattr(cfg, "_EXTERNAL_ACCOUNT_VARS", {}, raising=False)
     return _write
 
 
@@ -149,13 +152,16 @@ def test_the_session_value_is_never_kept_only_its_digest(env_file):
 def test_a_missing_env_file_is_not_an_error(env_file, monkeypatch):
     """A deployment configured entirely through real environment variables has
     no `.env` at all."""
+    monkeypatch.setattr(cfg, "_env_file", lambda: None)
     monkeypatch.setattr(conn, "_env_file", lambda: None)
     assert conn.refresh_accounts() == []
     assert conn._env_fingerprint(None) == ()
 
 
 def test_an_unreadable_env_file_is_not_an_error(env_file, monkeypatch):
-    monkeypatch.setattr(conn, "_env_file", lambda: str(os.devnull) + "-does-not-exist")
+    missing = str(os.devnull) + "-does-not-exist"
+    monkeypatch.setattr(cfg, "_env_file", lambda: missing)
+    monkeypatch.setattr(conn, "_env_file", lambda: missing)
     assert conn.refresh_accounts() == []
 
 
@@ -269,3 +275,71 @@ def test_a_momentarily_unusable_env_keeps_the_running_accounts(env_file, monkeyp
     assert changed == []
     assert conn.clients == serving, "a half-written .env replaced the working accounts"
     assert not any(c.disconnected for c in serving.values()), "and it retired them too"
+
+
+# --- the baseline is the startup configuration, not an empty dict ------------
+
+
+def test_a_first_refresh_never_swallows_the_edit_it_sees(env_file, monkeypatch):
+    """The empty startup baseline IS the defect, so the test has to start from it.
+
+    `_env_digests` began `{}` and the first refresh adopted whatever was on disk
+    and applied none of it. The window is real: the account manager rewrites
+    `.env` and the very next tool call is that first refresh, so an edit landing
+    in between was recorded as active while the old client kept serving a
+    session the file no longer described. The failure that followed was
+    AuthKeyUnregisteredError, which reads like Telegram revoking the login.
+    """
+    env_file(["TELEGRAM_SESSION_STRING_ONE=s1"])
+    monkeypatch.setattr(conn, "clients", {})
+    monkeypatch.setattr(conn, "_env_stamp", ())
+    monkeypatch.setattr(conn, "_env_digests", {})  # exactly the old startup state
+
+    changed = conn.refresh_accounts()
+
+    assert set(conn.clients) == {"one"}, "the first refresh applied nothing it saw"
+    assert changed == ["one"]
+
+
+def test_the_startup_baseline_is_taken_from_the_startup_configuration():
+    """And it is established at import, from the same view the reload compares
+    against - not left empty for the first call to fill in."""
+    assert conn._env_digests == cfg._current_digests(cfg._accounts_from_disk())
+
+
+# --- an account the file does not own is not the file's to delete ------------
+
+
+def test_an_environment_account_survives_an_unrelated_file_edit(env_file, monkeypatch):
+    """Account variables come from the file so that deleting one there takes
+    effect. Applied to EVERY account-prefixed variable, that also silently
+    unconfigured an account supplied as a real environment variable whenever
+    anything else in `.env` moved."""
+    env_file(["TELEGRAM_SESSION_STRING_FILEACC=f1"])
+    monkeypatch.setattr(cfg, "_EXTERNAL_ACCOUNT_VARS", {"TELEGRAM_SESSION_STRING_ENVACC": "e1"})
+
+    env = cfg._accounts_from_disk()
+
+    assert env.get("TELEGRAM_SESSION_STRING_ENVACC") == "e1", "the environment's own account"
+    assert env.get("TELEGRAM_SESSION_STRING_FILEACC") == "f1"
+
+
+def test_the_file_still_wins_where_both_name_the_same_account(env_file, monkeypatch):
+    env_file(["TELEGRAM_SESSION_STRING_BOTH=from-file"])
+    monkeypatch.setattr(
+        cfg, "_EXTERNAL_ACCOUNT_VARS", {"TELEGRAM_SESSION_STRING_BOTH": "from-env"}
+    )
+
+    assert cfg._accounts_from_disk()["TELEGRAM_SESSION_STRING_BOTH"] == "from-file"
+
+
+def test_an_account_deleted_from_the_file_really_goes(env_file, monkeypatch):
+    """The asymmetry this all exists for: `load_dotenv` never removes, so a
+    deleted account would otherwise stay configured forever."""
+    env_file(["TELEGRAM_SESSION_STRING_GONE=g1"])
+    monkeypatch.setattr(cfg, "_EXTERNAL_ACCOUNT_VARS", {})
+    assert "TELEGRAM_SESSION_STRING_GONE" in cfg._accounts_from_disk()
+
+    env_file(["# deleted"])
+
+    assert "TELEGRAM_SESSION_STRING_GONE" not in cfg._accounts_from_disk()

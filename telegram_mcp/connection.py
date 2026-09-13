@@ -56,6 +56,21 @@ from telegram_mcp.log_setup import (  # noqa: F401  (re-exported)
 )
 from telegram_mcp.singleton import try_lock_exclusive
 
+# What the configuration says, as opposed to what is connected. Pure file and
+# environment reading, so it moved to its own module; re-exported because
+# `runtime` star-imports this one and the tests patch these names here.
+from telegram_mcp.account_config import (  # noqa: F401  (re-exported)
+    _ACCOUNT_PREFIXES,
+    _EXTERNAL_ACCOUNT_VARS,
+    _account_digest,
+    _account_digest_bytes,
+    _accounts_from_disk,
+    _current_digests,
+    _env_file,
+    _env_fingerprint,
+    _external_account_vars,
+)
+
 # Retiring a client outlives the synchronous call that starts it, so it owns a
 # module of its own. Re-exported: `__all__` publishes these and `runtime`
 # star-imports this file.
@@ -138,10 +153,20 @@ from telegram_mcp.session_files import (  # noqa: F401  (re-exported)
 # stay held until exit (or crash, when the OS releases them).
 _SESSION_LOCKS: list = []
 
+# The pooled session this process claimed, if any. Held so a rebuild hands back
+# the slot already locked instead of taking another client's.
+_CLAIMED_SESSION: Optional[str] = None
 
-def _parse_session_pool() -> List[str]:
-    """Parse TELEGRAM_SESSION_STRINGS into a de-duplicated list of sessions."""
-    raw = os.getenv("TELEGRAM_SESSION_STRINGS")
+
+def _parse_session_pool(env: Optional[dict] = None) -> List[str]:
+    """Parse TELEGRAM_SESSION_STRINGS into a de-duplicated list of sessions.
+
+    Takes the SNAPSHOT its caller is working from. Reading `os.environ` here
+    while `_discover_accounts` had been handed a freshly parsed environment
+    meant the two disagreed inside one call: the accounts came from the new
+    file and the pool from whatever the process happened to still hold.
+    """
+    raw = (os.environ if env is None else env).get("TELEGRAM_SESSION_STRINGS")
     if not raw:
         return []
     pool: List[str] = []
@@ -152,7 +177,17 @@ def _parse_session_pool() -> List[str]:
 
 
 def _acquire_session(pool: List[str]) -> str:
-    """Claim the first free session in the pool via an advisory file lock."""
+    """Claim the first free session in the pool via an advisory file lock.
+
+    A slot this process already holds is returned again rather than re-claimed.
+    Rebuilding an unchanged pool - which a hot reload does whenever anything
+    else in `.env` moves - otherwise walked past its own locked slot, found it
+    taken, and claimed the NEXT one, quietly consuming a slot that belonged to
+    another live client.
+    """
+    global _CLAIMED_SESSION
+    if _CLAIMED_SESSION is not None and _CLAIMED_SESSION in pool:
+        return _CLAIMED_SESSION
     lock_dir = os.path.join(tempfile.gettempdir(), "telegram-mcp-session-locks")
     try:
         os.makedirs(lock_dir, exist_ok=True)
@@ -183,6 +218,7 @@ def _acquire_session(pool: List[str]) -> str:
         except OSError:
             pass
         print(f"Using Telegram session slot {idx + 1}/{len(pool)}.", file=sys.stderr)
+        _CLAIMED_SESSION = session
         return session
     # Handing out an already-claimed session here would make Telegram burn it
     # with AuthKeyDuplicatedError — losing the slot for the client that owns it
@@ -276,7 +312,7 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
 
     # Backward-compatible unsuffixed variables. A pool (TELEGRAM_SESSION_STRINGS)
     # takes precedence for the default account and claims a free session slot.
-    session_pool = _parse_session_pool()
+    session_pool = _parse_session_pool(environment)
     session_string = environment.get("TELEGRAM_SESSION_STRING")
     session_name = environment.get("TELEGRAM_SESSION_NAME")
 
@@ -314,81 +350,15 @@ except NoAccountsConfigured as _no_accounts:
     sys.exit(1)
 
 
-def _env_file() -> Optional[str]:
-    """The `.env` this process reads, or None when it runs on real env vars."""
-    try:
-        from dotenv import find_dotenv
-
-        return find_dotenv(usecwd=True) or None
-    except Exception:
-        return None
-
-
-def _env_fingerprint(path: Optional[str]) -> tuple:
-    """A digest of the file's CONTENT, not its metadata.
-
-    This was `(st_mtime_ns, st_size)` and that was wrong. Replacing one session
-    string with another of the same length changes neither: the account manager
-    rewrites `.env` wholesale, so a re-login is exactly a same-size rewrite, and
-    on a filesystem whose timestamp resolution is coarser than the gap between
-    the two writes the mtime does not move either. CI caught it on a Windows
-    runner where the local machine never had.
-
-    Hashing a file of a few kilobytes costs microseconds and is checked once per
-    `get_client`. The stat was the cheaper answer to the wrong question.
-    """
-    if not path:
-        return ()
-    try:
-        with open(path, "rb") as handle:
-            return (_account_digest_bytes(handle.read()),)
-    except OSError:
-        return ()
-
-
-def _account_digest_bytes(data: bytes) -> str:
-    import hashlib
-
-    return hashlib.sha256(data).hexdigest()
-
-
-def _account_digest(value: str) -> str:
-    """A session string is a full login; only ever its digest is kept."""
-    import hashlib
-
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
-
-
-_ACCOUNT_PREFIXES = ("TELEGRAM_SESSION_STRING", "TELEGRAM_SESSION_NAME")
-
-
-def _accounts_from_disk() -> dict:
-    """The environment as it would be if this process had started right now.
-
-    Account variables come from the FILE alone, everything else from the live
-    process. That asymmetry is the point: `load_dotenv` can add a new variable
-    to `os.environ` but never removes one, so an account deleted from `.env`
-    would otherwise still be in the environment and stay configured forever.
-    """
-    from dotenv import dotenv_values
-
-    path = _env_file()
-    on_disk = dotenv_values(path) if path else {}
-    env = {k: v for k, v in os.environ.items() if not k.startswith(_ACCOUNT_PREFIXES)}
-    env.update({k: v for k, v in on_disk.items() if v})
-    return env
-
-
-def _current_digests(env: dict) -> dict:
-    return {
-        key: _account_digest(value)
-        for key, value in env.items()
-        if key.startswith(_ACCOUNT_PREFIXES) and value
-    }
-
-
 _env_stamp: tuple = _env_fingerprint(_env_file())
-_env_digests: dict = {}
+# The baseline IS the startup configuration, established from the same view
+# `refresh_accounts` will compare against. Starting empty meant the first
+# refresh had nothing to diff, so it adopted whatever was on disk and applied
+# none of it: an edit landing between startup discovery and that first call was
+# recorded as active while the old client kept serving. The window is small and
+# entirely real - the account manager writes `.env` and the next tool call is
+# the first refresh.
+_env_digests: dict = _current_digests(_accounts_from_disk())
 
 
 def refresh_accounts() -> list:
@@ -409,7 +379,7 @@ def refresh_accounts() -> list:
 
     path = _env_file()
     stamp = _env_fingerprint(path)
-    if stamp == _env_stamp and _env_digests:
+    if stamp == _env_stamp:
         return []
 
     try:
@@ -421,9 +391,6 @@ def refresh_accounts() -> list:
         # call sees a new stamp and tries again.
         return []
 
-    if not _env_digests:  # first call: adopt the startup state, change nothing
-        _env_stamp, _env_digests = stamp, digests
-        return []
     if digests == _env_digests:
         _env_stamp = stamp
         return []

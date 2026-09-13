@@ -872,6 +872,8 @@ telegram_mcp/settings.py      # environment configuration; the bottom of the imp
 telegram_mcp/runtime.py       # shared MCP setup, entity resolution, formatting
 telegram_mcp/errors.py        # error classes, refusal wording, id validation
 telegram_mcp/connection.py    # the session pool, account routing, reconnection
+telegram_mcp/account_config.py # what the .env says about accounts, and what changed
+telegram_mcp/retirement.py    # closing a client this process dropped, and waiting for it
 telegram_mcp/session_files.py # session files on disk, and the client built over one
 telegram_mcp/proxy.py         # TELEGRAM_PROXY_* into Telethon kwargs; touches no socket
 telegram_mcp/file_roots.py    # allowed roots, and resolving a caller's path inside one

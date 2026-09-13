@@ -26,6 +26,9 @@ def test_parse_session_pool_empty_when_unset(monkeypatch):
 def isolated_lock_dir(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime.tempfile, "gettempdir", lambda: str(tmp_path))
     monkeypatch.setattr(connection, "_SESSION_LOCKS", [])
+    # A slot claimed by one test is handed straight back to the next otherwise:
+    # the reuse that stops a rebuild taking a second slot is module state.
+    monkeypatch.setattr(connection, "_CLAIMED_SESSION", None)
     return tmp_path
 
 
@@ -149,3 +152,29 @@ async def test_connect_gives_up_on_a_duplicated_auth_key_immediately(no_sleep):
     assert client.connects == 1
     assert client.disconnects == 1
     assert "default" not in runner._session_locks, "the lock outlived the failed connect"
+
+
+def test_the_pool_is_read_from_the_snapshot_it_was_handed(monkeypatch):
+    """Discovery is given a freshly parsed environment; the pool read
+    `os.environ`, so inside one call the accounts came from the new file and the
+    pool from whatever the process still held."""
+    monkeypatch.setenv("TELEGRAM_SESSION_STRINGS", "stale-a stale-b")
+
+    assert connection._parse_session_pool({"TELEGRAM_SESSION_STRINGS": "fresh-a"}) == ["fresh-a"]
+    assert connection._parse_session_pool({}) == []
+
+
+def test_a_rebuild_hands_back_the_slot_it_already_claimed(monkeypatch, tmp_path):
+    """A hot reload rebuilds an unchanged pool whenever anything else in `.env`
+    moves. Walking the pool again found this process's own slot locked, skipped
+    it, and claimed the NEXT one - consuming a slot another live client owns."""
+    monkeypatch.setattr(connection, "_SESSION_LOCKS", [])
+    monkeypatch.setattr(connection, "_CLAIMED_SESSION", None)
+    monkeypatch.setattr(connection.tempfile, "gettempdir", lambda: str(tmp_path))
+    pool = ["session-one", "session-two"]
+
+    first = connection._acquire_session(pool)
+    again = connection._acquire_session(pool)
+
+    assert again == first, "the rebuild claimed a second slot"
+    assert len(connection._SESSION_LOCKS) == 1, "and took a second lock with it"
