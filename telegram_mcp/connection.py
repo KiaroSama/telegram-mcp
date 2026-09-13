@@ -246,7 +246,9 @@ class NoAccountsConfigured(StartupMessage):
     """
 
 
-def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
+def _discover_accounts(
+    env: Optional[dict] = None, reuse: Optional[dict] = None
+) -> dict[str, TelegramClient]:
     """Scan env vars to build account label -> TelegramClient mapping.
 
     Detection rules:
@@ -264,7 +266,16 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
 
     Each client is constructed via :func:`_build_client`, which applies any
     matching ``TELEGRAM_PROXY_*`` configuration (optionally per-label).
+
+    ``reuse`` maps a label to a client the caller already owns and intends to
+    keep. Validation still covers the WHOLE set - a duplicate label is an error
+    whether or not that account changed - but nothing is constructed for a label
+    being kept. A reload used to build every client and then drop the unchanged
+    ones on the floor unclosed, so a `.env` touched ten times leaked ten clients
+    per untouched account, each with whatever file handles and locks its session
+    had taken.
     """
+    reuse = reuse or {}
     environment = os.environ if env is None else env
     accounts: dict[str, TelegramClient] = {}
 
@@ -306,6 +317,9 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
                 "both become underscores and case is folded - and which one wins "
                 "would depend on environment order. Keep exactly one."
             )
+        if label in reuse:
+            accounts[label] = reuse[label]
+            continue
         _key, kind, value = sources[0]
         session = StringSession(value) if kind == "string" else value
         accounts[label] = _build_client(session, label)
@@ -317,7 +331,11 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
     session_name = environment.get("TELEGRAM_SESSION_NAME")
 
     if "default" not in accounts:
-        if session_pool:
+        if "default" in reuse:
+            # Before the pool branch on purpose: claiming a slot for an account
+            # that is not being rebuilt is how a rebuild took a second one.
+            accounts["default"] = reuse["default"]
+        elif session_pool:
             accounts["default"] = _build_client(
                 StringSession(_acquire_session(session_pool)), "default"
             )
@@ -395,8 +413,9 @@ def refresh_accounts() -> list:
         _env_stamp = stamp
         return []
 
+    keep = {label: client for label, client in clients.items() if not _replaced(label, digests)}
     try:
-        rebuilt = _discover_accounts(env)
+        rebuilt = _discover_accounts(env, reuse=keep)
     except Exception as error:
         # A `.env` that no longer describes a valid account set - a duplicate
         # label, an unusable one, or none at all - leaves the WORKING clients in

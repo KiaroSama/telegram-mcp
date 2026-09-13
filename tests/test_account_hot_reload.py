@@ -39,7 +39,9 @@ def env_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr(cfg, "_env_file", lambda: str(path))
     monkeypatch.setattr(conn, "_env_file", lambda: str(path))
-    monkeypatch.setattr(conn, "_discover_accounts", lambda env=None: _discover(env))
+    monkeypatch.setattr(
+        conn, "_discover_accounts", lambda env=None, reuse=None: _discover(env, reuse)
+    )
     monkeypatch.setattr(conn, "clients", {}, raising=False)
     monkeypatch.setattr(conn, "_env_stamp", (), raising=False)
     monkeypatch.setattr(conn, "_env_digests", {}, raising=False)
@@ -47,19 +49,23 @@ def env_file(tmp_path, monkeypatch):
     return _write
 
 
-def _discover(env):
+def _discover(env, reuse=None):
     """Label -> client, from the same variables the real discovery reads.
 
     The unsuffixed variable is here because it is the single-account setup, and
     the label it produces ("default") is the one `_replaced` used to be unable to
     match at all.
     """
+    reuse = reuse or {}
     built = {}
     for key, value in (env or {}).items():
         if key.startswith("TELEGRAM_SESSION_STRING_") and value:
-            built[key[len("TELEGRAM_SESSION_STRING_") :].lower()] = _Client(key)
+            label = key[len("TELEGRAM_SESSION_STRING_") :].lower()
         elif key == "TELEGRAM_SESSION_STRING" and value:
-            built["default"] = _Client(key)
+            label = "default"
+        else:
+            continue
+        built[label] = reuse[label] if label in reuse else _Client(key)
     return built
 
 
@@ -343,3 +349,66 @@ def test_an_account_deleted_from_the_file_really_goes(env_file, monkeypatch):
     env_file(["# deleted"])
 
     assert "TELEGRAM_SESSION_STRING_GONE" not in cfg._accounts_from_disk()
+
+
+# --- a reload must not build clients it is about to throw away --------------
+
+
+def test_an_unchanged_account_is_not_rebuilt(env_file, monkeypatch):
+    """Discovery built EVERY client and the caller then dropped the unchanged
+    ones on the floor unclosed. A `.env` touched ten times leaked ten clients
+    per untouched account, each holding whatever its session had opened."""
+    built = []
+
+    def _counting_discover(env=None, reuse=None):
+        reuse = reuse or {}
+        out = {}
+        for key, value in (env or {}).items():
+            if not key.startswith("TELEGRAM_SESSION_STRING_") or not value:
+                continue
+            label = key[len("TELEGRAM_SESSION_STRING_") :].lower()
+            if label in reuse:
+                out[label] = reuse[label]
+                continue
+            built.append(label)
+            out[label] = _Client(label)
+        return out
+
+    monkeypatch.setattr(conn, "_discover_accounts", _counting_discover)
+    env_file(["TELEGRAM_SESSION_STRING_KEEP=k1"])
+    monkeypatch.setattr(conn, "clients", {})
+    monkeypatch.setattr(conn, "_env_stamp", ())
+    monkeypatch.setattr(conn, "_env_digests", {})
+    conn.refresh_accounts()
+    assert built == ["keep"]
+    kept = conn.clients["keep"]
+
+    # A second account arrives; `keep` is untouched.
+    env_file(["TELEGRAM_SESSION_STRING_KEEP=k1", "TELEGRAM_SESSION_STRING_NEW=n1"])
+    conn.refresh_accounts()
+
+    assert built == ["keep", "new"], f"an untouched account was rebuilt: {built}"
+    assert conn.clients["keep"] is kept, "and the live client was swapped for the copy"
+    assert not kept.disconnected
+
+
+def test_a_reload_does_not_claim_a_second_pooled_slot(monkeypatch):
+    """The default account backed by a pool is the case where rebuilding costs
+    more than a wasted object: `_acquire_session` locks a slot, and a slot taken
+    for an account nobody is rebuilding belongs to another live client."""
+    claimed = []
+    monkeypatch.setattr(conn, "_acquire_session", lambda pool: claimed.append(pool[0]) or pool[0])
+    # A pool entry is not a real StringSession here, and does not need to be:
+    # what is under test is which slot gets claimed, not what is built from it.
+    monkeypatch.setattr(conn, "_build_client", lambda session, label: _Client(label))
+    monkeypatch.setattr(conn, "StringSession", lambda value: value)
+    monkeypatch.setattr(cfg, "_EXTERNAL_ACCOUNT_VARS", {})
+
+    env = {"TELEGRAM_SESSION_STRINGS": "slot-a slot-b"}
+    first = conn._discover_accounts(env)
+    assert claimed == ["slot-a"]
+
+    again = conn._discover_accounts(env, reuse={"default": first["default"]})
+
+    assert claimed == ["slot-a"], "the rebuild claimed another slot"
+    assert again["default"] is first["default"]
