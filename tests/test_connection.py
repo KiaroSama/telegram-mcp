@@ -60,11 +60,23 @@ def test_discover_accounts_supports_suffixed_and_default_sessions(monkeypatch):
     assert accounts["default"].args[0].value == "default-session"
 
 
-def test_discover_accounts_exits_when_no_sessions_configured(monkeypatch):
+def test_discover_accounts_refuses_when_no_sessions_are_configured(monkeypatch):
+    """It used to raise SystemExit, and that is what made a hot reload fatal:
+    SystemExit derives from BaseException, so `refresh_accounts`'s
+    `except Exception` could not catch it and a `.env` caught mid-rewrite took
+    the running server down. Startup still exits - the module-level call does
+    that - but discovery itself now merely refuses."""
     _clear_session_env(monkeypatch)
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(runtime.NoAccountsConfigured):
         runtime._discover_accounts()
+
+    try:
+        runtime._discover_accounts()
+    except SystemExit:  # pragma: no cover - the regression itself
+        pytest.fail("discovery still exits the process instead of raising")
+    except runtime.NoAccountsConfigured:
+        pass
 
 
 def _clear_proxy_env(monkeypatch):

@@ -196,6 +196,20 @@ def _acquire_session(pool: List[str]) -> str:
     )
 
 
+class NoAccountsConfigured(StartupMessage):
+    """Nothing at all is configured - as distinct from something configured wrongly.
+
+    The two need different answers. At startup there is no account to serve and
+    the process says so and stops. During a reload it means the file on disk is
+    momentarily unusable, and the right move is to keep serving the generation
+    already running rather than to exit; a half-written `.env` is a window the
+    account manager genuinely opens every time it rewrites one.
+
+    A `StartupMessage`, so the runner's readable-error path still prints it
+    word for word instead of a traceback.
+    """
+
+
 def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
     """Scan env vars to build account label -> TelegramClient mapping.
 
@@ -277,17 +291,27 @@ def _discover_accounts(env: Optional[dict] = None) -> dict[str, TelegramClient]:
             accounts["default"] = _build_client(session_name, "default")
 
     if not accounts:
-        print(
-            "Error: No Telegram session configured. "
-            "Set TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env",
-            file=sys.stderr,
+        # RAISED, not `sys.exit`. `SystemExit` derives from `BaseException`, so
+        # `refresh_accounts`'s `except Exception` never saw it: a `.env` caught
+        # mid-rewrite - and the account manager backs up and rewrites, so that
+        # window is real - took the whole running server down from inside a
+        # routine hot-reload check. Startup still exits, just below; a reload
+        # keeps the generation it already has.
+        raise NoAccountsConfigured(
+            "No Telegram session configured. "
+            "Set TELEGRAM_SESSION_STRING or TELEGRAM_SESSION_STRING_<LABEL> in .env"
         )
-        sys.exit(1)
 
     return accounts
 
 
-clients: dict[str, TelegramClient] = _discover_accounts()
+try:
+    clients: dict[str, TelegramClient] = _discover_accounts()
+except NoAccountsConfigured as _no_accounts:
+    # Startup with nothing configured cannot proceed, and says so in one line
+    # rather than a traceback - the behaviour this replaced, kept verbatim.
+    print(f"Error: {_no_accounts}", file=sys.stderr)
+    sys.exit(1)
 
 
 def _env_file() -> Optional[str]:
@@ -406,11 +430,18 @@ def refresh_accounts() -> list:
 
     try:
         rebuilt = _discover_accounts(env)
-    except Exception:
-        # A `.env` that no longer describes a valid account set (a duplicate
-        # label, an unusable one) leaves the WORKING clients in place. Refusing
-        # to serve because a file on disk went wrong would be worse than serving
-        # what already works.
+    except Exception as error:
+        # A `.env` that no longer describes a valid account set - a duplicate
+        # label, an unusable one, or none at all - leaves the WORKING clients in
+        # place. Refusing to serve because a file on disk went wrong would be
+        # worse than serving what already works. Said out loud, because a reload
+        # that quietly did nothing is indistinguishable from one that worked.
+        log_event(
+            logging.WARNING,
+            "account reload rejected; keeping the running accounts",
+            error=error,
+            accounts=len(clients),
+        )
         _env_stamp = stamp
         return []
 
@@ -716,6 +747,7 @@ __all__ = [
     "_last_conn_verified",
     "_parse_session_pool",
     "SessionNotProtected",
+    "NoAccountsConfigured",
     "adopt_legacy_session",
     "clients",
     "console_handler",

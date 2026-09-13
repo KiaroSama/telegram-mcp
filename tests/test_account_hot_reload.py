@@ -228,3 +228,44 @@ def test_one_account_whose_label_ends_another_is_left_alone(env_file):
     assert changed == ["network"], f"only 'network' changed, but {changed} was reported"
     assert conn.clients["work"] is untouched, "'work' was rebuilt by an edit to 'network'"
     assert not untouched.disconnected, "'work' lost its connection to a neighbour's re-login"
+
+
+# --- a reload must never be able to exit the process ------------------------
+
+
+def test_no_accounts_configured_raises_instead_of_exiting():
+    """`sys.exit` raises SystemExit, which derives from BaseException - so
+    `refresh_accounts`'s `except Exception` never saw it and a `.env` caught
+    mid-rewrite took the whole server down from inside a routine reload check."""
+    with pytest.raises(conn.NoAccountsConfigured):
+        conn._discover_accounts({})
+
+    try:
+        conn._discover_accounts({})
+    except SystemExit:  # pragma: no cover - the regression itself
+        pytest.fail("discovery still exits the process instead of raising")
+    except conn.NoAccountsConfigured:
+        pass
+
+
+def test_a_momentarily_unusable_env_keeps_the_running_accounts(env_file, monkeypatch):
+    """The account manager backs up and rewrites `.env`, so the window in which
+    it describes nothing is real. The generation already serving must survive it."""
+    env_file(["TELEGRAM_SESSION_STRING_WORK=w1"])
+    conn.refresh_accounts()  # the first call only adopts a baseline (see R02)
+    env_file(["TELEGRAM_SESSION_STRING_WORK=w1", "TELEGRAM_SESSION_STRING_HOME=h1"])
+    conn.refresh_accounts()
+    serving = dict(conn.clients)
+    assert set(serving) == {"work", "home"}
+
+    def _empty(env=None):
+        raise conn.NoAccountsConfigured("nothing configured")
+
+    monkeypatch.setattr(conn, "_discover_accounts", _empty)
+    env_file(["# the file is being rewritten"])
+
+    changed = conn.refresh_accounts()
+
+    assert changed == []
+    assert conn.clients == serving, "a half-written .env replaced the working accounts"
+    assert not any(c.disconnected for c in serving.values()), "and it retired them too"
