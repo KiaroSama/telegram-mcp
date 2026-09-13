@@ -870,6 +870,7 @@ own. That is what `tests/test_tool_registry.py` guards.
 main.py                       # historical entrypoint and compatibility exports
 telegram_mcp/settings.py      # environment configuration; the bottom of the import graph
 telegram_mcp/runtime.py       # shared MCP setup, entity resolution, formatting
+telegram_mcp/dialog_warm.py   # warming the entity cache once, with shared waiters
 telegram_mcp/errors.py        # error classes, refusal wording, id validation
 telegram_mcp/connection.py    # the session pool, account routing, reconnection
 telegram_mcp/account_config.py # what the .env says about accounts, and what changed
