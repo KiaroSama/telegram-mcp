@@ -62,6 +62,16 @@ from telegram_mcp.errors import (  # noqa: F401  (re-exported)
     validate_id,
 )
 
+# Warming the entity cache is a coordination problem of its own - an owned
+# in-flight task, shared waiters, a stamp written only on success - so it lives
+# next door. Re-exported: this module is star-imported by every tool module.
+from telegram_mcp.dialog_warm import (  # noqa: F401  (re-exported)
+    _DIALOG_WARM_SECONDS,
+    _dialog_warmed,
+    _dialog_warms,
+    warm_dialogs_once as _warm_dialogs_once,
+)
+
 try:
     import fcntl  # POSIX advisory locks; unavailable on Windows
 except ImportError:  # pragma: no cover - Windows fallback
@@ -572,23 +582,6 @@ def is_premium_rpc_error(error: Exception) -> bool:
 # become resolvable, and "warmed once at startup" would make that never happen.
 # Short enough that a new chat is reachable within seconds; long enough that one
 # tool call's loop shares a single download.
-_DIALOG_WARM_SECONDS = 30.0
-_dialog_warmed: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
-
-
-async def _warm_dialogs_once(client) -> bool:
-    """Warm the entity cache at most once per _DIALOG_WARM_SECONDS per client.
-
-    Returns True when a warm actually happened, so a caller can skip the retry
-    that would otherwise ask the same question against an unchanged cache.
-    """
-    now = time.monotonic()
-    last = _dialog_warmed.get(client)
-    if last is not None and now - last < _DIALOG_WARM_SECONDS:
-        return False
-    _dialog_warmed[client] = now
-    await client.get_dialogs()
-    return True
 
 
 async def _resolve_with_retries(

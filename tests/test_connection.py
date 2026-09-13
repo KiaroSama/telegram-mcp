@@ -18,7 +18,7 @@ import sys
 
 import pytest
 
-from telegram_mcp import connection, runtime, session_files
+from telegram_mcp import connection, reconnect, runtime, session_files
 
 
 def _clear_session_env(monkeypatch):
@@ -397,8 +397,8 @@ async def test_ensure_connected_refuses_interactive_login_for_an_unauthorized_cl
     This test used to assert that start() WAS called; that pinned a hang.
     """
     client = _ConnectivityClient(connected=False, authorized=False)
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
-    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_RECONNECT_LOCKS", {})
 
     with pytest.raises(RuntimeError, match="session_string_generator.py"):
         await runtime.ensure_connected(client)
@@ -412,13 +412,13 @@ async def test_ensure_connected_refuses_interactive_login_for_an_unauthorized_cl
         "is_user_authorized",
     ]
     assert "start" not in client.calls, "called the blocking thing"
-    assert id(client) not in connection._last_conn_verified, "recorded a failed reconnect"
+    assert id(client) not in reconnect._last_conn_verified, "recorded a failed reconnect"
 
 
 @pytest.mark.asyncio
 async def test_ensure_connected_pings_and_reconnects_on_failed_ping(monkeypatch):
     client = _ConnectivityClient(connected=True, authorized=True, ping_error=ConnectionError())
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
 
     await runtime.ensure_connected(client)
 
@@ -429,7 +429,7 @@ async def test_ensure_connected_pings_and_reconnects_on_failed_ping(monkeypatch)
 @pytest.mark.asyncio
 async def test_ensure_connected_skips_recently_verified_client(monkeypatch):
     client = _ConnectivityClient(connected=True)
-    monkeypatch.setattr(connection, "_last_conn_verified", {id(client): runtime.time.time()})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {id(client): runtime.time.time()})
 
     await runtime.ensure_connected(client)
 
@@ -447,13 +447,13 @@ async def test_a_rate_limit_answer_is_proof_the_connection_is_alive(monkeypatch)
     client = _ConnectivityClient(
         connected=True, authorized=True, ping_error=errors.FloodWaitError(request=None)
     )
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
-    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_RECONNECT_LOCKS", {})
 
     await runtime.ensure_connected(client)
 
     assert client.calls == ["is_connected", "ping"], f"reconnected on a rate limit: {client.calls}"
-    assert connection._last_conn_verified[id(client)] > 0, "the probe answered — record it"
+    assert reconnect._last_conn_verified[id(client)] > 0, "the probe answered — record it"
 
 
 @pytest.mark.asyncio
@@ -471,13 +471,13 @@ async def test_a_burned_session_is_reported_even_when_the_probe_is_what_finds_it
     client = _ConnectivityClient(
         connected=True, authorized=True, ping_error=AuthKeyDuplicatedError(request=None)
     )
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
-    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_RECONNECT_LOCKS", {})
 
     with pytest.raises(RuntimeError, match="no longer usable"):
         await runtime.ensure_connected(client)
 
-    assert id(client) not in connection._last_conn_verified, "recorded a dead session as verified"
+    assert id(client) not in reconnect._last_conn_verified, "recorded a dead session as verified"
 
 
 @pytest.mark.asyncio
@@ -492,8 +492,8 @@ async def test_a_chat_level_refusal_is_also_proof_the_connection_is_alive(monkey
         authorized=True,
         ping_error=errors.rpcerrorlist.ChatAdminRequiredError(request=None),
     )
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
-    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_RECONNECT_LOCKS", {})
 
     await runtime.ensure_connected(client)
 
@@ -514,8 +514,8 @@ async def test_two_callers_do_not_interleave_a_reconnect_on_a_shared_client(monk
             self.connected = True
 
     client = _SlowConnectClient(connected=False, authorized=True)
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
-    monkeypatch.setattr(connection, "_RECONNECT_LOCKS", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_RECONNECT_LOCKS", {})
 
     await asyncio.gather(runtime.ensure_connected(client), runtime.ensure_connected(client))
 
@@ -544,7 +544,7 @@ async def test_force_reconnect_times_out_instead_of_hanging(monkeypatch):
     without it, losing that timeout would hang the suite for an hour instead of
     failing it, and a hang reports as nothing at all."""
     client = _HangingConnectClient(connected=False, authorized=True)
-    monkeypatch.setattr(connection, "_RECONNECT_TIMEOUT", 0.01)
+    monkeypatch.setattr(reconnect, "_RECONNECT_TIMEOUT", 0.01)
 
     with pytest.raises(RuntimeError, match="timed out"):
         await asyncio.wait_for(runtime._force_reconnect(client), timeout=5)
@@ -570,7 +570,7 @@ class _LoginPromptingClient(_ConnectivityClient):
 @pytest.mark.asyncio
 async def test_force_reconnect_refuses_to_prompt_for_a_phone_number(monkeypatch):
     client = _LoginPromptingClient(connected=False, authorized=False)
-    monkeypatch.setattr(connection, "_last_conn_verified", {})
+    monkeypatch.setattr(reconnect, "_last_conn_verified", {})
 
     with pytest.raises(RuntimeError, match="no longer authorized") as excinfo:
         await runtime._force_reconnect(client)
