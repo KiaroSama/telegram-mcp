@@ -376,6 +376,21 @@ async def _main() -> None:
             )
         except Exception:
             pass
+        # A client REPLACED while the server ran is not in `clients` any more:
+        # `refresh_accounts` dropped it and its disconnect is still in flight.
+        # Releasing its session lock now is what lets a second connection claim
+        # one session, which Telegram answers by burning it for both. Bounded,
+        # because exit must not wait on a socket that will never close.
+        try:
+            still_closing = await drain_retirements()
+            if still_closing:
+                startup_note(
+                    f"{still_closing} retired client(s) did not finish disconnecting "
+                    f"within {_RETIRE_DRAIN_SECONDS:.0f}s; releasing their session locks "
+                    "anyway so this process can exit."
+                )
+        except Exception as exc:
+            startup_note(f"Waiting for retired clients failed: {_startup_text(exc)}")
         for lock in _session_locks.values():
             lock.release()
         _session_locks.clear()

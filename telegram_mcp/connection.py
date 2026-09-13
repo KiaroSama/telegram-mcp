@@ -56,6 +56,16 @@ from telegram_mcp.log_setup import (  # noqa: F401  (re-exported)
 )
 from telegram_mcp.singleton import try_lock_exclusive
 
+# Retiring a client outlives the synchronous call that starts it, so it owns a
+# module of its own. Re-exported: `__all__` publishes these and `runtime`
+# star-imports this file.
+from telegram_mcp.retirement import (  # noqa: F401  (re-exported)
+    _RETIRE_DRAIN_SECONDS,
+    _retiring,
+    drain_retirements,
+    retire as _retire,
+)
+
 # Proxy configuration moved next door: turning TELEGRAM_PROXY_* into Telethon
 # kwargs never touches a socket or a session, and this file was carrying both
 # jobs. Re-exported for the same reason log_setup's names are - `runtime` star
@@ -458,39 +468,6 @@ def _replaced(label: str, digests: dict) -> bool:
     return before != after
 
 
-def _retire(client) -> None:
-    """Close a client this process no longer serves.
-
-    `get_client` is synchronous and is called both from inside the server's loop
-    and from plain code, so there are two cases and the first version handled
-    only one: it scheduled the disconnect on the running loop and did nothing at
-    all when there was none - which is the ordinary case, so the socket simply
-    stayed open. Its own test caught that.
-
-    Never raises. A lookup must not fail because tidying up did.
-    """
-    import asyncio
-
-    try:
-        closing = client.disconnect()
-    except Exception:
-        return
-    if closing is None:  # Telethon already closed it synchronously
-        return
-    try:
-        asyncio.get_running_loop().create_task(closing)
-        return
-    except RuntimeError:
-        pass  # no loop here: close it now rather than leaving it open
-    try:
-        asyncio.run(closing)
-    except Exception:
-        try:
-            closing.close()  # at least do not leave a pending coroutine
-        except Exception:
-            pass
-
-
 def get_client(account: str = None) -> TelegramClient:
     """Resolve account label to TelegramClient."""
     refresh_accounts()
@@ -720,6 +697,8 @@ async def ensure_connected(cl: TelegramClient = None):
 
 
 __all__ = [
+    "_RETIRE_DRAIN_SECONDS",
+    "drain_retirements",
     "_BURNED_SESSION_MESSAGE",
     "_CONN_VERIFY_INTERVAL",
     "_PROXY_TYPES_ALL",

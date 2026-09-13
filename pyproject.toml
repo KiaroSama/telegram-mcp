@@ -160,6 +160,7 @@ source = [
     "telegram_mcp.personal",
     "telegram_mcp.photo_source",
     "telegram_mcp.proxy",
+    "telegram_mcp.retirement",
     "telegram_mcp.runner",
     "telegram_mcp.runtime",
     "telegram_mcp.safe_log",
