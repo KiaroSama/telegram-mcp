@@ -251,22 +251,72 @@ async def _on_new_incoming(account: str, event) -> None:
         log_event(logging.ERROR, "error in _on_new_incoming", error=error)
 
 
-def register_incoming_handlers() -> None:
+# label -> (the client it was attached to, the callback). Keyed on the CLIENT as
+# well, because a re-login keeps the label and replaces the object.
+_incoming_handlers: dict = {}
+
+
+def _detach_incoming_handler(label: str) -> None:
+    known = _incoming_handlers.pop(label, None)
+    if not known:
+        return
+    cl, callback = known
+    try:
+        cl.remove_event_handler(callback)
+    except Exception as error:
+        log_event(logging.WARNING, "failed to detach the incoming handler", error=error)
+
+
+def _forget_pending(label: str) -> None:
+    """Drop bursts recorded for a label whose client is gone or replaced.
+
+    A pending burst names a chat by id under an account LABEL. Re-logging that
+    label in can point it at a different Telegram user, and the debounce tools
+    would then hand the new login the previous one's unread conversations.
+    """
+    for key in [k for k in store._pending_msgs if k and k[0] == label]:
+        store._pending_msgs.pop(key, None)
+
+
+def register_incoming_handlers(labels=None) -> None:
     """Attach the incoming-message handler to every configured client.
 
     Safe to call before clients connect — Telethon registers the handler and
     delivers events once connected. Called at import time so the package's
-    `import telegram_mcp.tools` registration also wires up the listener.
+    `import telegram_mcp.tools` registration also wires up the listener, and
+    again whenever the client registry changes.
+
+    Idempotent, and that is not a nicety. Registering at import alone left every
+    account added or re-logged-in while the server ran with NO handler, so it
+    received nothing and looked broken rather than unwired. Re-registering
+    everything on each refresh instead would attach a second handler to each
+    surviving client and double every burst. So the record is keyed on the label
+    AND the client object, and only a genuinely new object is wired.
     """
-    for label, cl in clients.items():
+    for label, cl in list(clients.items()):
+        if labels is not None and label not in labels:
+            continue
+        known = _incoming_handlers.get(label)
+        if known and known[0] is cl:
+            continue
+        _detach_incoming_handler(label)
+        # partial, not a closure over the loop variable: a closure would
+        # capture the NAME and every handler would report the last label.
+        callback = partial(_on_new_incoming, label)
         try:
-            # partial, not a closure over the loop variable: a closure would
-            # capture the NAME and every handler would report the last label.
-            cl.add_event_handler(
-                partial(_on_new_incoming, label), _events.NewMessage(incoming=True)
-            )
+            cl.add_event_handler(callback, _events.NewMessage(incoming=True))
         except Exception as error:
             log_event(logging.ERROR, "failed to register the incoming handler", error=error)
+            continue
+        _incoming_handlers[label] = (cl, callback)
+
+
+def _on_clients_changed(added: set, removed: set) -> None:
+    """Keep the listeners in step with the client registry."""
+    for label in set(removed) | set(added):
+        _detach_incoming_handler(label)
+        _forget_pending(label)
+    register_incoming_handlers(added)
 
 
 @mcp.tool(
@@ -653,6 +703,7 @@ def incoming_feed_state() -> Dict[str, Any]:
 
 # Wire up the listener as soon as this module is imported (alongside tool registration).
 register_incoming_handlers()
+on_clients_changed(_on_clients_changed)
 
 
 # The tools only. Everything the store owns is exported by events_store, so the

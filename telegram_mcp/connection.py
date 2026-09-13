@@ -379,6 +379,36 @@ _env_stamp: tuple = _env_fingerprint(_env_file())
 _env_digests: dict = _current_digests(_accounts_from_disk())
 
 
+# Told after every change to `clients`. A registry of callbacks rather than a
+# direct call, because the modules that care - `tools.events` above all - reach
+# this one through `runtime`'s star import, so the dependency runs one way only.
+# Registering a callback is how the other direction gets expressed without an
+# import cycle.
+_registry_listeners: list = []
+
+
+def on_clients_changed(callback) -> None:
+    """Run ``callback(added, removed)`` after every change to ``clients``."""
+    if callback not in _registry_listeners:
+        _registry_listeners.append(callback)
+
+
+def _notify_clients_changed(added: set, removed: set) -> None:
+    if not (added or removed):
+        return
+    for callback in list(_registry_listeners):
+        try:
+            callback(added, removed)
+        except Exception as error:
+            log_event(
+                logging.ERROR,
+                "a client-registry listener failed",
+                error=error,
+                added=len(added),
+                removed=len(removed),
+            )
+
+
 def refresh_accounts() -> list:
     """Pick up accounts added, removed or re-logged-in since startup.
 
@@ -431,6 +461,7 @@ def refresh_accounts() -> list:
         _env_stamp = stamp
         return []
 
+    before = dict(clients)
     changed = sorted(set(rebuilt) ^ set(clients)) + sorted(
         label for label in set(rebuilt) & set(clients) if _replaced(label, digests)
     )
@@ -444,6 +475,12 @@ def refresh_accounts() -> list:
         clients[label] = client
 
     _env_stamp, _env_digests = stamp, digests
+    # Identity, not label: a re-login keeps the label and replaces the object, and
+    # a listener that only watched labels left the new client with no handler.
+    _notify_clients_changed(
+        {label for label, cl in clients.items() if before.get(label) is not cl},
+        set(before) - set(clients),
+    )
     return sorted(set(changed))
 
 
@@ -714,6 +751,7 @@ async def ensure_connected(cl: TelegramClient = None):
 
 
 __all__ = [
+    "on_clients_changed",
     "_RETIRE_DRAIN_SECONDS",
     "drain_retirements",
     "_BURNED_SESSION_MESSAGE",
