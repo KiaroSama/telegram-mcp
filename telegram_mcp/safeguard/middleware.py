@@ -87,6 +87,15 @@ def _target(arguments: Dict[str, Any]) -> Any:
     return None
 
 
+def _shown_target(arguments: Dict[str, Any], chat: Any) -> Optional[str]:
+    """What the "Chat" line shows: the chat, else the bot or the account's own profile."""
+    if chat is not None:
+        return str(chat)
+    if arguments.get("bot") not in (None, ""):
+        return f"bot {arguments['bot']}"
+    return "your own profile"
+
+
 def describe(name: str, arguments: Dict[str, Any], chat: Any, tainted, outside=()) -> str:
     """The effect in plain words for the owner; never the message text itself."""
     where = f" in {chat}" if chat is not None else ""
@@ -235,7 +244,7 @@ class Safeguard:
                 request = approvals.new_request(
                     name,
                     account,
-                    None if chat is None else str(chat),
+                    _shown_target(arguments, chat),
                     describe(name, arguments, chat, decision.tainted, facts.outside_folders),
                     decision.reasons,
                     identity=who,

@@ -20,6 +20,7 @@ HINTS = {
     "delete_message": (False, True),
     "mark_as_read": (False, True),
     "download_media": (False, True),
+    "set_profile_photo": (False, True),
 }
 
 
@@ -312,3 +313,14 @@ def test_the_first_message_starts_one_background_warm_up_that_never_delays_a_cal
 
     assert asyncio.run(run()) == ["tools/list", "tools/call", "tools/list"]
     assert started == [1]
+
+
+@pytest.mark.parametrize(
+    "arguments, shown",
+    [({}, "your own profile"), ({"bot": "@mybot"}, "bot @mybot")],
+)
+def test_a_request_with_no_chat_names_what_it_changes(arguments, shown):
+    """A profile photo belongs to no chat; "Chat: -" told the owner nothing."""
+    guard, channel = _guard()
+    _call(guard, "set_profile_photo", dict(arguments))
+    assert channel.requests[0].chat == shown

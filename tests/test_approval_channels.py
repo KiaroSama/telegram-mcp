@@ -141,8 +141,9 @@ def test_only_an_allowed_users_press_with_the_right_nonce_counts():
     assert peer == 111 and "delete_message" in text
     labels = [b.text for row in kwargs["buttons"] for b in row]
     assert len(labels) == 3
+    # The owner's layout (2026-09-26): Deny on the left, Approve on the right.
     assert [b.type.data for row in kwargs["buttons"] for b in row] == [
-        f"sg:{request.nonce}:{c}".encode() for c in ("once", "deny", "always")
+        f"sg:{request.nonce}:{c}".encode() for c in ("deny", "once", "always")
     ]
 
 

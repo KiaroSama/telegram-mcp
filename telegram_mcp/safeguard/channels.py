@@ -240,7 +240,8 @@ class BotChannel:
             return Button.inline(label, f"sg:{request.nonce}:{choice}".encode(), style=style)
 
         buttons = [
-            [press("once", _APPROVE, "success"), press("deny", _DENY, "danger")],
+            # The owner's layout: Deny on the left, Approve on the right.
+            [press("deny", _DENY, "danger"), press("once", _APPROVE, "success")],
             [press("always", _ALWAYS, "primary")],
         ]
         sent = []
