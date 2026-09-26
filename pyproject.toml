@@ -53,7 +53,7 @@ dependencies = [
     # `uv lock --upgrade-package telethon-secret-chat`; nothing in this project's
     # source should need to change, because `telegram_mcp/secret_backend.py` is the
     # only module that imports it and a contract test pins what it relies on.
-    "telethon-secret-chat @ git+https://github.com/KiaroSama/Telethon-Secret-Chat.git@7fcda4c30cfda1aded831d03c52159c69a142691",
+    "telethon-secret-chat @ git+https://github.com/KiaroSama/Telethon-Secret-Chat.git@b67d2072210d95d2af449f60b5beffebfab6d7cc",
 ]
 
 [project.optional-dependencies]

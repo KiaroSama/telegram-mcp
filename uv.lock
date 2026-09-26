@@ -1575,7 +1575,7 @@ requires-dist = [
     { name = "regex", specifier = ">=2026.9.10" },
     { name = "rlottie-python", marker = "extra == 'lottie'", specifier = ">=1.3.8" },
     { name = "telethon", specifier = ">=1.45.0" },
-    { name = "telethon-secret-chat", git = "https://github.com/KiaroSama/Telethon-Secret-Chat.git?rev=7fcda4c30cfda1aded831d03c52159c69a142691" },
+    { name = "telethon-secret-chat", git = "https://github.com/KiaroSama/Telethon-Secret-Chat.git?rev=b67d2072210d95d2af449f60b5beffebfab6d7cc" },
 ]
 provides-extras = ["proxy", "lottie", "secret"]
 
@@ -1608,7 +1608,7 @@ wheels = [
 [[package]]
 name = "telethon-secret-chat"
 version = "0.0.1"
-source = { git = "https://github.com/KiaroSama/Telethon-Secret-Chat.git?rev=7fcda4c30cfda1aded831d03c52159c69a142691#7fcda4c30cfda1aded831d03c52159c69a142691" }
+source = { git = "https://github.com/KiaroSama/Telethon-Secret-Chat.git?rev=b67d2072210d95d2af449f60b5beffebfab6d7cc#b67d2072210d95d2af449f60b5beffebfab6d7cc" }
 dependencies = [
     { name = "telethon" },
 ]
