@@ -1,12 +1,18 @@
 """Shared pytest setup for import-time Telegram configuration."""
 
 import os
+import tempfile
 
-import pytest
+# Before any project import: `log_setup` opens state_dir()/mcp_errors.log when it is
+# imported, so without this every test that exercised an error path appended to the
+# OWNER's real log. A test that needs another location still sets its own value.
+os.environ["XDG_STATE_HOME"] = tempfile.mkdtemp(prefix="telegram-mcp-tests-")
 
-from telegram_mcp import secret_backend, secret_history
+import pytest  # noqa: E402
 
-from secret_fakes import SECRET_ID, FakeChat, FakeManager
+from telegram_mcp import secret_backend, secret_history  # noqa: E402
+
+from secret_fakes import SECRET_ID, FakeChat, FakeManager  # noqa: E402
 
 
 # The suite describes the CODE, never the machine it runs on.
