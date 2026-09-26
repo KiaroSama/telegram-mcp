@@ -62,6 +62,7 @@ GATED = frozenset(
         "join_chat_by_link",
         "leave_chat",
         "remove_sticker_from_set",
+        "replace_chat_photo",
         "revoke_invite_link",
         "set_authorization_secret_chats",
         "set_bot_info",

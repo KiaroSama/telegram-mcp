@@ -13,6 +13,7 @@ from telegram_mcp.tools.messages_read import *
 from telegram_mcp.tools.messages_state import *
 from telegram_mcp.tools.messages_queue import *
 from telegram_mcp.tools.groups import *
+from telegram_mcp.tools.chat_photo_history import *
 from telegram_mcp.tools.moderation import *
 from telegram_mcp.tools.admin_rights import *
 from telegram_mcp.tools.invites import *
