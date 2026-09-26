@@ -30,7 +30,13 @@ _GIF_BOT = "gif"
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Gif Search", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Gif Search",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def get_gif_search(
@@ -105,7 +111,15 @@ async def get_gif_search(
         return log_and_format_error("get_gif_search", e, limit=limit)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Send Gif", openWorldHint=True, destructiveHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Send Gif",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 @validate_id("chat_id")
 async def send_gif(

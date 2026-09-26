@@ -23,7 +23,11 @@ why, and `telegram_mcp/rich_blocks.py` holds the rendering.
 
 from typing import Optional, Union
 
+from telegram_mcp.safeguard import note_records
+import json
+
 from telegram_mcp.runtime import *
+from telegram_mcp.runtime import _account_for_client
 
 from telethon import errors
 
@@ -36,7 +40,13 @@ __all__ = ["download_rich_media", "read_rich_message"]
 # Listed so the flattener can say which formatting it saw rather than silently
 # dropping the distinction, and so an unknown wrapper is visible as unknown.
 @mcp.tool(
-    annotations=ToolAnnotations(title="Read Rich Message", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Read Rich Message",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -113,6 +123,17 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
             )
 
         rendered = rich_blocks.render_blocks(rich)
+        # Cell text is someone else's words: remember it, so it cannot become an order.
+        note_records(
+            account or _account_for_client(cl),
+            chat_id,
+            [
+                {
+                    "text": json.dumps(rendered["blocks"], ensure_ascii=False, default=str),
+                    "is_outgoing": bool(getattr(message, "out", False)),
+                }
+            ],
+        )
         return format_tool_result(
             {
                 "chat_id": chat_id,
@@ -131,7 +152,15 @@ async def read_rich_message(chat_id: Union[int, str], message_id: int, account: 
         return log_and_format_error("read_rich_message", e, chat_id=chat_id, message_id=message_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Download Rich Media", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Download Rich Media",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=False)
 async def download_rich_media(
     chat_id: Union[int, str],

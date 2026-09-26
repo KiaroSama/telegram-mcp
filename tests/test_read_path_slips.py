@@ -21,7 +21,7 @@ import pytest
 from telethon.tl.types import Channel, ChatPhotoEmpty, PeerChannel, PeerUser, User
 
 from telegram_mcp import message_view
-from telegram_mcp.tools import chats, messages_state, saved
+from telegram_mcp.tools import chats, poll_creation, saved
 
 
 def _parse(result):
@@ -164,12 +164,12 @@ async def test_the_poll_ceiling_is_cached_once_per_client_not_per_spelling(monke
     from telegram_mcp import runtime
 
     monkeypatch.setattr(runtime, "clients", {"solo": object()})
-    monkeypatch.setattr(messages_state, "ensure_connected", _async_return(None))
-    monkeypatch.setattr(messages_state, "_poll_answers_max_cache", {})
+    monkeypatch.setattr(poll_creation, "ensure_connected", _async_return(None))
+    monkeypatch.setattr(poll_creation, "_poll_answers_max_cache", {})
     client = _ConfigClient()
 
-    await messages_state._poll_answers_max(client, None)
-    await messages_state._poll_answers_max(client, "SOLO")
+    await poll_creation._poll_answers_max(client, None)
+    await poll_creation._poll_answers_max(client, "SOLO")
 
     assert client.calls == 1, "one client asked Telegram the same question twice"
-    assert list(messages_state._poll_answers_max_cache) == ["solo"]
+    assert list(poll_creation._poll_answers_max_cache) == ["solo"]

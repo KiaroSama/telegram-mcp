@@ -26,7 +26,7 @@ from telegram_mcp.tools import messages as messages_mod
 from telegram_mcp.tools import messages_relay as relay_mod
 from telegram_mcp.tools import messages_delete as delete_mod
 from telegram_mcp.tools import messages_queue as queue_mod
-from telegram_mcp.tools import messages_read as read_mod
+from telegram_mcp.tools import read_receipts as read_mod
 from telegram_mcp.tools import messages_state as state_mod
 from telegram_mcp.tools import saved as saved_mod
 

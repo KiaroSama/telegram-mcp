@@ -51,6 +51,7 @@ async def test_album_mode_sends_multiple_files_as_one_media_group(
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -90,6 +91,7 @@ async def test_album_mode_passes_topic_id_as_reply_to(tmp_path, monkeypatch, too
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -119,6 +121,7 @@ async def test_send_file_passes_topic_id_as_reply_to(tmp_path, monkeypatch):
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -168,6 +171,7 @@ async def test_send_album_reuses_readable_path_security(tmp_path, monkeypatch):
     outside_file.write_bytes(b"png-two")
 
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": _DummyClient()})
 
     result = await media.send_album("AgenticAIChat", ["one.png", str(outside_file)])
@@ -188,6 +192,7 @@ async def test_a_file_and_a_photo_are_sent_as_two_messages(tmp_path, monkeypatch
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -218,6 +223,7 @@ async def test_the_caption_rides_the_first_message_only(tmp_path, monkeypatch):
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -242,6 +248,7 @@ async def test_a_kind_list_of_the_wrong_length_sends_nothing(tmp_path, monkeypat
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -262,6 +269,7 @@ async def test_one_impossible_kind_leaves_the_others_unsent(tmp_path, monkeypatc
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 
@@ -286,6 +294,7 @@ async def test_a_single_file_refusal_reaches_the_caller_in_words(tmp_path, monke
 
     client = _DummyClient()
     monkeypatch.setattr(file_roots, "SERVER_ALLOWED_ROOTS", [root])
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 

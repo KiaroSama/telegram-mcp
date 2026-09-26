@@ -57,7 +57,13 @@ MAX_CUSTOM_EMOJI_IDS = 10
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Media Details", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Media Details",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -101,7 +107,13 @@ async def get_media_details(chat_id: Union[int, str], message_id: int, account: 
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Media Thumbnail", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Media Thumbnail",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @require_explicit_account
 @with_account(readonly=True)
@@ -218,7 +230,13 @@ async def get_media_thumbnail(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Media Frames", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Media Frames",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @require_explicit_account
 @with_account(readonly=True)
@@ -398,7 +416,13 @@ async def _name_the_sets(cl, records: list) -> None:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Custom Emoji", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Custom Emoji",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @require_explicit_account
 @with_account(readonly=True)

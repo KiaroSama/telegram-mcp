@@ -230,7 +230,13 @@ async def _resolve_icons(cl, buttons: list) -> None:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Inspect Buttons", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Inspect Buttons",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -319,7 +325,13 @@ async def inspect_buttons(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Click Button", openWorldHint=True, readOnlyHint=False)
+    annotations=ToolAnnotations(
+        title="Click Button",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")

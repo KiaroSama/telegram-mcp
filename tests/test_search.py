@@ -22,7 +22,7 @@ import pytest
 from telethon.tl import functions, types
 
 from telegram_mcp.tools import chats as chats_mod
-from telegram_mcp.tools import messages_read as read_mod
+from telegram_mcp.tools import message_search as read_mod
 
 CHAT = "@somegroup"
 ENTITY = types.InputPeerChannel(channel_id=4242, access_hash=7)

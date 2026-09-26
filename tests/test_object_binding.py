@@ -293,8 +293,13 @@ async def test_the_writable_gate_creates_no_directory_before_a_handle_exists(
 
     monkeypatch.setattr(file_roots, "_ensure_allowed_roots", _roots)
 
+    # An explicit nested path: the default now lands in files/downloads, which is made
+    # up front as one of the two fixed folders (FR-033); anything deeper is not.
     out, error = await file_roots._resolve_writable_file_path(
-        raw_path=None, default_filename="x.bin", ctx=None, tool_name="download_media"
+        raw_path=str(root / "downloads" / "x.bin"),
+        default_filename="ignored.bin",
+        ctx=None,
+        tool_name="download_media",
     )
 
     assert error is None

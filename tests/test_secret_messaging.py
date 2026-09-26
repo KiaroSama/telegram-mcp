@@ -41,6 +41,20 @@ async def test_a_plain_message_is_sent_and_recorded_as_outgoing(backend):
 
 
 @pytest.mark.asyncio
+async def test_a_delivered_message_is_reported_sent_even_if_the_local_copy_fails(
+    backend, monkeypatch
+):
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(secret_history, "record", broken)
+    answer = _results(await sm.send_secret_message(CHAT_ID, "hello", account="acct"))
+
+    assert answer["sent"] is True
+    assert "was delivered" in answer["local_copy"]
+
+
+@pytest.mark.asyncio
 async def test_nothing_dropped_means_the_field_is_absent(backend):
     """The caller's signal is the field EXISTING, so an empty list would read as
     a loss that did not happen."""

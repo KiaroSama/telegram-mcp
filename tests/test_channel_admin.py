@@ -14,14 +14,21 @@ import pytest
 from telethon import errors, types
 
 from telegram_mcp.tools import channel_admin as mod
+from telegram_mcp.tools import channel_stats
+from telegram_mcp.tools.channel_stats import get_channel_statistics
 from telegram_mcp.tools.channel_admin import (
     _normalize_username,
     _username_rule_broken,
     check_channel_username,
-    get_channel_statistics,
     get_similar_channels,
     set_channel_username,
 )
+
+
+def _patch(monkeypatch, name, value):
+    """Both modules resolve their own names; the tools under test live in either."""
+    monkeypatch.setattr(mod, name, value)
+    monkeypatch.setattr(channel_stats, name, value, raising=False)
 
 
 class _Client:
@@ -89,7 +96,7 @@ def _graph_json(names=("Followers",), points=3):
 @pytest.fixture
 def _wire(monkeypatch):
     def wire(client, entity=None):
-        monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+        _patch(monkeypatch, "get_client", lambda account=None: client)
 
         async def _ensure(_client):
             return None
@@ -97,8 +104,8 @@ def _wire(monkeypatch):
         async def _resolve(chat_id, _client):
             return entity if entity is not None else _channel()
 
-        monkeypatch.setattr(mod, "ensure_connected", _ensure)
-        monkeypatch.setattr(mod, "resolve_entity", _resolve)
+        _patch(monkeypatch, "ensure_connected", _ensure)
+        _patch(monkeypatch, "resolve_entity", _resolve)
         return client
 
     return wire
@@ -480,13 +487,13 @@ class _Peers:
 @pytest.mark.asyncio
 async def test_linking_sends_both_sides_the_right_way_round(monkeypatch):
     client = _Recorder()
-    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+    _patch(monkeypatch, "get_client", lambda account=None: client)
 
     async def _ensure(_client):
         return None
 
-    monkeypatch.setattr(mod, "ensure_connected", _ensure)
-    monkeypatch.setattr(mod, "resolve_entity", _Peers(_channel(), _supergroup()))
+    _patch(monkeypatch, "ensure_connected", _ensure)
+    _patch(monkeypatch, "resolve_entity", _Peers(_channel(), _supergroup()))
 
     answer = await mod.set_discussion_group(channel_id=99, group_id=1234, account="a")
 
@@ -501,7 +508,7 @@ async def test_omitting_the_group_detaches_rather_than_doing_nothing(monkeypatch
     """Telegram unlinks with InputChannelEmpty, not by omitting the field. A tool
     that sent nothing would report success and change nothing."""
     client = _Recorder()
-    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+    _patch(monkeypatch, "get_client", lambda account=None: client)
 
     async def _ensure(_client):
         return None
@@ -509,8 +516,8 @@ async def test_omitting_the_group_detaches_rather_than_doing_nothing(monkeypatch
     async def _resolve(chat_id, _client):
         return _channel()
 
-    monkeypatch.setattr(mod, "ensure_connected", _ensure)
-    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+    _patch(monkeypatch, "ensure_connected", _ensure)
+    _patch(monkeypatch, "resolve_entity", _resolve)
 
     answer = await mod.set_discussion_group(channel_id=99, account="a")
 
@@ -524,7 +531,7 @@ async def test_passing_the_supergroup_as_the_channel_is_refused_by_name(monkeypa
     """The likeliest mistake: the two arguments are both chat ids and swapping
     them fails on the wire with something that does not mention the order."""
     client = _Recorder()
-    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+    _patch(monkeypatch, "get_client", lambda account=None: client)
 
     async def _ensure(_client):
         return None
@@ -532,8 +539,8 @@ async def test_passing_the_supergroup_as_the_channel_is_refused_by_name(monkeypa
     async def _resolve(chat_id, _client):
         return _supergroup()
 
-    monkeypatch.setattr(mod, "ensure_connected", _ensure)
-    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+    _patch(monkeypatch, "ensure_connected", _ensure)
+    _patch(monkeypatch, "resolve_entity", _resolve)
 
     answer = await mod.set_discussion_group(channel_id=1234, group_id=99, account="a")
 
@@ -546,7 +553,7 @@ async def test_a_basic_group_is_refused_with_the_step_that_fixes_it(monkeypatch)
     """Telegram links SUPERGROUPS only. A client converts silently first; this
     call does not, so the conversion is named rather than left as an error."""
     client = _Recorder()
-    monkeypatch.setattr(mod, "get_client", lambda account=None: client)
+    _patch(monkeypatch, "get_client", lambda account=None: client)
 
     async def _ensure(_client):
         return None
@@ -556,8 +563,8 @@ async def test_a_basic_group_is_refused_with_the_step_that_fixes_it(monkeypatch)
     async def _resolve(chat_id, _client):
         return basic if int(chat_id) == 1234 else _channel()
 
-    monkeypatch.setattr(mod, "ensure_connected", _ensure)
-    monkeypatch.setattr(mod, "resolve_entity", _resolve)
+    _patch(monkeypatch, "ensure_connected", _ensure)
+    _patch(monkeypatch, "resolve_entity", _resolve)
 
     answer = await mod.set_discussion_group(channel_id=99, group_id=1234, account="a")
 

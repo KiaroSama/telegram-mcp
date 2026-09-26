@@ -106,6 +106,7 @@ def _from_result(result) -> Optional[dict]:
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=False,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -184,6 +185,7 @@ async def create_invite_link(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)
@@ -323,7 +325,13 @@ async def revoke_invite_link(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Invite Links", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Invite Links",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -384,7 +392,13 @@ async def list_invite_links(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Join Requests", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Join Requests",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -462,6 +476,7 @@ async def list_join_requests(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)

@@ -86,14 +86,18 @@ async def test_zero_means_deliberately_unbounded(monkeypatch):
 
 
 def test_the_budget_is_installed_once_and_runs_first():
-    """First in the chain, so the ceiling covers the other middleware too - a
-    budget wrapping only the innermost handler would not bound work on the way
-    out."""
+    """First in the chain after the safeguard, so the ceiling covers the other
+    middleware too - a budget wrapping only the innermost handler would not bound
+    work on the way out. The safeguard alone sits outside it: an approval may take
+    five minutes, and inside the budget that wait would be cut off at 55 s."""
     from telegram_mcp import runtime
+    from telegram_mcp.safeguard import Safeguard
+    from telegram_mcp.tools import mcp  # noqa: F401  (installs the safeguard)
 
     tool_budget.install(runtime.mcp)
     tool_budget.install(runtime.mcp)
 
     budgets = [m for m in runtime.mcp.middleware if isinstance(m, tool_budget.ToolCallBudget)]
     assert len(budgets) == 1
-    assert isinstance(runtime.mcp.middleware[0], tool_budget.ToolCallBudget)
+    assert isinstance(runtime.mcp.middleware[0], Safeguard)
+    assert isinstance(runtime.mcp.middleware[1], tool_budget.ToolCallBudget)

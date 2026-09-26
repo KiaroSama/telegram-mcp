@@ -105,7 +105,11 @@ def _describe(msg) -> dict[str, Any]:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="List Scheduled Messages", openWorldHint=True, readOnlyHint=True
+        title="List Scheduled Messages",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -149,7 +153,11 @@ async def list_scheduled_messages(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Schedule Message", openWorldHint=True, readOnlyHint=False, idempotentHint=False
+        title="Schedule Message",
+        openWorldHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -248,7 +256,11 @@ async def schedule_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Edit Scheduled Message", openWorldHint=True, readOnlyHint=False
+        title="Edit Scheduled Message",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)
@@ -383,7 +395,11 @@ async def edit_scheduled_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Cancel Scheduled Message", openWorldHint=True, readOnlyHint=False
+        title="Cancel Scheduled Message",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)

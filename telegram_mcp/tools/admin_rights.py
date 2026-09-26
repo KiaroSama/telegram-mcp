@@ -124,7 +124,11 @@ def _build_admin_rights(values: dict = None, defaults: dict = None) -> ChatAdmin
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Promote Admin", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Promote Admin",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -176,7 +180,11 @@ async def promote_admin(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Demote Admin", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Demote Admin",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -225,6 +233,7 @@ async def demote_admin(
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -347,7 +356,15 @@ async def edit_admin_rights(
         return log_and_format_error("edit_admin_rights", e, chat_id=chat_id, user_id=user_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Admins", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Admins",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_admins(chat_id: Union[int, str], account: str = None) -> str:

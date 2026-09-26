@@ -53,6 +53,8 @@ def wired(tmp_path, monkeypatch):
     original = list(file_roots.SERVER_ALLOWED_ROOTS)
     file_roots.SERVER_ALLOWED_ROOTS[:] = [root]
     monkeypatch.setattr(file_roots, "refresh_server_roots", lambda: None)
+    # Bare names below resolve against this root, as they would against files/.
+    monkeypatch.setattr(file_roots, "_relative_base", lambda: root)
     monkeypatch.setattr(media, "clients", {"default": client})
     monkeypatch.setattr(media, "get_client", lambda account=None: client)
 

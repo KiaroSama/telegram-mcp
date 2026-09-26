@@ -24,7 +24,11 @@ from telegram_mcp.runtime import *
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Ban User", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Ban User",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -78,7 +82,11 @@ async def ban_user(chat_id: Union[int, str], user_id: Union[int, str], account: 
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Unban User", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Unban User",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -135,7 +143,13 @@ async def unban_user(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Banned Users", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Banned Users",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -173,6 +187,7 @@ async def get_banned_users(chat_id: Union[int, str], account: str = None) -> str
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -247,7 +262,13 @@ async def set_default_chat_permissions(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Recent Actions", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Recent Actions",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")

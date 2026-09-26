@@ -66,7 +66,11 @@ async def _toggle(tool_name, chat_id, account, build, describe):
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Join To Send", openWorldHint=True, destructiveHint=False, idempotentHint=True
+        title="Set Join To Send",
+        openWorldHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -96,7 +100,11 @@ async def set_join_to_send(chat_id: Union[int, str], enabled: bool, account: str
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Join Request", openWorldHint=True, destructiveHint=False, idempotentHint=True
+        title="Set Join Request",
+        openWorldHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -135,6 +143,7 @@ async def set_join_request(chat_id: Union[int, str], enabled: bool, account: str
         openWorldHint=True,
         destructiveHint=False,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -173,6 +182,7 @@ async def set_prehistory_hidden(
         openWorldHint=True,
         destructiveHint=False,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -207,7 +217,11 @@ async def set_participants_hidden(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Signatures", openWorldHint=True, destructiveHint=False, idempotentHint=True
+        title="Set Signatures",
+        openWorldHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -255,6 +269,7 @@ async def set_signatures(
         openWorldHint=True,
         destructiveHint=False,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

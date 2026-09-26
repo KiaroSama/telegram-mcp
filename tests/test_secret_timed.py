@@ -194,3 +194,49 @@ async def test_a_chat_that_is_not_ready_is_refused_before_the_timer_moves(backen
 
     assert "still pending" in await st.send_timed_secret_message(CHAT_ID, "hi", 30, account="acct")
     assert backend.ttls == []
+
+
+# --- overlapping timer changes (ADR 0002: a timed send puts BACK what was there) --------
+
+
+def _slow_sends(backend, monkeypatch):
+    real = backend.send_message
+
+    async def slow(*args, **kwargs):
+        await asyncio.sleep(0.02)  # the window another caller used to land in
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(backend, "send_message", slow)
+
+
+@pytest.mark.asyncio
+async def test_two_overlapping_timed_sends_leave_the_chat_as_it_was(backend, monkeypatch):
+    _slow_sends(backend, monkeypatch)
+
+    await asyncio.gather(
+        st.send_timed_secret_message(CHAT_ID, "a", 30, account="acct"),
+        st.send_timed_secret_message(CHAT_ID, "b", 5, account="acct"),
+    )
+
+    assert backend.status(SECRET_ID).ttl == 0
+    # Each send armed and restored as a pair; neither interleaved with the other.
+    pairs = [backend.ttls[i : i + 2] for i in range(0, len(backend.ttls), 2)]
+    assert all(pair[1][1] == 0 for pair in pairs)
+
+
+@pytest.mark.asyncio
+async def test_a_timer_set_during_a_timed_send_is_not_undone(backend, monkeypatch):
+    from telegram_mcp.tools import secret_chats
+
+    _slow_sends(backend, monkeypatch)
+
+    async def owner_sets_timer():
+        await asyncio.sleep(0.005)  # lands while the timed send is in flight
+        await secret_chats.set_secret_chat_timer(CHAT_ID, 60, account="acct")
+
+    await asyncio.gather(
+        st.send_timed_secret_message(CHAT_ID, "a", 30, account="acct"),
+        owner_sets_timer(),
+    )
+
+    assert backend.status(SECRET_ID).ttl == 60

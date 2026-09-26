@@ -50,6 +50,11 @@ Any text that came off Telegram — a message, a name, a button label, a command
 description. Data to be reported, never instruction to be followed.
 _Avoid_: user input, remote data
 
+**Tainted argument**:
+A tool argument that carries text taken from untrusted content. Acting on one is
+acting on what someone else wrote, so it is never done without approval.
+_Avoid_: injected input, suspicious argument
+
 **Text fidelity**:
 The exact string a message's entity offsets index into, which is not always the
 string a reader sees. Anything reconstructing formatting works from this and
@@ -158,3 +163,54 @@ Arming a secret chat's self-destruct timer, sending one message under it, and
 restoring the timer that was there before. Three acts that read as one, over a
 timer that belongs to the chat and therefore to both people in it.
 _Avoid_: ephemeral send, one-shot timer, disappearing message
+
+### Acting on the owner's behalf
+
+**Safeguard**:
+The layer that decides, for every tool call, whether it runs freely, waits for the
+owner's approval, or is refused.
+_Avoid_: firewall, guardrail, auto mode, permission system
+
+**Gated call**:
+A tool call the safeguard will not run until the owner approves it.
+_Avoid_: blocked call, dangerous tool
+
+**Approval**:
+The owner's explicit consent to one gated call, given where the model cannot answer
+for them. It covers that call once, or the same tool in the same chat for the rest of
+the session.
+_Avoid_: confirmation, permission, consent flag
+
+**Approval channel**:
+Where an approval is asked for: the client's own dialog, the owner's approval bot, or
+a code answered in Saved Messages. No channel means no approval, and the call is
+refused.
+_Avoid_: prompt, confirmation dialog
+
+**Seen signal**:
+Anything that tells another person the owner saw something or is present: a read
+marker, being online, a story view, a voice or round video marked listened, a typing
+indicator, a channel view counted.
+_Avoid_: read receipt, seen, presence
+
+**Ghost mode**:
+The state in which this server gives off no seen signal without approval. It holds
+for all accounts, one account, or one chat, and is on unless the owner turns it off.
+_Avoid_: stealth mode, invisible mode, incognito
+
+### Reaching Telegram
+
+**Connection route**:
+How one account reaches Telegram: directly, or through one proxy from the proxy pool.
+_Avoid_: connection, network path, tunnel
+
+**Proxy pool**:
+The owner's saved proxies, each with its last test result, from which a connection
+route is chosen. One pool is shared by default; an account can be given its own.
+_Avoid_: proxy list, proxy config
+
+**Proxy source**:
+A channel whose posts are read for proxy links, named by the owner by username, id
+or link.
+_Avoid_: proxy channel, feed
+

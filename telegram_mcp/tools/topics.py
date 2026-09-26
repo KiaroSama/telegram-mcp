@@ -30,7 +30,15 @@ from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Topics", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Topics",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def list_topics(
@@ -141,7 +149,11 @@ async def list_topics(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Enable Forum Topics", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Enable Forum Topics",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -184,7 +196,11 @@ async def enable_forum_topics(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Create Forum Topic", openWorldHint=True, destructiveHint=True
+        title="Create Forum Topic",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
     )
 )
 @with_account(readonly=False)
@@ -274,7 +290,11 @@ def _extract_created_topic_id(result) -> Optional[int]:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Edit Forum Topic", openWorldHint=True, destructiveHint=False, idempotentHint=True
+        title="Edit Forum Topic",
+        openWorldHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

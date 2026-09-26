@@ -23,6 +23,7 @@ and it says so plainly when the process that received one has since restarted.
 
 from typing import Optional, Union
 
+from telegram_mcp.safeguard import note_records
 from telegram_mcp import secret_history
 from telegram_mcp.file_roots import (
     _open_verified_directory,
@@ -65,7 +66,15 @@ def _live_message(manager, chat_id: int, message_id: int):
     return None
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Send Secret Message", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Send Secret Message",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 async def send_secret_message(
     chat_id: int,
@@ -115,7 +124,7 @@ async def send_secret_message(
         reply = reply_to(label, secret_id, reply_to_message_id)
 
         sent_id = await manager.send_message(secret_id, text, entities, reply_to=reply)
-        secret_history.record(
+        local_copy = secret_history.record_sent(
             label,
             secret_id,
             secret_history.entry(message_id=sent_id, is_outgoing=True, text=text),
@@ -127,6 +136,8 @@ async def send_secret_message(
             "message_id": sent_id,
             "self_destruct": "per the chat timer; see set_secret_chat_timer",
         }
+        if local_copy:
+            record["local_copy"] = local_copy
         if reply is not None:
             record["reply_to_message_id"] = reply
 
@@ -150,7 +161,15 @@ async def send_secret_message(
         )
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Send Secret Media", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Send Secret Media",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 async def send_secret_media(
     chat_id: int,
@@ -248,7 +267,7 @@ async def send_secret_media(
         sent_id = await manager.send_file(
             secret_id, path, caption=caption, kind=chosen, reply_to=reply
         )
-        secret_history.record(
+        local_copy = secret_history.record_sent(
             label,
             secret_id,
             secret_history.entry(message_id=sent_id, is_outgoing=True, text=caption, kind=chosen),
@@ -264,6 +283,8 @@ async def send_secret_media(
             "kind": chosen,
             "kind_chosen_by": "caller" if kind else "the file",
         }
+        if local_copy:
+            record["local_copy"] = local_copy
         if reply is not None:
             record["reply_to_message_id"] = reply
         return format_tool_result(record)
@@ -277,7 +298,11 @@ async def send_secret_media(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Read Secret Messages", openWorldHint=True, readOnlyHint=True
+        title="Read Secret Messages",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -312,6 +337,7 @@ async def read_secret_messages(chat_id: int, limit: int = 30, account: str = Non
         records = secret_history.read(label, secret_id, bound.value)
         if not records:
             return "No messages in this secret chat on this device."
+        note_records(label, chat_id, records)
         return format_tool_result({"messages": records, **bound.metadata})
     except ValueError as e:
         return str(e)
@@ -368,7 +394,13 @@ async def _keep_copy(manager, message, raw_destination, ctx):
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Save Secret Media", openWorldHint=True, readOnlyHint=False)
+    annotations=ToolAnnotations(
+        title="Save Secret Media",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=False)
 async def save_secret_media(

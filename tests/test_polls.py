@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from telegram_mcp.tools import messages_state
+from telegram_mcp.tools import poll_creation
 from telegram_mcp.tools import polls as mod
 from telegram_mcp.tools.polls import (
     _describe,
@@ -378,7 +378,7 @@ async def test_create_poll_reports_the_message_it_created(monkeypatch):
         async def __call__(self, request):
             return SimpleNamespace(updates=[SimpleNamespace(message=SimpleNamespace(id=4242))])
 
-    monkeypatch.setattr(messages_state, "get_client", lambda account=None: _Client())
+    monkeypatch.setattr(poll_creation, "get_client", lambda account=None: _Client())
 
     async def _ensure(_client):
         return None
@@ -386,10 +386,10 @@ async def test_create_poll_reports_the_message_it_created(monkeypatch):
     async def _resolve(chat_id, _client):
         return SimpleNamespace(id=chat_id)
 
-    monkeypatch.setattr(messages_state, "ensure_connected", _ensure, raising=False)
-    monkeypatch.setattr(messages_state, "resolve_entity", _resolve)
+    monkeypatch.setattr(poll_creation, "ensure_connected", _ensure, raising=False)
+    monkeypatch.setattr(poll_creation, "resolve_entity", _resolve)
 
-    payload = json.loads(await messages_state.create_poll("me", "probe?", ["a", "b"], account="a"))
+    payload = json.loads(await poll_creation.create_poll("me", "probe?", ["a", "b"], account="a"))
 
     assert payload["results"][0]["message_id"] == 4242
     assert payload["created"] is True
@@ -400,7 +400,7 @@ def test_create_poll_accepts_a_chat_reference_not_only_a_number():
     every neighbouring tool took Union[int, str]."""
     import inspect
 
-    annotation = inspect.signature(messages_state.create_poll).parameters["chat_id"].annotation
+    annotation = inspect.signature(poll_creation.create_poll).parameters["chat_id"].annotation
     assert annotation is not int, "chat_id is int-only again; 'me' and @usernames cannot be used"
 
 

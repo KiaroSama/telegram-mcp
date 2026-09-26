@@ -32,6 +32,7 @@ refusing to read the last copy in order to satisfy a rule about sending would be
 wrong trade.
 """
 
+from telegram_mcp.safeguard import note_records
 from telegram_mcp import secret_history
 from telegram_mcp.paging import LIMITS, bounded
 from telegram_mcp.runtime import *
@@ -88,7 +89,11 @@ _ACTIONS = (
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Secret Message", openWorldHint=True, destructiveHint=True
+        title="Delete Secret Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)
@@ -143,7 +148,11 @@ async def delete_secret_message(chat_id: int, message_id: int, account: str = No
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Clear Secret History", openWorldHint=True, destructiveHint=True
+        title="Clear Secret History",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)
@@ -203,7 +212,15 @@ async def clear_secret_history(chat_id: int, confirm_chat_id: int, account: str 
         )
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Mark Secret Read", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Mark Secret Read",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=False)
 async def mark_secret_read(chat_id: int, message_id: int = None, account: str = None) -> str:
     """
@@ -283,7 +300,15 @@ async def mark_secret_read(chat_id: int, message_id: int = None, account: str = 
         return describe_refusal(e) or log_and_format_error("mark_secret_read", e, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Send Secret Typing", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Send Secret Typing",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 async def send_secret_typing(chat_id: int, action: str = "typing", account: str = None) -> str:
     """
@@ -334,7 +359,11 @@ async def send_secret_typing(chat_id: int, action: str = "typing", account: str 
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Search Secret Messages", openWorldHint=True, readOnlyHint=True
+        title="Search Secret Messages",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -390,6 +419,7 @@ async def search_secret_messages(
         # `total_count` is every match, not the page - a caller deciding whether to
         # raise the limit needs to know what it is choosing between.
         page = matches[-bound.value :]
+        note_records(label, chat_id, page)
         return format_tool_result(
             {"messages": page, "total_count": len(matches), **bound.metadata}
         )
@@ -401,7 +431,15 @@ async def search_secret_messages(
         )
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Copy Into Secret Chat", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Copy Into Secret Chat",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 async def copy_into_secret_chat(
     from_chat_id: int, message_id: int, to_chat_id: int, account: str = None
@@ -451,7 +489,7 @@ async def copy_into_secret_chat(
                     "form at all. Nothing was sent."
                 )
             sent_id = await manager.send_message(secret_id, text, source.entities)
-            secret_history.record(
+            local_copy = secret_history.record_sent(
                 label,
                 secret_id,
                 secret_history.entry(message_id=sent_id, is_outgoing=True, text=text),
@@ -476,7 +514,7 @@ async def copy_into_secret_chat(
                 sent_id = await manager.send_file(secret_id, scratch, caption=text, kind=kind)
             finally:
                 scratch.unlink(missing_ok=True)
-            secret_history.record(
+            local_copy = secret_history.record_sent(
                 label,
                 secret_id,
                 secret_history.entry(message_id=sent_id, is_outgoing=True, text=text, kind=kind),
@@ -489,6 +527,8 @@ async def copy_into_secret_chat(
             "attribution": "none — the encrypted protocol carries no forwarding "
             "information, so it arrives as though you wrote it",
         }
+        if local_copy:
+            record["local_copy"] = local_copy
         if kind:
             record["kind"] = kind
         return format_tool_result(record)

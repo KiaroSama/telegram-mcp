@@ -48,7 +48,11 @@ def _custom_emoji(entities: list) -> list:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Inspect Custom Emoji", openWorldHint=True, readOnlyHint=True
+        title="Inspect Custom Emoji",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -121,6 +125,7 @@ async def inspect_custom_emoji(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)

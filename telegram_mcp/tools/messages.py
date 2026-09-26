@@ -203,7 +203,15 @@ async def _edit_rich(
     )
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Send As", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Send As",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
@@ -333,6 +341,7 @@ async def list_send_as(chat_id: Union[int, str], account: str = None) -> str:
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)
@@ -377,7 +386,13 @@ async def set_default_send_as(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Send Message", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Send Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id", "send_as")
@@ -498,7 +513,11 @@ async def send_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Edit Message", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Edit Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -562,7 +581,13 @@ async def edit_message(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Reply To Message", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Reply To Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id", "send_as")

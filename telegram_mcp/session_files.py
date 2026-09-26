@@ -259,6 +259,26 @@ def harden_env_file(path=None, restrict: Optional[Callable[[Any], bool]] = None)
         )
 
 
+def _last_working_route(label: str) -> tuple[Optional[Any], Optional[Any]]:
+    """The pool proxy this account last connected through, so a restart starts there.
+
+    Only when no ``TELEGRAM_PROXY_*`` is set: the configured proxy always comes first.
+    A recorded ``direct``/``env``, or a proxy since removed, starts the client as before;
+    the reconnect then walks the route order (spec 005) if that does not work.
+    """
+    from telegram_mcp import proxy_pool, proxy_route
+
+    try:
+        recorded = proxy_pool.route(label)
+        found = proxy_pool.get(recorded) if recorded not in (None, "direct", "env") else None
+    except Exception:
+        return None, None
+    if found is None:
+        return None, None
+    connection, argument = proxy_route.connection_for(found)
+    return argument, connection
+
+
 def _build_client(session: Any, label: str) -> TelegramClient:
     """Construct a ``TelegramClient`` honoring per-label proxy configuration.
 
@@ -274,6 +294,8 @@ def _build_client(session: Any, label: str) -> TelegramClient:
     else.
     """
     proxy, connection = _build_proxy_for_label(label)
+    if proxy is None:
+        proxy, connection = _last_working_route(label)
     kwargs: dict[str, Any] = {}
     if proxy is not None:
         kwargs["proxy"] = proxy

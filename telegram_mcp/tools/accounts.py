@@ -3,7 +3,15 @@
 from telegram_mcp.runtime import *
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Accounts", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Accounts",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def list_accounts() -> str:
     """List all configured Telegram accounts with profile info.
 

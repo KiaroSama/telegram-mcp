@@ -156,7 +156,11 @@ async def _capture_encoded(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="List Telegram Windows", openWorldHint=True, readOnlyHint=True
+        title="List Telegram Windows",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 async def list_telegram_windows(process_name: Optional[str] = None) -> str:
@@ -202,7 +206,13 @@ async def list_telegram_windows(process_name: Optional[str] = None) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Telegram Screen", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Telegram Screen",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 async def get_telegram_screen(
     hwnd: Optional[int] = None,
@@ -278,7 +288,13 @@ async def get_telegram_screen(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Telegram Region", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Telegram Region",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 async def get_telegram_region(
     left: int,
@@ -350,7 +366,13 @@ async def get_telegram_region(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Telegram Frames", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Telegram Frames",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 async def get_telegram_frames(
     count: int = 4,

@@ -364,15 +364,16 @@ class _RecordingClient:
 
 @pytest.fixture
 def _wire_messages(monkeypatch):
-    from telegram_mcp.tools import messages_read
+    from telegram_mcp.tools import message_search, messages_read
 
     client = _RecordingClient()
-    monkeypatch.setattr(messages_read, "get_client", lambda account=None: client)
 
     async def _resolve(chat_id, cl=None, account=None):
         return SimpleNamespace(id=chat_id)
 
-    monkeypatch.setattr(messages_read, "resolve_entity", _resolve)
+    for module in (messages_read, message_search):
+        monkeypatch.setattr(module, "get_client", lambda account=None: client)
+        monkeypatch.setattr(module, "resolve_entity", _resolve)
     return client
 
 
@@ -399,7 +400,7 @@ async def test_get_history_reports_what_was_asked_for_beside_what_was_served(_wi
 
 @pytest.mark.asyncio
 async def test_search_messages_asks_telegram_for_the_clamped_number(_wire_messages):
-    from telegram_mcp.tools.messages_read import search_messages
+    from telegram_mcp.tools.message_search import search_messages
 
     await search_messages(1, "q", limit=99999, account="probe")
 
@@ -411,6 +412,7 @@ def test_the_shared_rule_is_the_only_one_each_tool_applies():
     this one -- which is exactly how the limits ended up inconsistent."""
     import telegram_mcp.tools.chats
     import telegram_mcp.tools.inspection
+    import telegram_mcp.tools.message_search
     import telegram_mcp.tools.messages_read
     import telegram_mcp.tools.polls
     import telegram_mcp.tools.saved
@@ -418,6 +420,7 @@ def test_the_shared_rule_is_the_only_one_each_tool_applies():
     modules = (
         telegram_mcp.tools.chats,
         telegram_mcp.tools.inspection,
+        telegram_mcp.tools.message_search,
         telegram_mcp.tools.messages_read,
         telegram_mcp.tools.polls,
         telegram_mcp.tools.saved,

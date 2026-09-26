@@ -32,7 +32,15 @@ def _business_summary(full_user) -> Optional[dict]:
     return summary
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Me", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Me",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def get_me(account: str = None) -> str:
     """
@@ -64,7 +72,11 @@ async def get_me(account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Update Profile", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Update Profile",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -91,7 +103,11 @@ async def update_profile(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Profile Photo", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Set Profile Photo",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -139,7 +155,11 @@ async def set_profile_photo(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Profile Photo", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Delete Profile Photo",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -174,7 +194,13 @@ async def delete_profile_photo(bot: Union[int, str] = None, account: str = None)
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Full User", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Full User",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def get_full_user(username: Union[int, str], account: str = None) -> str:
@@ -293,7 +319,15 @@ async def get_full_user(username: Union[int, str], account: str = None) -> str:
         return log_and_format_error("get_full_user", e, username=username)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Bot Info", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Bot Info",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def get_bot_info(bot_username: str, account: str = None) -> str:
     """
@@ -333,7 +367,11 @@ async def get_bot_info(bot_username: str, account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Bot Commands", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Set Bot Commands",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -397,7 +435,13 @@ async def set_bot_commands(commands: list, account: str = None) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get User Photos", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get User Photos",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("user_id")
@@ -430,7 +474,13 @@ async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: st
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get User Status", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get User Status",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("user_id")
@@ -447,7 +497,13 @@ async def get_user_status(user_id: Union[int, str], account: str = None) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Bot Commands", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Bot Commands",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def get_bot_commands(account: str = None) -> str:

@@ -62,7 +62,13 @@ _UNTRUSTED = (
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Open Mini App", openWorldHint=True, readOnlyHint=False)
+    annotations=ToolAnnotations(
+        title="Open Mini App",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=False,
+    )
 )
 @with_account()
 async def open_mini_app(

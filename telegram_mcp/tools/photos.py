@@ -34,7 +34,15 @@ def _cap(max_bytes) -> int:
     return max(1, min(int(max_bytes), MAX_FRAME_SOURCE_BYTES))
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Photos", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Photos",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def list_photos(
@@ -88,7 +96,15 @@ async def list_photos(
         return log_and_format_error("list_photos", e)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Open Photo", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Open Photo",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def open_photo(
@@ -159,7 +175,13 @@ async def open_photo(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Photo Sheet", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Photo Sheet",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")

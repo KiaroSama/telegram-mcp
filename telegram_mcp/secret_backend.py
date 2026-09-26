@@ -20,7 +20,9 @@ shutdown is flushing races the flush for key material that cannot be recovered.
 """
 
 import asyncio
+import json
 import logging
+from pathlib import Path
 from typing import Dict, List, Tuple
 
 from telethon_secret_chat import FileStorage, SecretChatManager
@@ -37,6 +39,7 @@ from telethon_secret_chat.errors import (
 from telethon_secret_chat.schema import secret_tl
 
 from telegram_mcp import secret_history
+from telegram_mcp.alias_store import restrict_to_owner
 from telegram_mcp.safe_log import log_event
 from telegram_mcp.settings import state_dir
 
@@ -115,6 +118,77 @@ def _storage_for(account: str) -> FileStorage:
     return FileStorage(path)
 
 
+#: account -> the OS lock this process holds on that account's key store.
+_store_locks: Dict[str, object] = {}
+
+
+def _store_lock_dir() -> Path:
+    return state_dir() / "secret-chats"
+
+
+def _store_identity(account: str) -> str:
+    return f"secret-chat-store:{account}"
+
+
+async def _claim_store(account: str) -> None:
+    """Hold this account's key store for the life of the process, or refuse.
+
+    The session lock stops two processes sharing one SESSION; it does not stop two
+    logins of one account, under one label, sharing this folder. Two managers over
+    one store overwrite each other's keys, so the second process is refused.
+    Released by `close_all`, and by the OS if the process dies.
+    """
+    if account in _store_locks:
+        return
+    from telegram_mcp.singleton import SessionLock, SessionLockError
+
+    lock = SessionLock(_store_identity(account), lock_dir=_store_lock_dir())
+    try:
+        await asyncio.to_thread(lock.acquire, grace_seconds=2.0, poll_interval=0.2)
+    except SessionLockError:
+        raise SecretChatUnavailable(
+            account,
+            "another telegram-mcp process holds this account's secret-chat keys; stop "
+            "it first - two processes over one key store overwrite each other's keys",
+        ) from None
+    _store_locks[account] = lock
+
+
+def _owner_path(account: str) -> Path:
+    """Which Telegram account a label's key store was written for."""
+    return state_dir() / "secret-chats" / f"{account}.owner.json"
+
+
+async def _bind_store(account: str, client) -> None:
+    """Refuse a key store written for a different Telegram account.
+
+    The store is found by LABEL, and a label can be re-pointed at another account in
+    `.env`. Without this the new account would open - and try to decrypt with - the
+    old account's keys. A store with no record yet (every store written before this
+    check existed) is adopted by the account using it now.
+    """
+    me = await client.get_me(input_peer=True)
+    user_id = getattr(me, "user_id", None) or getattr(me, "id", None)
+    path = _owner_path(account)
+    if path.exists():
+        try:
+            recorded = json.loads(path.read_text(encoding="utf-8")).get("user_id")
+        except (OSError, ValueError, AttributeError):
+            recorded = None
+        if recorded is not None and user_id is not None and int(recorded) != int(user_id):
+            raise SecretChatUnavailable(
+                account,
+                "this label's secret-chat keys belong to a different Telegram account "
+                f"(user {recorded}, not {user_id}); move state/secret-chats/{account}* "
+                "aside or give this account its own label",
+            )
+        if recorded is not None:
+            return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"user_id": user_id}), encoding="utf-8")
+    restrict_to_owner(path)
+
+
 async def secret_manager(account: str) -> SecretChatManager:
     """The account's started secret-chat manager.
 
@@ -153,6 +227,8 @@ async def secret_manager(account: str) -> SecretChatManager:
             # stores for one conversation.
             await _stop(existing)
 
+        await _claim_store(account)
+        await _bind_store(account, client)
         manager = SecretChatManager(client, _storage_for(account))
         manager.on("ChatRequested", _accept_incoming(manager, account))
         manager.on("MessageReceived", _remember(account))
@@ -257,5 +333,11 @@ async def close_all() -> List[Tuple[str, BaseException]]:
             try:
                 await _stop(manager)
             except Exception as error:
+                # Keep the store's lock: its keys may still be flushing, and no
+                # other process may open them until this one is gone.
                 failures.append((account, error))
+                continue
+            lock = _store_locks.pop(account, None)
+            if lock is not None:
+                lock.release()
     return failures

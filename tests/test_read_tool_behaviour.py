@@ -527,7 +527,7 @@ async def test_search_global_reports_an_empty_page_as_empty(monkeypatch):
             self.calls.append((entity, kwargs))
             return []
 
-    from telegram_mcp.tools import messages_read as read_mod
+    from telegram_mcp.tools import message_search as read_mod
 
     async def _connected(cl=None):
         return None

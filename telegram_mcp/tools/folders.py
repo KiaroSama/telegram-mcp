@@ -40,7 +40,15 @@ def _folder_lock(account, folder_id) -> asyncio.Lock:
     return lock
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Folders", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Folders",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def list_folders(account: str = None) -> str:
     """
@@ -108,7 +116,15 @@ async def list_folders(account: str = None) -> str:
         return log_and_format_error("list_folders", e, ErrorCategory.FOLDER)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Folder", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Folder",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def get_folder(folder_id: int, account: str = None) -> str:
     """
@@ -219,7 +235,11 @@ async def get_folder(folder_id: int, account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Create Folder", openWorldHint=True, destructiveHint=True, idempotentHint=False
+        title="Create Folder",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=False,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -335,7 +355,11 @@ def _peer_key(peer, self_id: int) -> int:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Add Chat to Folder", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Add Chat to Folder",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -455,6 +479,7 @@ async def add_chat_to_folder(
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -568,7 +593,11 @@ async def remove_chat_from_folder(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Folder", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Delete Folder",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -614,7 +643,11 @@ async def delete_folder(folder_id: int, account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Reorder Folders", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Reorder Folders",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

@@ -23,7 +23,15 @@ __all__ = [
 ]
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Set Contact Alias", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set Contact Alias",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=False)
 async def set_contact_alias(
     alias: str, chat_id: str, replace: bool = False, account: Optional[str] = None
@@ -164,7 +172,15 @@ async def set_contact_alias(
         return log_and_format_error("set_contact_alias", e, alias=alias, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="List Contact Aliases", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="List Contact Aliases",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 @with_account(readonly=True)
 async def list_contact_aliases(account: Optional[str] = None) -> str:
     """
@@ -199,7 +215,15 @@ async def list_contact_aliases(account: Optional[str] = None) -> str:
         return log_and_format_error("list_contact_aliases", e)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Delete Contact Alias", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Delete Contact Alias",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=False)
 async def delete_contact_alias(alias: str, account: Optional[str] = None) -> str:
     """

@@ -38,6 +38,7 @@ from telegram_mcp.secret_common import (
     peer_title,
     to_secret_id,
 )
+from telegram_mcp.secret_compose import timer_lock
 from telegram_mcp.secret_limits import CAPABILITIES
 from telegram_mcp.settings import state_dir
 from telegram_mcp.runtime import *
@@ -64,7 +65,13 @@ async def _record_for(client, chat) -> dict:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Secret Chat Status", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Secret Chat Status",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def secret_chat_status(account: str = None) -> str:
@@ -118,7 +125,11 @@ async def secret_chat_status(account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Create Secret Chat", openWorldHint=True, destructiveHint=False
+        title="Create Secret Chat",
+        openWorldHint=True,
+        destructiveHint=False,
+        readOnlyHint=False,
+        idempotentHint=False,
     )
 )
 @with_account(readonly=False)
@@ -169,7 +180,13 @@ async def create_secret_chat(user_id: Union[int, str], account: str = None) -> s
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Secret Chats", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Secret Chats",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def list_secret_chats(account: str = None) -> str:
@@ -220,7 +237,15 @@ async def list_secret_chats(account: str = None) -> str:
 # the sender had asked otherwise - that is the whole of the ceremony.
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Set Secret Chat Timer", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Set Secret Chat Timer",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=False)
 async def set_secret_chat_timer(chat_id: int, seconds: int, account: str = None) -> str:
     """
@@ -239,7 +264,9 @@ async def set_secret_chat_timer(chat_id: int, seconds: int, account: str = None)
     try:
         label = _account_label(account)
         manager = await secret_manager(label)
-        await manager.set_ttl(to_secret_id(chat_id), int(seconds))
+        secret_id = to_secret_id(chat_id)
+        async with timer_lock(manager, secret_id):  # waits out a timed send in flight
+            await manager.set_ttl(secret_id, int(seconds))
         return format_tool_result(
             {
                 "chat_id": int(chat_id),
@@ -260,7 +287,11 @@ async def set_secret_chat_timer(chat_id: int, seconds: int, account: str = None)
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Close Secret Chat", openWorldHint=True, destructiveHint=True
+        title="Close Secret Chat",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)

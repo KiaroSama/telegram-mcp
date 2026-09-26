@@ -118,7 +118,11 @@ def _describe_ttl(msg) -> dict[str, Any]:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="List Disappearing Media", openWorldHint=True, readOnlyHint=True
+        title="List Disappearing Media",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -278,6 +282,7 @@ async def send_disappearing_media(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=False,
+        destructiveHint=False,
     )
 )
 @require_explicit_account

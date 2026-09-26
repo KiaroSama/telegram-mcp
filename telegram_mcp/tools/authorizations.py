@@ -93,7 +93,13 @@ def _no_such_hash(did_not: str) -> str:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Authorizations", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Authorizations",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def list_authorizations(account: str = None) -> str:
@@ -134,7 +140,11 @@ async def list_authorizations(account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Terminate Authorization", openWorldHint=True, destructiveHint=True
+        title="Terminate Authorization",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)
@@ -189,6 +199,7 @@ async def terminate_authorization(
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

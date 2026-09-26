@@ -22,6 +22,7 @@ from telegram_mcp.runtime import *
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -53,7 +54,11 @@ async def subscribe_public_channel(channel: Union[int, str], account: str = None
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Mute Chat", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Mute Chat",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -96,7 +101,11 @@ async def mute_chat(chat_id: Union[int, str], account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Unmute Chat", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Unmute Chat",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -139,7 +148,11 @@ async def unmute_chat(chat_id: Union[int, str], account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Archive Chat", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Archive Chat",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -164,7 +177,11 @@ async def archive_chat(chat_id: Union[int, str], account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Unarchive Chat", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Unarchive Chat",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

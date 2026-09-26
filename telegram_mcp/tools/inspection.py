@@ -124,7 +124,13 @@ def _title_matches_chat(window_title: str, entity) -> Optional[bool]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Inspect Message", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Inspect Message",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @require_explicit_account
 @with_account(readonly=True)
@@ -262,7 +268,13 @@ async def inspect_message(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Inspect Messages", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Inspect Messages",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")

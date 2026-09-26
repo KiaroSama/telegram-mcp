@@ -76,7 +76,15 @@ def _peek(handle) -> bytes:
         return b""
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Send File", openWorldHint=True, destructiveHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Send File",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
+)
 @with_account(readonly=False)
 @validate_id("chat_id", "send_as")
 async def send_file(
@@ -262,7 +270,13 @@ async def _send_album(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Send Album", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Send Album",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -309,7 +323,13 @@ async def send_album(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Download Media", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Download Media",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -507,7 +527,13 @@ async def download_media(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Send Voice", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Send Voice",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -559,7 +585,13 @@ async def send_voice(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Upload File", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Upload File",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 async def upload_file(file_path: str, ctx: Optional[Context] = None, account: str = None) -> str:
@@ -595,7 +627,13 @@ async def upload_file(file_path: str, ctx: Optional[Context] = None, account: st
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Media Info", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Media Info",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -631,7 +669,13 @@ async def get_media_info(chat_id: Union[int, str], message_id: int, account: str
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Send Sticker", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Send Sticker",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")

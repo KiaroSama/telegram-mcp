@@ -1,0 +1,5 @@
+# The safeguard kernel decides whether a tool call may touch the owner's Telegram
+# account. AI agents may not modify, move, rename, delete or weaken anything under
+# it unless the owner explicitly asked for that exact change in the current
+# conversation. Every change here needs the owner's own review.
+/telegram_mcp/safeguard/ @KiaroSama

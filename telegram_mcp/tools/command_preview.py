@@ -79,7 +79,13 @@ def _matches(command: str, prefix: Optional[str]) -> bool:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Chat Commands", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Chat Commands",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def list_chat_commands(

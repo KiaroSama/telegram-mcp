@@ -35,7 +35,15 @@ def _rendered(entry) -> str:
     return display_text(text if isinstance(text, str) else str(entry))
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Translate", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Translate",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def translate(
     to_language: str,

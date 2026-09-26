@@ -437,10 +437,10 @@ path. The work is not new TL, it is making the existing gate usable:
 
 1. ~~A tool that reports the current roots status and says exactly what to configure,
    so an agent hitting the gate can explain the fix instead of failing.~~ **done.**
-   Shipped as `get_file_roots_status`. It reports the status, the effective roots,
-   which mechanism supplied them, and the one concrete thing that changes it - and
-   a test asserts every status the resolver can return has advice written for it,
-   because a status with no advice reproduces the original problem one level up.
+   Shipped as `get_file_roots_status`. Since 2026-09-26 it reports the safeguard's
+   folder rule: the always-usable `files/outbox` and `files/downloads`, the folders
+   configured on the machine, the folders granted "always allow", and how any other
+   folder is reached (the owner's allow / deny / always allow).
 2. Bulk chat export: iterate a chat's history and write messages plus media to a
    directory under the roots. No TL beyond what is already used.
 3. History **import** is genuinely absent — `messages.InitHistoryImport`,

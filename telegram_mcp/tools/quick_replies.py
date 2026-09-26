@@ -90,6 +90,7 @@ async def _find(cl, shortcut_id: int) -> Optional[object]:
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=False,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -173,7 +174,13 @@ async def add_quick_reply(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Read Quick Reply", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Read Quick Reply",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def read_quick_reply(shortcut_id: int, account: str = None) -> str:
@@ -228,6 +235,7 @@ async def read_quick_reply(shortcut_id: int, account: str = None) -> str:
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)
@@ -306,6 +314,7 @@ async def edit_quick_reply(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)

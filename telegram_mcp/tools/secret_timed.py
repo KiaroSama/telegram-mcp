@@ -34,7 +34,7 @@ from telegram_mcp.file_roots import _resolve_readable_file_path
 from telegram_mcp.runtime import *
 from telegram_mcp.secret_backend import secret_manager
 from telegram_mcp.secret_common import account_label, describe_refusal, to_secret_id
-from telegram_mcp.secret_compose import formatted_text
+from telegram_mcp.secret_compose import formatted_text, timer_lock
 from telegram_mcp.secret_limits import require_ready_chat
 from telegram_mcp.secret_media_content import infer_kind, validate_kind
 
@@ -85,22 +85,25 @@ async def _send_under_timer(manager, chat_id: int, send, seconds: int):
     The ``finally`` covers what the except cannot: a cancellation between arming
     and sending.
     """
-    previous = await _previous_timer(manager, chat_id)
-    await manager.set_ttl(int(chat_id), int(seconds))
+    # The previous timer is read INSIDE the lock: read outside, it could be another
+    # timed send's temporary value, and restoring that leaves the chat armed.
+    async with timer_lock(manager, chat_id):
+        previous = await _previous_timer(manager, chat_id)
+        await manager.set_ttl(int(chat_id), int(seconds))
 
-    sent_id = None
-    send_error = None
-    restore_error = None
-    try:
+        sent_id = None
+        send_error = None
+        restore_error = None
         try:
-            sent_id = await send()
-        except Exception as exc:
-            send_error = exc
-    finally:
-        try:
-            await manager.set_ttl(int(chat_id), previous)
-        except Exception as exc:
-            restore_error = exc
+            try:
+                sent_id = await send()
+            except Exception as exc:
+                send_error = exc
+        finally:
+            try:
+                await manager.set_ttl(int(chat_id), previous)
+            except Exception as exc:
+                restore_error = exc
 
     return sent_id, send_error, restore_error, previous
 
@@ -158,7 +161,11 @@ def _result(chat_id, seconds, previous, sent_id, send_error, restore_error, extr
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Send Timed Secret Message", openWorldHint=True, destructiveHint=True
+        title="Send Timed Secret Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
     )
 )
 @with_account(readonly=False)
@@ -207,15 +214,17 @@ async def send_timed_secret_message(
         sent_id, send_error, restore_error, previous = await _send_under_timer(
             manager, secret_id, lambda: manager.send_message(secret_id, text, entities), seconds
         )
+        local_copy = None
         if sent_id is not None:
-            secret_history.record(
+            local_copy = secret_history.record_sent(
                 label,
                 secret_id,
                 secret_history.entry(
                     message_id=sent_id, is_outgoing=True, text=text, ttl=int(seconds)
                 ),
             )
-        return _result(chat_id, seconds, previous, sent_id, send_error, restore_error, {})
+        extra = {"local_copy": local_copy} if local_copy else {}
+        return _result(chat_id, seconds, previous, sent_id, send_error, restore_error, extra)
     except ValueError as e:
         return str(e)
     except KeyError:
@@ -228,7 +237,11 @@ async def send_timed_secret_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Send Timed Secret Media", openWorldHint=True, destructiveHint=True
+        title="Send Timed Secret Media",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
     )
 )
 @with_account(readonly=False)
@@ -292,8 +305,9 @@ async def send_timed_secret_media(
             lambda: manager.send_file(secret_id, path, caption=caption, kind=chosen),
             seconds,
         )
+        local_copy = None
         if sent_id is not None:
-            secret_history.record(
+            local_copy = secret_history.record_sent(
                 label,
                 secret_id,
                 secret_history.entry(
@@ -311,7 +325,11 @@ async def send_timed_secret_media(
             sent_id,
             send_error,
             restore_error,
-            {"kind": chosen, "kind_chosen_by": "caller" if kind else "the file"},
+            {
+                "kind": chosen,
+                "kind_chosen_by": "caller" if kind else "the file",
+                **({"local_copy": local_copy} if local_copy else {}),
+            },
         )
     except ValueError as e:
         return str(e)

@@ -211,7 +211,11 @@ async def _fetch_asset(cl, document, video_size, max_bytes: int):
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="List Message Effects", openWorldHint=True, readOnlyHint=True
+        title="List Message Effects",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @require_explicit_account
@@ -295,7 +299,13 @@ async def list_message_effects(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Message Effect", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Message Effect",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @require_explicit_account
 @with_account(readonly=True)

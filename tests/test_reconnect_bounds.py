@@ -168,3 +168,67 @@ async def test_the_timeout_message_carries_no_session_material():
     said = str(raised.value)
     assert "opening a new connection" in said
     assert "1A" not in said and "session=" not in said.lower()
+
+
+# --- the reconnect goes through the account's route (spec 005, FR-004/FR-005) -------------
+
+
+@pytest.fixture
+def routed(monkeypatch):
+    from telegram_mcp import connection, proxy_route
+
+    calls = []
+    client = _Client()
+
+    async def _connect(cl, label, remaining):
+        calls.append((cl, label, remaining))
+        cl.connected = True
+        return "direct"
+
+    monkeypatch.setattr(mod, "_RECONNECT_TIMEOUT", 5.0)
+    monkeypatch.setattr(connection, "clients", {"main": client})
+    monkeypatch.setattr(proxy_route, "connect", _connect)
+    return client, calls
+
+
+def test_a_known_account_reconnects_through_its_route_within_the_same_deadline(routed):
+    client, calls = routed
+    asyncio.run(mod._force_reconnect(client))
+    assert [(c, label) for c, label, _ in calls] == [(client, "main")]
+    assert 0 < calls[0][2] <= 5.0
+
+
+def test_a_routed_reconnect_still_refuses_interactive_login(routed):
+    client, calls = routed
+    client.authorized = False
+    with pytest.raises(StartupMessage, match="no longer authorized"):
+        asyncio.run(mod._force_reconnect(client))
+    assert calls
+
+
+def test_when_no_route_works_the_answer_names_them(routed, monkeypatch):
+    from telegram_mcp import proxy_route
+
+    client, _ = routed
+
+    async def _none(cl, label, remaining):
+        raise proxy_route.NoRoute("No route to Telegram works. Tried: direct: refused")
+
+    monkeypatch.setattr(proxy_route, "connect", _none)
+    with pytest.raises(StartupMessage, match="Tried: direct: refused"):
+        asyncio.run(mod._force_reconnect(client))
+
+
+def test_a_client_that_belongs_to_no_account_connects_as_before(monkeypatch):
+    from telegram_mcp import connection, proxy_route
+
+    monkeypatch.setattr(connection, "clients", {})
+
+    async def _never(*args):
+        raise AssertionError("an unknown client must not be routed")
+
+    monkeypatch.setattr(proxy_route, "connect", _never)
+    client = _Client()
+    monkeypatch.setattr(mod, "_RECONNECT_TIMEOUT", 5.0)
+    asyncio.run(mod._force_reconnect(client))
+    assert client.connected

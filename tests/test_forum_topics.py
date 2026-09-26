@@ -192,6 +192,7 @@ def test_every_message_reader_separates_the_topic_from_the_reply():
 
     from telegram_mcp.tools import messages as messages_mod
     from telegram_mcp.tools import messages_queue as queue_mod
+    from telegram_mcp.tools import message_search as search_mod
     from telegram_mcp.tools import messages_read as read_mod
     from telegram_mcp.tools import messages_view as view_mod
 
@@ -200,7 +201,7 @@ def test_every_message_reader_separates_the_topic_from_the_reply():
     # tools left behind in `messages` write messages and read no reply target at
     # all - demanding the name there would only buy a vestigial import, which is
     # how a guard gets loosened instead of read.
-    readers = (read_mod, view_mod, queue_mod)
+    readers = (read_mod, search_mod, view_mod, queue_mod)
 
     for module in readers + (messages_mod,):
         source = inspect.getsource(module)

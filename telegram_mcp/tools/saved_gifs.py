@@ -111,7 +111,13 @@ def _as_input(document) -> InputDocument:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Saved Gifs", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Saved Gifs",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def list_saved_gifs(account: str = None) -> str:
@@ -145,6 +151,7 @@ async def list_saved_gifs(account: str = None) -> str:
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)

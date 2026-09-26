@@ -21,9 +21,10 @@ CHATS = {
     "resolve_username",
     "get_full_chat",
     "get_common_chats",
-    "get_message_read_by",
     "get_message_link",
 }
+# Moved out later with mark_as_read, when chats.py passed the 800-line ceiling.
+READ_RECEIPTS = {"get_message_read_by"}
 TOPICS = {"list_topics", "enable_forum_topics", "create_forum_topic"}
 CHAT_STATE = {
     "subscribe_public_channel",
@@ -40,7 +41,7 @@ def _module(name):
 
 def test_the_split_partitions_the_original_seventeen_tools():
     """Every tool chats.py used to own still exists, in exactly one of the three
-    modules. 9 + 3 + 5 == 17, and the three sets are disjoint.
+    modules. 8 + 3 + 5 + 1 == 17, and the sets are disjoint.
 
     Each module's `__all__` must CONTAIN its share, not equal it: these modules
     are allowed to grow. `edit_forum_topic` was the first addition, and pinning
@@ -50,7 +51,12 @@ def test_the_split_partitions_the_original_seventeen_tools():
     What still fails here is what the split could actually get wrong: a tool that
     went missing, stopped being callable, or drifted into a second module.
     """
-    homes = {"chats": CHATS, "topics": TOPICS, "chat_state": CHAT_STATE}
+    homes = {
+        "chats": CHATS,
+        "topics": TOPICS,
+        "chat_state": CHAT_STATE,
+        "read_receipts": READ_RECEIPTS,
+    }
     seen: dict[str, str] = {}
 
     for name, expected in homes.items():
@@ -65,7 +71,7 @@ def test_the_split_partitions_the_original_seventeen_tools():
         for tool in expected:
             assert callable(getattr(module, tool)), f"{name}.{tool} is not callable"
 
-        # Any tool, original or added later, must live in exactly one of the three.
+        # Any tool, original or added later, must live in exactly one module.
         for tool in exported:
             assert tool not in seen, (
                 f"{tool} is exported by both {seen[tool]} and {name}; the star "
@@ -73,7 +79,7 @@ def test_the_split_partitions_the_original_seventeen_tools():
             )
             seen[tool] = name
 
-    assert len(CHATS | TOPICS | CHAT_STATE) == 17
+    assert len(CHATS | TOPICS | CHAT_STATE | READ_RECEIPTS) == 17
     assert not (CHATS & TOPICS), CHATS & TOPICS
     assert not (CHATS & CHAT_STATE), CHATS & CHAT_STATE
     assert not (TOPICS & CHAT_STATE), TOPICS & CHAT_STATE

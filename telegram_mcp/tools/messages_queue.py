@@ -27,6 +27,7 @@ from telegram_mcp.tools.scheduled import (
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=False,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -59,7 +60,11 @@ async def send_scheduled_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Get Scheduled Messages", openWorldHint=True, readOnlyHint=True
+        title="Get Scheduled Messages",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -83,7 +88,11 @@ async def get_scheduled_messages(chat_id: Union[int, str], account: str = None) 
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Scheduled Message", openWorldHint=True, destructiveHint=True
+        title="Delete Scheduled Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=False)
@@ -107,7 +116,11 @@ async def delete_scheduled_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Save Draft", openWorldHint=True, destructiveHint=False, idempotentHint=True
+        title="Save Draft",
+        openWorldHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -153,7 +166,15 @@ async def save_draft(
         return log_and_format_error("save_draft", e, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Drafts", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Drafts",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 async def get_drafts(account: str = None) -> str:
     """
@@ -217,7 +238,11 @@ async def get_drafts(account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Clear Draft", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Clear Draft",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

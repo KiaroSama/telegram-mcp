@@ -89,7 +89,13 @@ def _parse_invite_hash(link: str) -> tuple:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Invite Link", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Invite Link",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -220,7 +226,11 @@ async def _redeem_invite(tool_name: str, invite_hash: str, account: str) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Import Chat Invite", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Import Chat Invite",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -248,7 +258,11 @@ async def import_chat_invite(hash: str, account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Join Chat By Link", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Join Chat By Link",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

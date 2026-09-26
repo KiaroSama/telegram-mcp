@@ -20,6 +20,7 @@ from telethon.errors import AuthKeyDuplicatedError, RPCError
 from telegram_mcp.safe_log import log_event
 from telegram_mcp.settings import StartupMessage
 from telegram_mcp import admission as _admission
+from telegram_mcp import proxy_route
 
 _last_conn_verified: dict[int, float] = {}
 _RECONNECT_LOCKS: dict[int, asyncio.Lock] = {}
@@ -55,7 +56,7 @@ async def _force_reconnect(cl: TelegramClient):
     # outside the budget that claimed to cover the reconnect.
     phase = "waiting for another reconnect to finish"
     try:
-        async with asyncio.timeout(_RECONNECT_TIMEOUT):
+        async with asyncio.timeout(_RECONNECT_TIMEOUT) as budget:
             async with _RECONNECT_LOCKS.setdefault(key, asyncio.Lock()):
                 phase = "re-checking the connection"
                 if cl.is_connected() and time.time() - _last_conn_verified.get(key, 0.0) < (
@@ -69,9 +70,11 @@ async def _force_reconnect(cl: TelegramClient):
                 except Exception:
                     pass
                 phase = "opening a new connection"
-                await cl.connect()
+                await _open(cl, budget)
                 phase = "checking that the session is still authorized"
                 await _after_connect(cl, key)
+    except proxy_route.NoRoute as exc:
+        raise StartupMessage(str(exc)) from exc
     except AuthKeyDuplicatedError as exc:
         # Telegram permanently invalidates an auth key used from two IPs at
         # once, so retrying here can never succeed — surface it instead of
@@ -85,6 +88,30 @@ async def _force_reconnect(cl: TelegramClient):
             f"Reconnecting to Telegram timed out after {_RECONNECT_TIMEOUT:.0f}s "
             f"while {phase}."
         ) from exc
+
+
+def _label_of(cl: TelegramClient):
+    """The account this client serves, or None for a client from nowhere."""
+    from telegram_mcp.connection import clients
+
+    for label, candidate in clients.items():
+        if candidate is cl:
+            return label
+    return None
+
+
+async def _open(cl: TelegramClient, budget) -> None:
+    """Connect over the account's route (spec 005): env proxy, direct, then the pool.
+
+    Inside the ONE deadline this reconnect already has - what is left of it, not a new
+    one. A client that belongs to no account connects exactly as it always did.
+    """
+    label = _label_of(cl)
+    if label is None:
+        await cl.connect()
+        return
+    remaining = budget.when() - asyncio.get_running_loop().time()
+    await proxy_route.connect(cl, label, max(remaining, 0.0))
 
 
 async def _after_connect(cl: TelegramClient, key: int) -> None:

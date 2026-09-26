@@ -213,7 +213,13 @@ def _describe_story(story, max_read_id: int = 0) -> dict[str, Any]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="List Peer Stories", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="List Peer Stories",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -268,7 +274,15 @@ async def list_peer_stories(
         return log_and_format_error("list_peer_stories", e, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Get Stories", openWorldHint=True, readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Get Stories",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 @with_account(readonly=True)
 @validate_id("chat_id")
 async def get_stories(
@@ -331,7 +345,11 @@ async def get_stories(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="React To Story", openWorldHint=True, readOnlyHint=False, idempotentHint=True
+        title="React To Story",
+        openWorldHint=True,
+        readOnlyHint=False,
+        idempotentHint=True,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -425,7 +443,11 @@ async def react_to_story(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Post Story", openWorldHint=True, readOnlyHint=False, idempotentHint=False
+        title="Post Story",
+        openWorldHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -545,7 +567,11 @@ async def post_story(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Story", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Delete Story",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

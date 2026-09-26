@@ -152,7 +152,13 @@ def _correct_answers(poll, results):
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Poll Results", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Poll Results",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -199,7 +205,13 @@ async def get_poll_results(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Vote In Poll", openWorldHint=True, readOnlyHint=False)
+    annotations=ToolAnnotations(
+        title="Vote In Poll",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=False)
 @validate_id("chat_id")
@@ -287,7 +299,13 @@ async def vote_in_poll(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Poll Voters", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Poll Voters",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 @validate_id("chat_id")
@@ -414,7 +432,11 @@ async def get_poll_voters(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Close Poll", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Close Poll",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

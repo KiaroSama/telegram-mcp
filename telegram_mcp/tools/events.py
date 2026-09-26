@@ -368,7 +368,11 @@ def _on_clients_changed(added: set, removed: set) -> None:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Wait For New Message", openWorldHint=True, readOnlyHint=True
+        title="Wait For New Message",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 async def wait_for_new_message(
@@ -483,7 +487,11 @@ async def wait_for_new_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Wait For Settled Message", openWorldHint=True, readOnlyHint=True
+        title="Wait For Settled Message",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 async def wait_for_settled_message(
@@ -562,7 +570,15 @@ async def wait_for_settled_message(
         return log_and_format_error("wait_for_settled_message", e, chat_id=chat_id)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Enable Incoming Feed", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Enable Incoming Feed",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
+)
 async def enable_incoming_feed(settle_ms: int = 6000) -> str:
     """
     CLAUDE CODE ONLY. Enable callback mode: a background task appends every
@@ -613,7 +629,15 @@ async def enable_incoming_feed(settle_ms: int = 6000) -> str:
         return log_and_format_error("enable_incoming_feed", e)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Disable Incoming Feed", openWorldHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Disable Incoming Feed",
+        openWorldHint=True,
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+    )
+)
 async def disable_incoming_feed() -> str:
     """Disable the incoming event feed (stops writing to the feed file)."""
     try:
@@ -635,7 +659,15 @@ async def disable_incoming_feed() -> str:
         return log_and_format_error("disable_incoming_feed", e)
 
 
-@mcp.tool(annotations=ToolAnnotations(title="Incoming Feed Status", readOnlyHint=True))
+@mcp.tool(
+    annotations=ToolAnnotations(
+        title="Incoming Feed Status",
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=False,
+    )
+)
 async def incoming_feed_status() -> str:
     """Report whether the incoming event feed is enabled, its file path, and
     the watch command for waking an agent per event."""

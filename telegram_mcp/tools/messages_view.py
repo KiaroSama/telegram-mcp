@@ -18,6 +18,7 @@ which re-exports these names so the path every existing caller imports them from
 keeps resolving.
 """
 
+from telegram_mcp.safeguard import note_rendered
 from telegram_mcp.runtime import *
 
 from telegram_mcp.forum import reply_target_of
@@ -190,6 +191,7 @@ def message_to_dict(msg) -> dict:
     if getattr(msg, "out", False):
         d["out"] = True
 
+    note_rendered(msg)
     text = sanitize_user_content(msg.message) if getattr(msg, "message", None) else ""
     if text:
         d["text"] = text
@@ -362,6 +364,7 @@ def format_message_line(msg) -> str:
     if engagement_info:
         parts.append(engagement_info)
 
+    note_rendered(msg)
     raw = sanitize_user_content(msg.message) if getattr(msg, "message", None) else ""
     safe_text = raw.replace("\n", "\\n") if raw else "[empty]"
     return " | ".join(parts) + f" | Message: {safe_text}"

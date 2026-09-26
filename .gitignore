@@ -247,3 +247,6 @@ incoming_feed.jsonl
 
 # Local shortcut to the upstream repository (user-created).
 /Original Repository.url
+
+# Files the server sends from and saves to (files/outbox, files/downloads)
+/files/

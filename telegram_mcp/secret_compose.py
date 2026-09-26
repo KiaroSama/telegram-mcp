@@ -15,14 +15,15 @@ this login never received would arrive as an ordinary message with no error and 
 warning. A reply that is not a reply is the silent loss this step exists to refuse.
 """
 
-from typing import Optional
+import asyncio
+from typing import Any, Dict, Optional, Tuple
 
 from telethon import utils as telethon_utils
 
 from telegram_mcp import secret_history
 from telegram_mcp.secret_limits import dropped_entities, secret_chat_layer
 
-__all__ = ["dropped_note", "formatted_text", "reply_to"]
+__all__ = ["dropped_note", "formatted_text", "reply_to", "timer_lock"]
 
 
 def formatted_text(message: str, parse_mode: Optional[str]):
@@ -77,3 +78,22 @@ async def dropped_note(manager, chat_id: int, entities) -> list:
         return []
     layer = await secret_chat_layer(manager, int(chat_id))
     return dropped_entities(entities, layer)
+
+
+_timer_locks: Dict[Tuple[int, int, int], asyncio.Lock] = {}
+
+
+def timer_lock(manager: Any, chat_id: int) -> asyncio.Lock:
+    """The one lock every change to a chat's self-destruct timer goes through.
+
+    A timed send reads the timer, arms it, sends and puts the old value back. Two of
+    those overlapping, or an owner's ``set_secret_chat_timer`` landing in the middle,
+    each read a value the other was about to replace - and the chat was left armed
+    (ADR 0002). Keyed by the account's manager and the chat, and by the running loop,
+    because an asyncio lock belongs to the loop it was first used on.
+    """
+    key = (id(manager), int(chat_id), id(asyncio.get_running_loop()))
+    lock = _timer_locks.get(key)
+    if lock is None:
+        lock = _timer_locks[key] = asyncio.Lock()
+    return lock

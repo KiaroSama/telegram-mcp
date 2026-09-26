@@ -47,7 +47,13 @@ async def _album_batch(cl, entity, message_id, expand: bool):
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Forward Message", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Forward Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("from_chat_id", "to_chat_id", "send_as")
@@ -155,7 +161,13 @@ async def forward_message(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Copy Message", openWorldHint=True, destructiveHint=True)
+    annotations=ToolAnnotations(
+        title="Copy Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
+    )
 )
 @with_account(readonly=False)
 @validate_id("from_chat_id", "to_chat_id")
@@ -293,7 +305,11 @@ async def copy_message(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Forward Messages (batch)", openWorldHint=True, destructiveHint=True
+        title="Forward Messages (batch)",
+        openWorldHint=True,
+        destructiveHint=True,
+        readOnlyHint=False,
+        idempotentHint=False,
     )
 )
 @with_account(readonly=False)

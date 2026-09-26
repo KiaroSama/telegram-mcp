@@ -109,7 +109,11 @@ _DELETE_HISTORY_DEADLINE_SECONDS = 60.0
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Delete Message", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Delete Message",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -187,6 +191,7 @@ async def delete_message(
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=False,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)
@@ -314,6 +319,7 @@ async def delete_chat_history(
         openWorldHint=True,
         destructiveHint=True,
         idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

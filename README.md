@@ -6,6 +6,7 @@
 [![Licence: GPL-3.0-or-later](https://img.shields.io/badge/licence-GPL--3.0--or--later-blue?style=flat-square)](LICENSE)
 [![Tests](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/tests.yml)
 [![Python Lint & Format Check](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml/badge.svg)](https://github.com/KiaroSama/telegram-mcp/actions/workflows/python-lint-format.yml)
+[![Python 3.11 | 3.12 | 3.13 | 3.14](https://img.shields.io/badge/python-3.11%20%7C%203.12%20%7C%203.13%20%7C%203.14-blue?style=flat-square)](.github/workflows/tests.yml)
 [![M8ven Score](https://m8ven.ai/badge/mcp/kiarosama-telegram-mcp-1sxyic)](https://m8ven.ai/mcp/kiarosama-telegram-mcp-1sxyic)
 
 Drive a **real Telegram account** from an MCP client. Not a bot account — your account, with
@@ -57,6 +58,7 @@ answered* and *the answer is true* — and that gap is where an agent quietly ge
   - [Content types beyond plain messages](#content-types-beyond-plain-messages)
   - [Message Links](#message-links)
 - [Safety](#safety)
+  - [Safeguard and ghost mode](docs/INSTALL.md#the-safeguard)
   - [File Path Security](#file-path-security)
   - [Security Notes](#security-notes)
 - [Development](#development)
@@ -239,6 +241,9 @@ An override that is not a usable number — zero, negative, `nan`, `inf`, or not
 - Optional: [uv](https://docs.astral.sh/uv/) for local development
 
 ## Quick Start
+
+**Step by step, for a person or an AI agent doing the setup:** [docs/INSTALL.md](docs/INSTALL.md).
+**Every tool, with what the safeguard does to it:** [docs/COMMANDS.md](docs/COMMANDS.md).
 
 > Do not install this server with `uvx telegram-mcp`, `uvx --from telegram-mcp`,
 > or `pip install telegram-mcp`. The `telegram-mcp` name on PyPI is currently
@@ -705,8 +710,11 @@ MTProxy:
 TELEGRAM_PROXY_TYPE=mtproxy
 TELEGRAM_PROXY_HOST=mtproxy.example
 TELEGRAM_PROXY_PORT=443
-TELEGRAM_PROXY_SECRET=ee0123456789abcdef...
+TELEGRAM_PROXY_SECRET=dd0123456789abcdef0123456789abcdef
 ```
+
+A FakeTLS (`ee`) proxy works through the proxy pool below; the single `.env` proxy
+passes its secret to Telethon unchanged, as it always has.
 
 Per-account overrides use the same `_<LABEL>` suffix as session variables and
 take precedence over the unsuffixed defaults:
@@ -726,52 +734,47 @@ missing MTProxy secret, or a missing `python-socks` package) cause the server
 to fail fast at startup with a clear error message instead of silently
 bypassing the proxy.
 
+### Proxy pool and failover
+
+Beyond the one `.env` proxy, the server keeps a pool: add proxies from links, a
+pasted list or a proxy channel (`add_proxies`), test them (`test_proxies`), prune
+them (`remove_proxies`), and see each account's route (`get_connection_route`).
+An account tries the `.env` proxy, then direct, then the pool fastest first, and
+moves to the next one on its own when the proxy in use dies. MTProto plain, `dd`
+and FakeTLS (`ee`), SOCKS5/4 and HTTP are supported; secrets never appear in an
+answer or a log. Details: [docs/INSTALL.md](docs/INSTALL.md#proxies).
+
 ## File Path Security
 
-File-path tools are disabled until allowed roots are configured. This affects tools such as `send_file`, `download_media`, `upload_file`, `send_voice`, `send_sticker`, `set_profile_photo`, and `edit_chat_photo`.
+File tools (`send_file`, `download_media`, `upload_file`, `send_voice`, `send_sticker`,
+`set_profile_photo`, `edit_chat_photo`, and the rest) go through the safeguard's folder
+rule first ([docs/INSTALL.md](docs/INSTALL.md#the-safeguard)):
 
-Allowed roots can come from any of three places:
+- `files/outbox` (to send from) and `files/downloads` (to save into) in the
+  installation are always usable; they are created on first use and git-ignored.
+- Folders you configure on your machine count as always allowed:
+  `TELEGRAM_FILE_ROOTS`, a list separated by this OS's path separator (`;` on
+  Windows, `:` elsewhere), or the server's command-line arguments. Command line
+  first, so it stays the explicit override.
+- Any other folder - the MCP client's own roots included - is usable only after you
+  answer *allow*, *deny* or *always allow*, for reading and writing alike.
+- The rest of the installation (code, `.env`, `secrets.md`) and the server's state
+  directory are never reachable through a tool.
 
-- `TELEGRAM_FILE_ROOTS`, a list separated by this OS's path separator (`;` on
-  Windows, `:` elsewhere). Usually the easiest, because an MCP client
-  configuration has an `env` block and supplies its own argv.
-- Server CLI arguments, used as a fallback.
-- MCP client Roots, when supported by the client.
-
-The environment variable and the command line are the same allow-list and get the
-same validation - a root that does not exist stops the server either way. Command
-line first, so it stays the explicit override.
-
-**A root added to the file takes effect without a restart.** The file is re-read
-on the path every file tool passes through, so allowing a new folder is an edit to
-the configuration rather than a restart. Three things keep that safe: nothing is
-rebuilt when nothing was edited; a file that cannot be read at that moment - one
-mid-rewrite - leaves the current roots exactly as they are rather than refusing an
-operation that was already permitted; and a root named in the file that does not
-exist is skipped with a warning instead of taking the working ones down with it. A
-value the PROCESS supplied still wins over the file, the same way `load_dotenv`
-does not override one.
+**A root added to `TELEGRAM_FILE_ROOTS` in `.env` takes effect without a restart.**
+The file is re-read on the path every file tool passes through. Nothing is rebuilt
+when nothing was edited; a file that cannot be read at that moment leaves the current
+roots as they are; and a root that does not exist is skipped with a warning. A value
+the PROCESS supplied still wins over the file, the same way `load_dotenv` does not
+override one.
 
 Security behavior:
 
-- Client MCP Roots replace server CLI roots when available.
-- Some clients (notably Cursor) return workspace roots as bare absolute paths
-  instead of `file://` URIs. That breaks MCP SDK validation of `list_roots`;
-  the server recovers those absolute paths from the validation error so
-  file-path tools keep working.
-- Empty client Roots are treated as deny-all by default. Some clients implement
-  the Roots capability but advertise an empty list, which disables file tools
-  even when server CLI roots are configured. Set
-  `TELEGRAM_ALLOW_SERVER_ROOTS_FALLBACK=1` to fall back to the server CLI roots
-  in that case (opt-in; the default stays deny-all). The same opt-in also applies
-  when `list_roots` fails unexpectedly and no client paths could be recovered.
-- A client that accepts the roots request and never answers it counts as such a
-  failure. The server waits ten seconds, not indefinitely, so a silent client
-  disables file tools rather than wedging every call that needs a path.
-- Paths are resolved through real paths and must stay inside an allowed root.
+- Paths are resolved through real paths and must stay inside an allowed folder.
 - Traversal, wildcard-like, shell-like, and null-byte path patterns are rejected.
-- Relative paths resolve under the first allowed root.
-- Downloads default to `<first_root>/downloads/`.
+- Relative paths resolve under the installation's `files/` folder, in the safeguard
+  and in the tool alike, so the folder you are asked about is the one that is opened.
+- Downloads with no path go to `files/downloads/`.
 - Size and extension limits are enforced for sensitive media tools.
 
 Run with allowed roots, either way:
@@ -1044,6 +1047,12 @@ uv run flake8 .
   If `TELEGRAM_PROXY_*` is configured, Telegram traffic is routed through the
   configured SOCKS/HTTP/MTProxy proxy instead.
 - User-generated Telegram content is sanitized before being returned to MCP clients.
+- **Safeguard.** Risky tool calls (deleting, leaving, banning, sessions, profile and
+  privacy, invite joins, bulk sends, a first message to a stranger, and any write that
+  carries text from someone else's message) wait for the owner's approval in a channel
+  the model cannot answer. **Ghost mode**, on by default, sends no read markers or other
+  seen signals. See [docs/INSTALL.md](docs/INSTALL.md#the-safeguard). AI agents may not
+  edit `telegram_mcp/safeguard/` unless the owner explicitly asks for that change.
 
 ### Prompt Injection Protection
 

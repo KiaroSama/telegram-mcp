@@ -123,7 +123,11 @@ def _describe_privacy_rule(rule) -> dict:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Get Privacy Settings", openWorldHint=True, readOnlyHint=True
+        title="Get Privacy Settings",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -169,7 +173,11 @@ async def get_privacy_settings(key: str = "status", account: str = None) -> str:
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Set Privacy Settings", openWorldHint=True, destructiveHint=True, idempotentHint=True
+        title="Set Privacy Settings",
+        openWorldHint=True,
+        destructiveHint=True,
+        idempotentHint=True,
+        readOnlyHint=False,
     )
 )
 @with_account(readonly=False)

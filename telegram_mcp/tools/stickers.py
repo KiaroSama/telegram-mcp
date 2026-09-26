@@ -113,7 +113,13 @@ def _describe_set(result) -> dict[str, Any]:
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Inspect Sticker Set", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Inspect Sticker Set",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def inspect_sticker_set(
@@ -197,7 +203,11 @@ async def inspect_sticker_set(
 
 @mcp.tool(
     annotations=ToolAnnotations(
-        title="Suggest Sticker Set Name", openWorldHint=True, readOnlyHint=True
+        title="Suggest Sticker Set Name",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
     )
 )
 @with_account(readonly=True)
@@ -372,6 +382,7 @@ async def remove_sticker_from_set(document_id: int, access_hash: int, account: s
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=True,
     )
 )
 @with_account(readonly=False)
@@ -425,6 +436,7 @@ async def move_sticker_in_set(
         openWorldHint=True,
         readOnlyHint=False,
         idempotentHint=True,
+        destructiveHint=False,
     )
 )
 @with_account(readonly=False)
@@ -580,7 +592,13 @@ async def uninstall_sticker_set(
 
 
 @mcp.tool(
-    annotations=ToolAnnotations(title="Get Sticker Sets", openWorldHint=True, readOnlyHint=True)
+    annotations=ToolAnnotations(
+        title="Get Sticker Sets",
+        openWorldHint=True,
+        readOnlyHint=True,
+        destructiveHint=False,
+        idempotentHint=True,
+    )
 )
 @with_account(readonly=True)
 async def get_sticker_sets(kind: str = "stickers", account: str = None) -> str:
