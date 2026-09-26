@@ -101,6 +101,17 @@ async def update_profile(
         )
 
 
+async def _photos_of(cl, target, limit: int) -> list:
+    """The photo history of `target` (an owned bot), or of the account itself, newest first."""
+    # ponytail: one page of up to 100; a delete by id further back says "not found".
+    photos = await cl(
+        functions.photos.GetUserPhotosRequest(
+            user_id=target if target is not None else "me", offset=0, max_id=0, limit=limit
+        )
+    )
+    return list(photos.photos)
+
+
 @mcp.tool(
     annotations=ToolAnnotations(
         title="Set Profile Photo",
@@ -115,6 +126,7 @@ async def update_profile(
 async def set_profile_photo(
     file_path: str,
     bot: Union[int, str] = None,
+    replace: bool = False,
     ctx: Optional[Context] = None,
     account: str = None,
 ) -> str:
@@ -128,6 +140,9 @@ async def set_profile_photo(
         file_path: Image to upload.
         bot: A bot this account owns (ID or @username). Omit for your own
             profile. Telegram refuses a bot you do not own.
+        replace: Also delete the photo this one replaces. Nothing is deleted
+            until the new photo is set; without it the old one stays in the
+            photo history.
     """
     try:
         cl = get_client(account)
@@ -138,6 +153,7 @@ async def set_profile_photo(
             if path_error:
                 return path_error
             target = await resolve_input_entity(bot, cl) if bot is not None else None
+            previous = (await _photos_of(cl, target, 1))[:1] if replace else []
             uploaded = await cl.upload_file(source.handle)
             # `bot=` omitted entirely rather than passed as None: the flag is
             # what tells Telegram whose photo this is, and a present-but-empty
@@ -148,7 +164,21 @@ async def set_profile_photo(
                 )
             )
             whose = f"Bot {bot}" if bot is not None else "Profile"
-            return f"{whose} photo updated from {source.path}."
+            if not previous:
+                return f"{whose} photo updated from {source.path}."
+            old = previous[0].id
+            try:
+                removed = old in await cl(functions.photos.DeletePhotosRequest(id=previous))
+            except Exception as e:
+                return (
+                    f"{whose} photo set from {source.path}; previous photo {old} not removed: {e}."
+                )
+            if not removed:
+                return (
+                    f"{whose} photo set from {source.path}; previous photo {old} not removed "
+                    "(Telegram deleted nothing)."
+                )
+            return f"{whose} photo replaced from {source.path}; previous photo {old} deleted."
     except Exception as e:
         return log_and_format_error("set_profile_photo", e, file_path=file_path, bot=bot)
 
@@ -164,16 +194,28 @@ async def set_profile_photo(
 )
 @with_account(readonly=False)
 @validate_id("bot")
-async def delete_profile_photo(bot: Union[int, str] = None, account: str = None) -> str:
+async def delete_profile_photo(
+    bot: Union[int, str] = None, photo_id: int = None, account: str = None
+) -> str:
     """
     Remove a profile photo - this account's, or one of the bots it owns.
 
     Args:
         bot: A bot this account owns (ID or @username). Omit for your own.
+        photo_id: Delete this one photo from the history (ids from
+            `get_user_photos`) instead of the current one.
     """
     try:
         cl = get_client(account)
         await ensure_connected(cl)
+        if photo_id is not None:
+            target = await resolve_input_entity(bot, cl) if bot is not None else None
+            match = [p for p in await _photos_of(cl, target, 100) if p.id == photo_id]
+            if not match:
+                return f"Photo {photo_id} is not in that profile's photos; nothing deleted."
+            if photo_id in await cl(functions.photos.DeletePhotosRequest(id=match)):
+                return f"Photo {photo_id} deleted."
+            return f"Telegram did not delete photo {photo_id}; it is still there."
         if bot is not None:
             # A bot's photo is not in the caller's own photo list, so there is
             # nothing to delete BY ID: it is cleared by setting an empty one.
@@ -464,10 +506,13 @@ async def get_user_photos(user_id: Union[int, str], limit: int = 10, account: st
                 user_id=user, offset=0, max_id=0, limit=bound.value
             )
         )
-        ids = [p.id for p in photos.photos]
+        items = [
+            {"photo_id": p.id, "date": p.date.isoformat() if getattr(p, "date", None) else None}
+            for p in photos.photos
+        ]
         return format_tool_result(
-            [{"photo_id": photo_id} for photo_id in ids],
-            dict(bound.metadata, returned=len(ids), has_more=len(ids) >= bound.value),
+            items,
+            dict(bound.metadata, returned=len(items), has_more=len(items) >= bound.value),
         )
     except Exception as e:
         return log_and_format_error("get_user_photos", e, user_id=user_id, limit=limit)

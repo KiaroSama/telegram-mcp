@@ -91,7 +91,7 @@ def _not_a_channel(chat_id, entity):
     kind = get_entity_type(entity)
     return (
         f"{chat_id} is a {kind}, and `channels.CheckUsername`/`UpdateUsername` apply only to "
-        "channels and supergroups. A user's own @handle is account-level - `update_profile` "
+        "channels and supergroups. A user's own @handle is account-level - `set_my_username` "
         "sets that - and a basic group has no public username at all until it is upgraded."
     )
 

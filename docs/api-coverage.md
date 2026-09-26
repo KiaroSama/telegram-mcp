@@ -239,7 +239,9 @@ assumed missing and is not. Nothing below needs building.
 | Set its description / bio | `edit_chat_about` |
 | Its photo | `edit_chat_photo`, `delete_chat_photo` |
 | Own name and bio | `update_profile` |
-| Own profile photo | `set_profile_photo`, `delete_profile_photo` |
+| Own @username | `set_my_username` (`""` removes it) |
+| Own or an owned bot's profile photo | `set_profile_photo` (`bot=`, `replace=True` also deletes the one it replaces), `delete_profile_photo` (`photo_id=` deletes one chosen photo), `get_user_photos` (ids and dates) |
+| An owned bot's name, about, description | `set_bot_info` |
 | Posting in a topic | `topic_id` on `send_message`, `reply_to_message`, `save_draft`, `schedule_message` and the media senders; the id comes from `list_topics`, and every message-returning tool reports the `topic_id` it was in |
 | Slow mode, forum mode | `toggle_slow_mode`, `enable_forum_topics`; the interval and this account's next allowed send are read back by `get_full_chat` |
 | Admin log (recent actions) | `get_recent_actions` |
