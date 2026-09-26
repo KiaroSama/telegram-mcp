@@ -23,6 +23,7 @@ silence past the deadline. A channel that fails hands over to the next one.
 """
 
 import asyncio
+import logging
 import os
 from html import escape as html_escape
 import re
@@ -30,6 +31,7 @@ import secrets
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+from telegram_mcp.safe_log import log_event
 from telegram_mcp.safeguard import sealed
 
 __all__ = [
@@ -228,6 +230,7 @@ class BotChannel:
     async def ask(self, request: ApprovalRequest, timeout: float) -> str:
         from telethon import Button
 
+        started = asyncio.get_running_loop().time()
         self.owner_ids = frozenset(await self.owners_provider())
         client = await self.client_provider()
         future = asyncio.get_running_loop().create_future()
@@ -242,15 +245,27 @@ class BotChannel:
         ]
         sent = []
         outcome = None
+
+        async def send(owner):
+            try:
+                message = await client.send_message(
+                    owner, request.html(), parse_mode="html", buttons=buttons
+                )
+                sent.append((owner, message.id))
+            except Exception:
+                pass  # this account never started the bot; the others still get it
+
         try:
-            for owner in sorted(self.owner_ids):
-                try:
-                    message = await client.send_message(
-                        owner, request.html(), parse_mode="html", buttons=buttons
-                    )
-                    sent.append((owner, message.id))
-                except Exception:
-                    continue  # this account never started the bot; try the others
+            # FR-042: every owner at once, so one slow account holds nobody back.
+            await asyncio.gather(*(send(owner) for owner in sorted(self.owner_ids)))
+            elapsed = asyncio.get_running_loop().time() - started
+            log_event(
+                logging.INFO,
+                "approval_sent",
+                channel="bot",
+                owners=len(sent),
+                ms=int(elapsed * 1000),
+            )
             if not sent:
                 raise RuntimeError("no allowed account could be reached by the approval bot")
             outcome = await _wait(future, timeout)

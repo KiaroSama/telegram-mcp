@@ -41,6 +41,10 @@ class _Channel:
 after_calls = []
 
 
+async def _no_warm():
+    return None
+
+
 async def _identity(account):
     return f"{account} · 7 · @{account}_user"
 
@@ -60,6 +64,7 @@ def _guard(channel=None, *, first_message=False, ghost=True, approval_chats=()):
         account_of=lambda arguments: arguments.get("account", "main"),
         after=lambda account: after_calls.append(account),
         identity=_identity,
+        warm=_no_warm,
         timeout=300,
     )
     return guard, channel
@@ -275,3 +280,35 @@ def test_presence_follows_a_call_that_ran_and_not_a_refused_one():
     _call(guard, "get_history", {"chat_id": 5, "account": "work"})
     _call(guard, "delete_message", {"chat_id": 5, "message_id": 1, "account": "work"})
     assert after_calls == ["work"]
+
+
+def test_the_first_message_starts_one_background_warm_up_that_never_delays_a_call():
+    """FR-042: the approval bot is logged in before the first request, never during one."""
+    started = []
+
+    async def hung_warm():
+        started.append(1)
+        await asyncio.sleep(3600)
+
+    guard, _ = _guard()
+    guard._warm = hung_warm
+
+    async def run():
+        ran = []
+
+        async def call_next(ctx):
+            ran.append(ctx.method)
+            return "RESULT"
+
+        for method in ("tools/list", "tools/call", "tools/list"):
+            ctx = SimpleNamespace(
+                method=method,
+                params={"name": "get_history", "arguments": {}},
+                request_id=1,
+                session=None,
+            )
+            assert await asyncio.wait_for(guard(ctx, call_next), 1) == "RESULT"
+        return ran
+
+    assert asyncio.run(run()) == ["tools/list", "tools/call", "tools/list"]
+    assert started == [1]

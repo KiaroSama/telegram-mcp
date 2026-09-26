@@ -10,6 +10,7 @@ minutes, and inside the 55-second budget the wait itself would be cut off and re
 as a stalled Telegram call. A free call pays nothing but the in-memory checks.
 """
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -127,11 +128,12 @@ class Safeguard:
         after: Optional[Callable[[Optional[str]], None]] = None,
         identity=None,
         sealed_target=None,
+        warm=None,
         protected_paths=None,
         timeout: Optional[float] = None,
     ) -> None:
         defaults = (hints, channels, first_message, ghost_on, approval_chats, account_of, after)
-        if None in defaults or identity is None or sealed_target is None:
+        if None in defaults or identity is None or sealed_target is None or warm is None:
             from telegram_mcp.safeguard import wiring
 
             hints = hints or wiring.tool_hints
@@ -143,6 +145,9 @@ class Safeguard:
             after = after or wiring.after_call
             identity = identity or wiring.identity
             sealed_target = sealed_target or wiring.sealed_target
+            warm = warm or wiring.warm_up
+        self._warm = warm
+        self._warm_task = None  # held: asyncio keeps only a weak reference to a task
         self._hints = hints
         self._channels = channels
         self._first_message = first_message
@@ -185,6 +190,10 @@ class Safeguard:
         )
 
     async def __call__(self, ctx, call_next):
+        if self._warm_task is None:
+            # FR-042: log the approval bot in and learn identities now, in the
+            # background, so the first request is not the one that pays for it.
+            self._warm_task = asyncio.ensure_future(self._warm())
         params = getattr(ctx, "params", None)
         if ctx.method != "tools/call" or ctx.request_id is None or not params:
             return await call_next(ctx)

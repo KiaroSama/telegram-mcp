@@ -17,6 +17,7 @@ from telegram_mcp.safeguard import channels as approvals
 from telegram_mcp.safeguard import sealed
 
 __all__ = [
+    "warm_up",
     "account_of",
     "after_call",
     "approval_chats",
@@ -271,6 +272,27 @@ async def sealed_target(account: Optional[str], arguments: Any) -> bool:
     except Exception:
         pass  # what this process posted is sealed regardless
     return sealed.is_sealed_target(account, arguments)
+
+
+_WARM_SECONDS = 60.0
+
+
+async def warm_up() -> None:
+    """FR-042: be ready before the first request - bot logged in, owners and identities known.
+
+    Started once in the background by the middleware; a failure here only means the
+    first request does this work itself, as it did before.
+    """
+    from telegram_mcp import connection
+
+    token, _ = approvals.bot_settings()
+    steps = [identity(label) for label in list(connection.clients)]
+    if token:
+        steps += [_bot_client(), owner_ids()]
+    try:
+        await asyncio.wait_for(asyncio.gather(*steps, return_exceptions=True), _WARM_SECONDS)
+    except Exception:
+        pass
 
 
 def channels_for(ctx: Any, account: Optional[str]) -> list:

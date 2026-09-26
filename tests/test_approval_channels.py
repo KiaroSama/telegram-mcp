@@ -402,3 +402,26 @@ def test_everything_the_bot_and_saved_messages_show_is_english():
     shown += [request.text(), request.html()]
     assert all(not re.search(r"[؀-ۿ]", text) for text in shown), shown
     assert [ac._APPROVE, ac._DENY, ac._ALWAYS] == ["✅ Approve", "❌ Deny", "♾ Always approve"]
+
+
+def test_every_owner_is_asked_at_the_same_time():
+    """FR-042: one slow account must not hold the request back from the others."""
+
+    class _Slow(_Client):
+        def __init__(self):
+            super().__init__()
+            self.in_flight = 0
+            self.peak = 0
+
+        async def send_message(self, peer, text, **kwargs):
+            self.in_flight += 1
+            self.peak = max(self.peak, self.in_flight)
+            await asyncio.sleep(0.05)
+            self.in_flight -= 1
+            return await super().send_message(peer, text, **kwargs)
+
+    client = _Slow()
+    bot = _bot(client, 111, 222)
+    assert asyncio.run(bot.ask(_request(), 0.2)) == "timed_out"
+    assert client.peak == 2
+    assert len(client.edited) == 2, "each request still loses its buttons"
